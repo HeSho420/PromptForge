@@ -1,0 +1,134 @@
+{
+ "template": "generate_draft",
+ "version": 1,
+ "task": "generate",
+ "description": "DRAFT mode: SDXL + DMD2 4-step speed LoRA - a full render in ~1/6 the time (steps 4, cfg 1). Perfect for iterating on prompt wording; re-run with the normal generate_xl workflow for the final image.",
+ "required_models": [
+  "sdxl-base",
+  "dmd2-sdxl-lora"
+ ],
+ "parameters": {
+  "prompt": {
+   "node": "3",
+   "input": "text"
+  },
+  "negative": {
+   "node": "4",
+   "input": "text"
+  },
+  "seed": {
+   "node": "6",
+   "input": "seed"
+  },
+  "width": {
+   "node": "5",
+   "input": "width"
+  },
+  "height": {
+   "node": "5",
+   "input": "height"
+  }
+ },
+ "graph": {
+  "1": {
+   "class_type": "CheckpointLoaderSimple",
+   "inputs": {
+    "ckpt_name": "sd_xl_base_1.0.safetensors"
+   }
+  },
+  "2": {
+   "class_type": "LoraLoader",
+   "inputs": {
+    "lora_name": "dmd2_sdxl_4step_lora_fp16.safetensors",
+    "strength_model": 1.0,
+    "strength_clip": 1.0,
+    "model": [
+     "1",
+     0
+    ],
+    "clip": [
+     "1",
+     1
+    ]
+   }
+  },
+  "3": {
+   "class_type": "CLIPTextEncode",
+   "inputs": {
+    "text": "",
+    "clip": [
+     "2",
+     1
+    ]
+   }
+  },
+  "4": {
+   "class_type": "CLIPTextEncode",
+   "inputs": {
+    "text": "blurry, low quality, deformed, watermark",
+    "clip": [
+     "2",
+     1
+    ]
+   }
+  },
+  "5": {
+   "class_type": "EmptyLatentImage",
+   "inputs": {
+    "width": 1024,
+    "height": 1024,
+    "batch_size": 1
+   }
+  },
+  "6": {
+   "class_type": "KSampler",
+   "inputs": {
+    "seed": 0,
+    "steps": 4,
+    "cfg": 1.0,
+    "sampler_name": "euler",
+    "scheduler": "sgm_uniform",
+    "denoise": 1.0,
+    "model": [
+     "2",
+     0
+    ],
+    "positive": [
+     "3",
+     0
+    ],
+    "negative": [
+     "4",
+     0
+    ],
+    "latent_image": [
+     "5",
+     0
+    ]
+   }
+  },
+  "7": {
+   "class_type": "VAEDecode",
+   "inputs": {
+    "samples": [
+     "6",
+     0
+    ],
+    "vae": [
+     "1",
+     2
+    ]
+   }
+  },
+  "8": {
+   "class_type": "SaveImage",
+   "inputs": {
+    "filename_prefix": "promptforge_draft",
+    "images": [
+     "7",
+     0
+    ]
+   }
+  }
+ }
+}

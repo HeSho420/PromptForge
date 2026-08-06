@@ -1,0 +1,8 @@
+flask>=3.0
+pillow>=10.0
+anthropic>=0.90  # API LLM fallback only; the app runs without credentials
+# Reads and writes real video. Ships a static ffmpeg binary inside the wheel,
+# so there is nothing to install system-wide and nothing on PATH to depend on
+# (this machine had neither ffmpeg nor any decoder). Needed to turn an
+# uploaded driving video into frames, and frames back into a clip.
+imageio-ffmpeg>=0.5

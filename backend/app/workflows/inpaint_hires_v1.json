@@ -1,0 +1,388 @@
+{
+  "template": "inpaint_hires",
+  "version": 1,
+  "task": "inpaint",
+  "description": "Hi-res crop&stitch inpainting: crop the masked region with margin, upscale it, run modern soft inpainting at high resolution, scale back and composite into the original \u2014 maximum detail for small regions. The backend computes crop_x/crop_y/crop_w/crop_h/up_w/up_h from the mask bounding box.",
+  "required_models": [
+    "sd15-inpaint"
+  ],
+  "parameters": {
+    "checkpoint": {
+      "node": "1",
+      "input": "ckpt_name"
+    },
+    "image": {
+      "node": "2",
+      "input": "image"
+    },
+    "mask": {
+      "node": "3",
+      "input": "image"
+    },
+    "prompt": {
+      "node": "14",
+      "input": "text"
+    },
+    "negative": {
+      "node": "15",
+      "input": "text"
+    },
+    "seed": {
+      "node": "18",
+      "input": "seed"
+    },
+    "steps": {
+      "node": "18",
+      "input": "steps"
+    },
+    "crop_x": [
+      {
+        "node": "4",
+        "input": "x"
+      },
+      {
+        "node": "6",
+        "input": "x"
+      },
+      {
+        "node": "21",
+        "input": "x"
+      }
+    ],
+    "crop_y": [
+      {
+        "node": "4",
+        "input": "y"
+      },
+      {
+        "node": "6",
+        "input": "y"
+      },
+      {
+        "node": "21",
+        "input": "y"
+      }
+    ],
+    "crop_w": [
+      {
+        "node": "4",
+        "input": "width"
+      },
+      {
+        "node": "6",
+        "input": "width"
+      },
+      {
+        "node": "20",
+        "input": "width"
+      }
+    ],
+    "crop_h": [
+      {
+        "node": "4",
+        "input": "height"
+      },
+      {
+        "node": "6",
+        "input": "height"
+      },
+      {
+        "node": "20",
+        "input": "height"
+      }
+    ],
+    "up_w": [
+      {
+        "node": "10",
+        "input": "width"
+      },
+      {
+        "node": "12",
+        "input": "width"
+      }
+    ],
+    "up_h": [
+      {
+        "node": "10",
+        "input": "height"
+      },
+      {
+        "node": "12",
+        "input": "height"
+      }
+    ]
+  },
+  "graph": {
+    "1": {
+      "class_type": "CheckpointLoaderSimple",
+      "inputs": {
+        "ckpt_name": "sd-v1-5-inpainting.safetensors"
+      }
+    },
+    "2": {
+      "class_type": "LoadImage",
+      "inputs": {
+        "image": ""
+      }
+    },
+    "3": {
+      "class_type": "LoadImageMask",
+      "inputs": {
+        "image": "",
+        "channel": "red"
+      }
+    },
+    "4": {
+      "class_type": "ImageCrop",
+      "inputs": {
+        "image": [
+          "2",
+          0
+        ],
+        "x": 0,
+        "y": 0,
+        "width": 512,
+        "height": 512
+      }
+    },
+    "5": {
+      "class_type": "MaskToImage",
+      "inputs": {
+        "mask": [
+          "3",
+          0
+        ]
+      }
+    },
+    "6": {
+      "class_type": "ImageCrop",
+      "inputs": {
+        "image": [
+          "5",
+          0
+        ],
+        "x": 0,
+        "y": 0,
+        "width": 512,
+        "height": 512
+      }
+    },
+    "7": {
+      "class_type": "ImageToMask",
+      "inputs": {
+        "image": [
+          "6",
+          0
+        ],
+        "channel": "red"
+      }
+    },
+    "8": {
+      "class_type": "GrowMask",
+      "inputs": {
+        "mask": [
+          "7",
+          0
+        ],
+        "expand": 8,
+        "tapered_corners": true
+      }
+    },
+    "9": {
+      "class_type": "FeatherMask",
+      "inputs": {
+        "mask": [
+          "8",
+          0
+        ],
+        "left": 6,
+        "top": 6,
+        "right": 6,
+        "bottom": 6
+      }
+    },
+    "10": {
+      "class_type": "ImageScale",
+      "inputs": {
+        "image": [
+          "4",
+          0
+        ],
+        "upscale_method": "lanczos",
+        "width": 1024,
+        "height": 1024,
+        "crop": "disabled"
+      }
+    },
+    "11": {
+      "class_type": "MaskToImage",
+      "inputs": {
+        "mask": [
+          "9",
+          0
+        ]
+      }
+    },
+    "12": {
+      "class_type": "ImageScale",
+      "inputs": {
+        "image": [
+          "11",
+          0
+        ],
+        "upscale_method": "lanczos",
+        "width": 1024,
+        "height": 1024,
+        "crop": "disabled"
+      }
+    },
+    "13": {
+      "class_type": "ImageToMask",
+      "inputs": {
+        "image": [
+          "12",
+          0
+        ],
+        "channel": "red"
+      }
+    },
+    "14": {
+      "class_type": "CLIPTextEncode",
+      "inputs": {
+        "text": "",
+        "clip": [
+          "1",
+          1
+        ]
+      }
+    },
+    "15": {
+      "class_type": "CLIPTextEncode",
+      "inputs": {
+        "text": "blurry, low quality, jpeg artifacts, watermark, text, deformed, disfigured, bad anatomy, extra limbs, extra fingers, mutated hands, malformed limbs, poorly drawn face, poorly drawn hands, unrealistic, oversaturated, visible seam, halo",
+        "clip": [
+          "1",
+          1
+        ]
+      }
+    },
+    "16": {
+      "class_type": "InpaintModelConditioning",
+      "inputs": {
+        "positive": [
+          "14",
+          0
+        ],
+        "negative": [
+          "15",
+          0
+        ],
+        "vae": [
+          "1",
+          2
+        ],
+        "pixels": [
+          "10",
+          0
+        ],
+        "mask": [
+          "13",
+          0
+        ],
+        "noise_mask": true
+      }
+    },
+    "17": {
+      "class_type": "DifferentialDiffusion",
+      "inputs": {
+        "model": [
+          "1",
+          0
+        ]
+      }
+    },
+    "18": {
+      "class_type": "KSampler",
+      "inputs": {
+        "seed": 0,
+        "steps": 34,
+        "cfg": 6.5,
+        "sampler_name": "dpmpp_2m",
+        "scheduler": "karras",
+        "denoise": 1.0,
+        "model": [
+          "17",
+          0
+        ],
+        "positive": [
+          "16",
+          0
+        ],
+        "negative": [
+          "16",
+          1
+        ],
+        "latent_image": [
+          "16",
+          2
+        ]
+      }
+    },
+    "19": {
+      "class_type": "VAEDecode",
+      "inputs": {
+        "samples": [
+          "18",
+          0
+        ],
+        "vae": [
+          "1",
+          2
+        ]
+      }
+    },
+    "20": {
+      "class_type": "ImageScale",
+      "inputs": {
+        "image": [
+          "19",
+          0
+        ],
+        "upscale_method": "lanczos",
+        "width": 512,
+        "height": 512,
+        "crop": "disabled"
+      }
+    },
+    "21": {
+      "class_type": "ImageCompositeMasked",
+      "inputs": {
+        "destination": [
+          "2",
+          0
+        ],
+        "source": [
+          "20",
+          0
+        ],
+        "x": 0,
+        "y": 0,
+        "resize_source": false,
+        "mask": [
+          "9",
+          0
+        ]
+      }
+    },
+    "22": {
+      "class_type": "SaveImage",
+      "inputs": {
+        "filename_prefix": "promptforge",
+        "images": [
+          "21",
+          0
+        ]
+      }
+    }
+  }
+}

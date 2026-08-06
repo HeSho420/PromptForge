@@ -1,0 +1,456 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PromptForge — How the Render Algorithm Works</title>
+<style>
+  :root {
+    --bg: #14120f; --panel: #1c1915; --line: #35302a;
+    --text: #e8e4dc; --muted: #a49c8e; --amber: #e8b64c;
+    --green: #7fc97f; --red: #e07a6a; --blue: #7aa6d8;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 32px 20px 80px; background: var(--bg); color: var(--text);
+    font: 15px/1.6 "Segoe UI", system-ui, sans-serif;
+  }
+  .wrap { max-width: 900px; margin: 0 auto; }
+  h1 { font-size: 26px; margin: 0 0 4px; }
+  h1 span { color: var(--amber); }
+  h2 { font-size: 19px; margin: 48px 0 6px; color: var(--amber); }
+  h2 .n {
+    display: inline-block; width: 26px; height: 26px; line-height: 26px; text-align: center;
+    background: var(--amber); color: #221a0c; border-radius: 50%; font-size: 14px;
+    margin-right: 8px; font-weight: 700;
+  }
+  p.lead { color: var(--muted); margin-top: 0; }
+  p { color: #cfc9bf; }
+  .fig {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
+    padding: 18px; margin: 14px 0; overflow-x: auto;
+  }
+  .fig svg { display: block; margin: 0 auto; max-width: 100%; height: auto; }
+  .cap { font-size: 12.5px; color: var(--muted); text-align: center; margin: 10px 0 0; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 10px; margin: 14px 0; }
+  .card {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px;
+  }
+  .card b { color: var(--amber); display: block; margin-bottom: 3px; font-size: 13.5px; }
+  .card span { font-size: 13px; color: var(--muted); }
+  .rule { border-left: 3px solid var(--amber); padding: 8px 14px; background: var(--panel); border-radius: 0 8px 8px 0; margin: 10px 0; font-size: 14px; }
+  .rule.green { border-color: var(--green); }
+  .rule.red { border-color: var(--red); }
+  code { background: #262219; padding: 1px 6px; border-radius: 5px; font-size: 13px; color: var(--amber); }
+  .legend { display: flex; gap: 18px; flex-wrap: wrap; font-size: 12.5px; color: var(--muted); margin-top: 8px; justify-content: center; }
+  .legend i { display: inline-block; width: 12px; height: 12px; border-radius: 3px; margin-right: 5px; vertical-align: -1px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1><span>PromptForge</span> — How the Render Algorithm Works</h1>
+<p class="lead">The picture book edition. Every diagram below is what actually happens
+when you press <b>Run edit</b> or <b>Forge</b> — no simplifications that lie.</p>
+
+<!-- ============================================================ 1. SYSTEM MAP -->
+<h2><span class="n">1</span>The four brains</h2>
+<p>PromptForge is a conductor. Four local AI engines do the specialist work, and the
+pipeline's job is to ask each one the right question at the right moment.</p>
+
+<div class="fig">
+<svg viewBox="0 0 860 320" xmlns="http://www.w3.org/2000/svg" font-family="Segoe UI, system-ui, sans-serif">
+  <defs>
+    <marker id="a1" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto">
+      <path d="M0,0 L8,4.5 L0,9 z" fill="#a49c8e"/>
+    </marker>
+  </defs>
+  <!-- user -->
+  <rect x="355" y="12" width="150" height="44" rx="10" fill="#262219" stroke="#e8b64c" stroke-width="1.5"/>
+  <text x="430" y="33" text-anchor="middle" fill="#e8e4dc" font-size="14" font-weight="600">You</text>
+  <text x="430" y="48" text-anchor="middle" fill="#a49c8e" font-size="11.5">"change the sky to sunset"</text>
+  <!-- core -->
+  <rect x="290" y="96" width="280" height="58" rx="10" fill="#1c1915" stroke="#e8b64c" stroke-width="2"/>
+  <text x="430" y="120" text-anchor="middle" fill="#e8b64c" font-size="15" font-weight="700">PromptForge pipeline</text>
+  <text x="430" y="138" text-anchor="middle" fill="#a49c8e" font-size="11.5">plans, checks, retries, never trusts blindly</text>
+  <line x1="430" y1="56" x2="430" y2="92" stroke="#a49c8e" stroke-width="1.5" marker-end="url(#a1)"/>
+  <!-- four engines -->
+  <g>
+    <rect x="20"  y="210" width="190" height="72" rx="10" fill="#1c1915" stroke="#7aa6d8" stroke-width="1.5"/>
+    <text x="115" y="233" text-anchor="middle" fill="#7aa6d8" font-size="13.5" font-weight="700">The Planner</text>
+    <text x="115" y="250" text-anchor="middle" fill="#e8e4dc" font-size="12">qwen2.5 (local LLM)</text>
+    <text x="115" y="266" text-anchor="middle" fill="#a49c8e" font-size="11">breaks your request into steps</text>
+    <rect x="235" y="210" width="190" height="72" rx="10" fill="#1c1915" stroke="#7aa6d8" stroke-width="1.5"/>
+    <text x="330" y="233" text-anchor="middle" fill="#7aa6d8" font-size="13.5" font-weight="700">The Eyes</text>
+    <text x="330" y="250" text-anchor="middle" fill="#e8e4dc" font-size="12">llava (vision model)</text>
+    <text x="330" y="266" text-anchor="middle" fill="#a49c8e" font-size="11">looks at images, grades results</text>
+    <rect x="450" y="210" width="190" height="72" rx="10" fill="#1c1915" stroke="#7aa6d8" stroke-width="1.5"/>
+    <text x="545" y="233" text-anchor="middle" fill="#7aa6d8" font-size="13.5" font-weight="700">The Scalpel</text>
+    <text x="545" y="250" text-anchor="middle" fill="#e8e4dc" font-size="12">SAM (segmentation)</text>
+    <text x="545" y="266" text-anchor="middle" fill="#a49c8e" font-size="11">cuts pixel-exact masks</text>
+    <rect x="665" y="210" width="180" height="72" rx="10" fill="#1c1915" stroke="#7aa6d8" stroke-width="1.5"/>
+    <text x="755" y="233" text-anchor="middle" fill="#7aa6d8" font-size="13.5" font-weight="700">The Painter</text>
+    <text x="755" y="250" text-anchor="middle" fill="#e8e4dc" font-size="12">ComfyUI + SD models</text>
+    <text x="755" y="266" text-anchor="middle" fill="#a49c8e" font-size="11">renders the actual pixels</text>
+  </g>
+  <line x1="350" y1="154" x2="130" y2="206" stroke="#a49c8e" stroke-width="1.3" marker-end="url(#a1)"/>
+  <line x1="400" y1="154" x2="335" y2="206" stroke="#a49c8e" stroke-width="1.3" marker-end="url(#a1)"/>
+  <line x1="465" y1="154" x2="540" y2="206" stroke="#a49c8e" stroke-width="1.3" marker-end="url(#a1)"/>
+  <line x1="515" y1="154" x2="745" y2="206" stroke="#a49c8e" stroke-width="1.3" marker-end="url(#a1)"/>
+  <text x="430" y="305" text-anchor="middle" fill="#a49c8e" font-size="11.5">Only ONE engine may hold the GPU at a time — the pipeline frees VRAM before every render.</text>
+</svg>
+</div>
+
+<!-- ============================================================ 2. EDIT PIPELINE -->
+<h2><span class="n">2</span>One edit, start to finish</h2>
+<p>Every Studio edit walks these stages — you can watch them live in the Pipeline stepper.
+The amber loop is the quality engine: a bad render gets retried, but a retry can
+<b>never</b> undo your edit (section 4).</p>
+
+<div class="fig">
+<svg viewBox="0 0 860 560" xmlns="http://www.w3.org/2000/svg" font-family="Segoe UI, system-ui, sans-serif">
+  <defs>
+    <marker id="a2" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto">
+      <path d="M0,0 L8,4.5 L0,9 z" fill="#a49c8e"/>
+    </marker>
+    <marker id="a2y" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto">
+      <path d="M0,0 L8,4.5 L0,9 z" fill="#e8b64c"/>
+    </marker>
+  </defs>
+  <!-- column of stages -->
+  <g>
+    <rect x="70" y="10" width="380" height="52" rx="9" fill="#1c1915" stroke="#35302a"/>
+    <text x="90" y="32" fill="#e8b64c" font-size="13" font-weight="700">PLAN</text>
+    <text x="90" y="49" fill="#cfc9bf" font-size="12">the LLM splits your request into ordered steps</text>
+
+    <rect x="70" y="82" width="380" height="52" rx="9" fill="#1c1915" stroke="#35302a"/>
+    <text x="90" y="104" fill="#e8b64c" font-size="13" font-weight="700">UNDERSTAND</text>
+    <text x="90" y="121" fill="#cfc9bf" font-size="12">vision model maps the scene: objects, lighting, perspective</text>
+
+    <rect x="70" y="154" width="380" height="52" rx="9" fill="#1c1915" stroke="#35302a"/>
+    <text x="90" y="176" fill="#e8b64c" font-size="13" font-weight="700">MASK</text>
+    <text x="90" y="193" fill="#cfc9bf" font-size="12">decide exactly WHICH pixels may change (section 3)</text>
+
+    <rect x="70" y="226" width="380" height="52" rx="9" fill="#1c1915" stroke="#35302a"/>
+    <text x="90" y="248" fill="#e8b64c" font-size="13" font-weight="700">MODEL</text>
+    <text x="90" y="265" fill="#cfc9bf" font-size="12">pick the best checkpoint + technique for this step</text>
+
+    <rect x="70" y="298" width="380" height="52" rx="9" fill="#262219" stroke="#e8b64c" stroke-width="1.5"/>
+    <text x="90" y="320" fill="#e8b64c" font-size="13" font-weight="700">RENDER</text>
+    <text x="90" y="337" fill="#cfc9bf" font-size="12">ComfyUI paints — only inside the mask</text>
+
+    <rect x="70" y="370" width="380" height="52" rx="9" fill="#1c1915" stroke="#35302a"/>
+    <text x="90" y="392" fill="#e8b64c" font-size="13" font-weight="700">INSPECT</text>
+    <text x="90" y="409" fill="#cfc9bf" font-size="12">zoom in on the seam: color/sharpness stats + vision check</text>
+
+    <rect x="70" y="442" width="380" height="52" rx="9" fill="#1c1915" stroke="#35302a"/>
+    <text x="90" y="464" fill="#e8b64c" font-size="13" font-weight="700">SCORE</text>
+    <text x="90" y="481" fill="#cfc9bf" font-size="12">six grades, 0–100 each (realism, accuracy, consistency…)</text>
+
+    <rect x="70" y="514" width="380" height="40" rx="9" fill="#1c1915" stroke="#7fc97f" stroke-width="1.5"/>
+    <text x="90" y="539" fill="#7fc97f" font-size="13" font-weight="700">SAVE  <tspan fill="#cfc9bf" font-weight="400" font-size="12">— a new version; the original is never overwritten</tspan></text>
+  </g>
+  <!-- arrows -->
+  <line x1="260" y1="62"  x2="260" y2="78"  stroke="#a49c8e" stroke-width="1.5" marker-end="url(#a2)"/>
+  <line x1="260" y1="134" x2="260" y2="150" stroke="#a49c8e" stroke-width="1.5" marker-end="url(#a2)"/>
+  <line x1="260" y1="206" x2="260" y2="222" stroke="#a49c8e" stroke-width="1.5" marker-end="url(#a2)"/>
+  <line x1="260" y1="278" x2="260" y2="294" stroke="#a49c8e" stroke-width="1.5" marker-end="url(#a2)"/>
+  <line x1="260" y1="350" x2="260" y2="366" stroke="#a49c8e" stroke-width="1.5" marker-end="url(#a2)"/>
+  <line x1="260" y1="422" x2="260" y2="438" stroke="#a49c8e" stroke-width="1.5" marker-end="url(#a2)"/>
+  <line x1="260" y1="494" x2="260" y2="510" stroke="#a49c8e" stroke-width="1.5" marker-end="url(#a2)"/>
+  <!-- retry loop -->
+  <path d="M 450 468 C 560 468 560 324 454 324" fill="none" stroke="#e8b64c" stroke-width="1.6" stroke-dasharray="6 4" marker-end="url(#a2y)"/>
+  <text x="575" y="390" fill="#e8b64c" font-size="12.5" font-weight="600">below target?</text>
+  <text x="575" y="407" fill="#a49c8e" font-size="11.5">retry the final step</text>
+  <text x="575" y="422" fill="#a49c8e" font-size="11.5">(max 2 rounds, keep</text>
+  <text x="575" y="437" fill="#a49c8e" font-size="11.5">the best — section 4)</text>
+  <!-- multi-step note -->
+  <path d="M 70 324 C 20 324 20 36 66 36" fill="none" stroke="#7aa6d8" stroke-width="1.4" stroke-dasharray="6 4" marker-end="url(#a2)"/>
+  <text x="30" y="280" fill="#7aa6d8" font-size="11.5" text-anchor="middle" transform="rotate(-90 30 280)">next step uses this result as its input</text>
+  <!-- example plan -->
+  <rect x="580" y="30" width="260" height="150" rx="9" fill="#1c1915" stroke="#35302a"/>
+  <text x="598" y="55" fill="#a49c8e" font-size="11.5" font-style="italic">example: "change the shirt to red</text>
+  <text x="598" y="70" fill="#a49c8e" font-size="11.5" font-style="italic">and make it a wide landscape"</text>
+  <text x="598" y="98"  fill="#e8e4dc" font-size="12.5">1. CHANGE_ATTRIBUTE (shirt)</text>
+  <text x="598" y="118" fill="#e8e4dc" font-size="12.5">2. OUTPAINT (canvas)</text>
+  <text x="598" y="145" fill="#a49c8e" font-size="11.5">content edits always run BEFORE</text>
+  <text x="598" y="160" fill="#a49c8e" font-size="11.5">canvas changes — fixed order</text>
+</svg>
+</div>
+
+<!-- ============================================================ 3. MASK DECISION -->
+<h2><span class="n">3</span>How the mask is chosen</h2>
+<p>The mask is the safety fence: the painter can only touch white pixels. Three routes,
+in strict priority order — and the mask is <i>checked by the vision model</i> before
+any paint is spent.</p>
+
+<div class="fig">
+<svg viewBox="0 0 860 430" xmlns="http://www.w3.org/2000/svg" font-family="Segoe UI, system-ui, sans-serif">
+  <defs>
+    <marker id="a3" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto">
+      <path d="M0,0 L8,4.5 L0,9 z" fill="#a49c8e"/>
+    </marker>
+  </defs>
+  <!-- diamond 1 -->
+  <polygon points="430,14 560,58 430,102 300,58" fill="#1c1915" stroke="#e8b64c" stroke-width="1.5"/>
+  <text x="430" y="53" text-anchor="middle" fill="#e8e4dc" font-size="13">did you draw a mask</text>
+  <text x="430" y="70" text-anchor="middle" fill="#e8e4dc" font-size="13">with the brush?</text>
+  <!-- yes -->
+  <line x1="560" y1="58" x2="660" y2="58" stroke="#a49c8e" stroke-width="1.5" marker-end="url(#a3)"/>
+  <text x="600" y="50" fill="#7fc97f" font-size="12" font-weight="700">yes</text>
+  <rect x="665" y="34" width="180" height="48" rx="9" fill="#1c1915" stroke="#7fc97f" stroke-width="1.5"/>
+  <text x="755" y="55" text-anchor="middle" fill="#e8e4dc" font-size="12.5">your mask wins.</text>
+  <text x="755" y="71" text-anchor="middle" fill="#a49c8e" font-size="11.5">always. no second-guessing.</text>
+  <!-- no -->
+  <line x1="430" y1="102" x2="430" y2="132" stroke="#a49c8e" stroke-width="1.5" marker-end="url(#a3)"/>
+  <text x="440" y="122" fill="#e07a6a" font-size="12" font-weight="700">no</text>
+  <!-- diamond 2 -->
+  <polygon points="430,136 580,180 430,224 280,180" fill="#1c1915" stroke="#e8b64c" stroke-width="1.5"/>
+  <text x="430" y="175" text-anchor="middle" fill="#e8e4dc" font-size="13">adding something NEW</text>
+  <text x="430" y="192" text-anchor="middle" fill="#e8e4dc" font-size="13">("add a dog…")?</text>
+  <!-- yes: placement -->
+  <line x1="580" y1="180" x2="660" y2="180" stroke="#a49c8e" stroke-width="1.5" marker-end="url(#a3)"/>
+  <text x="605" y="172" fill="#7fc97f" font-size="12" font-weight="700">yes</text>
+  <rect x="665" y="146" width="180" height="68" rx="9" fill="#1c1915" stroke="#7aa6d8" stroke-width="1.5"/>
+  <text x="755" y="168" text-anchor="middle" fill="#7aa6d8" font-size="12.5" font-weight="700">placement region</text>
+  <text x="755" y="185" text-anchor="middle" fill="#a49c8e" font-size="11.5">the vision model picks an</text>
+  <text x="755" y="200" text-anchor="middle" fill="#a49c8e" font-size="11.5">EMPTY spot that fits the scene</text>
+  <!-- no: segmentation -->
+  <line x1="430" y1="224" x2="430" y2="254" stroke="#a49c8e" stroke-width="1.5" marker-end="url(#a3)"/>
+  <text x="440" y="244" fill="#e07a6a" font-size="12" font-weight="700">no</text>
+  <rect x="300" y="258" width="260" height="64" rx="9" fill="#1c1915" stroke="#7aa6d8" stroke-width="1.5"/>
+  <text x="430" y="280" text-anchor="middle" fill="#7aa6d8" font-size="12.5" font-weight="700">SAM cuts the target object</text>
+  <text x="430" y="297" text-anchor="middle" fill="#a49c8e" font-size="11.5">the scene graph tells it WHERE the</text>
+  <text x="430" y="312" text-anchor="middle" fill="#a49c8e" font-size="11.5">object is ("the car, center-right")</text>
+  <!-- verify -->
+  <line x1="430" y1="322" x2="430" y2="348" stroke="#a49c8e" stroke-width="1.5" marker-end="url(#a3)"/>
+  <rect x="290" y="352" width="280" height="46" rx="9" fill="#1c1915" stroke="#35302a"/>
+  <text x="430" y="372" text-anchor="middle" fill="#e8e4dc" font-size="12.5">vision check: "is this the right selection?"</text>
+  <text x="430" y="389" text-anchor="middle" fill="#a49c8e" font-size="11.5">wrong → ONE corrective re-cut, kept only if it now passes</text>
+  <text x="430" y="420" text-anchor="middle" fill="#a49c8e" font-size="11.5">Every auto-generated mask is shown in the editor, painted red — you can always correct it.</text>
+</svg>
+</div>
+
+<!-- ======================================================= 3b. DID IT OBEY? -->
+<h2><span class="n">3b</span>Did the render actually do what you asked?</h2>
+<p>A render can be beautiful and still ignore half the request. So the request itself is
+turned into a short list of things that must be <i>true of the picture</i>, and each one is
+checked separately.</p>
+
+<div class="fig">
+<svg viewBox="0 0 880 300" xmlns="http://www.w3.org/2000/svg" font-family="Segoe UI, system-ui, sans-serif">
+  <rect x="10" y="14" width="235" height="86" rx="10" fill="#2a2620" stroke="#5c5346"/>
+  <text x="127" y="42" text-anchor="middle" fill="#e8e4dc" font-size="13">your request</text>
+  <text x="127" y="66" text-anchor="middle" fill="#c8b98a" font-size="12.5">“a red car</text>
+  <text x="127" y="84" text-anchor="middle" fill="#c8b98a" font-size="12.5">on a street at night”</text>
+
+  <path d="M248 57 L300 57" stroke="#7d7365" stroke-width="2" marker-end="url(#a4)"/>
+  <defs><marker id="a4" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto">
+    <path d="M0 0 L9 4.5 L0 9 z" fill="#7d7365"/></marker></defs>
+
+  <rect x="303" y="8" width="272" height="98" rx="10" fill="#232a24" stroke="#4e6350"/>
+  <text x="439" y="30" text-anchor="middle" fill="#9fd3a6" font-size="12.5">the planner writes NEUTRAL questions</text>
+  <text x="439" y="52" text-anchor="middle" fill="#e8e4dc" font-size="12">“What colour is the car?” → red</text>
+  <text x="439" y="72" text-anchor="middle" fill="#e8e4dc" font-size="12">“Where is the car?” → on a street</text>
+  <text x="439" y="92" text-anchor="middle" fill="#e8e4dc" font-size="12">“Daytime or nighttime?” → nighttime</text>
+
+  <path d="M578 57 L630 57" stroke="#7d7365" stroke-width="2" marker-end="url(#a4)"/>
+  <rect x="633" y="14" width="235" height="86" rx="10" fill="#2a2620" stroke="#5c5346"/>
+  <text x="750" y="42" text-anchor="middle" fill="#e8e4dc" font-size="13">the vision model answers</text>
+  <text x="750" y="64" text-anchor="middle" fill="#a49c8e" font-size="11.5">one question at a time,</text>
+  <text x="750" y="82" text-anchor="middle" fill="#a49c8e" font-size="11.5">never told what you asked for</text>
+
+  <rect x="120" y="140" width="640" height="66" rx="10" fill="#2d2119" stroke="#7a4a3a"/>
+  <text x="440" y="164" text-anchor="middle" fill="#e3a08a" font-size="12.5">Why hide the request? Because a model that is shown the answer key agrees with it.</text>
+  <text x="440" y="186" text-anchor="middle" fill="#a49c8e" font-size="11.5">Measured on this machine: asked “does this match the request?”, the judge scored a BLANK grey image 40% —</text>
+
+  <rect x="120" y="212" width="640" height="60" rx="10" fill="#232a24" stroke="#4e6350"/>
+  <text x="440" y="236" text-anchor="middle" fill="#9fd3a6" font-size="12.5">…asked the same facts neutrally, it was right 25 times out of 27 on the very same pixels.</text>
+  <text x="440" y="256" text-anchor="middle" fill="#a49c8e" font-size="11.5">A requirement is only reported missing when a second, independent question agrees.</text>
+</svg>
+</div>
+
+<!-- ============================================================ 3c. LADDER -->
+<h2><span class="n">3c</span>If it missed, change the recipe — not the dice</h2>
+<p>Re-rolling the seed of a recipe that already missed is a coin flip on the same coin.
+Every retry now changes something <b>real</b>, cheapest change first, and no combination
+is ever tried twice.</p>
+
+<div class="fig">
+<svg viewBox="0 0 880 260" xmlns="http://www.w3.org/2000/svg" font-family="Segoe UI, system-ui, sans-serif">
+  <rect x="12" y="60" width="186" height="86" rx="10" fill="#232a24" stroke="#4e6350"/>
+  <text x="105" y="88" text-anchor="middle" fill="#9fd3a6" font-size="13">1 · emphasize</text>
+  <text x="105" y="110" text-anchor="middle" fill="#a49c8e" font-size="11.5">same recipe, the missed</text>
+  <text x="105" y="127" text-anchor="middle" fill="#a49c8e" font-size="11.5">words weighted, new seed</text>
+
+  <path d="M202 103 L232 103" stroke="#7d7365" stroke-width="2" marker-end="url(#a5)"/>
+  <defs><marker id="a5" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto">
+    <path d="M0 0 L9 4.5 L0 9 z" fill="#7d7365"/></marker></defs>
+
+  <rect x="235" y="60" width="186" height="86" rx="10" fill="#2a2620" stroke="#5c5346"/>
+  <text x="328" y="88" text-anchor="middle" fill="#c8b98a" font-size="13">2 · different MODEL</text>
+  <text x="328" y="110" text-anchor="middle" fill="#a49c8e" font-size="11.5">only models that can</text>
+  <text x="328" y="127" text-anchor="middle" fill="#a49c8e" font-size="11.5">actually run this job</text>
+
+  <path d="M425 103 L455 103" stroke="#7d7365" stroke-width="2" marker-end="url(#a5)"/>
+
+  <rect x="458" y="60" width="186" height="86" rx="10" fill="#2a2620" stroke="#5c5346"/>
+  <text x="551" y="88" text-anchor="middle" fill="#c8b98a" font-size="13">3 · different WORKFLOW</text>
+  <text x="551" y="110" text-anchor="middle" fill="#a49c8e" font-size="11.5">another proven template,</text>
+  <text x="551" y="127" text-anchor="middle" fill="#a49c8e" font-size="11.5">never a draft one</text>
+
+  <path d="M648 103 L678 103" stroke="#7d7365" stroke-width="2" marker-end="url(#a5)"/>
+  <rect x="681" y="60" width="186" height="86" rx="10" fill="#232a24" stroke="#4e6350"/>
+  <text x="774" y="88" text-anchor="middle" fill="#9fd3a6" font-size="13">keep the best</text>
+  <text x="774" y="110" text-anchor="middle" fill="#a49c8e" font-size="11.5">fewest missed requirements</text>
+  <text x="774" y="127" text-anchor="middle" fill="#a49c8e" font-size="11.5">wins; realism breaks ties</text>
+
+  <rect x="120" y="176" width="640" height="66" rx="10" fill="#232a24" stroke="#4e6350"/>
+  <text x="440" y="200" text-anchor="middle" fill="#9fd3a6" font-size="12.5">SHORTCUT: some misses can never be fixed by trying again.</text>
+  <text x="440" y="222" text-anchor="middle" fill="#a49c8e" font-size="11.5">Unreadable text → the text-capable model. Lighting → the relighting engine. Viewpoint → real multi-view. Those jump straight to step 3.</text>
+</svg>
+</div>
+
+<div class="rule green"><b>Stops as soon as it is right.</b> A first render that delivers every requirement
+ends the job — the ladder costs a full render per rung and is never spent on a picture that already
+obeys. And a request for something deliberately <i>un</i>-photoreal (“a flat cartoon drawing”) counts as
+satisfied: a low realism score is the correct answer there, not a reason to try again.</div>
+
+<!-- ============================================================ 4. QUALITY GATE -->
+<h2><span class="n">4</span>The quality loop — and the rule that protects your edit</h2>
+<p>Alongside the request check, the vision model fills a six-part scorecard. Below the target?
+The final step re-renders (new seed, sharpened prompt, and from round two a different model
+or technique). But here is the part that makes retries <i>safe</i>:</p>
+
+<div class="cards">
+  <div class="card"><b>realism</b><span>does it look like a photo, not AI soup?</span></div>
+  <div class="card"><b>prompt accuracy</b><span>did it actually do what you asked?</span></div>
+  <div class="card"><b>identity preservation</b><span>is everything you did NOT ask about untouched?</span></div>
+  <div class="card"><b>scene consistency</b><span>lighting/perspective still coherent?</span></div>
+  <div class="card"><b>artifact-free</b><span>no seams, smears, extra fingers…</span></div>
+  <div class="card"><b>visual quality</b><span>sharpness, color, overall polish</span></div>
+</div>
+
+<div class="rule red"><b>The problem it solves:</b> a retry that quietly <i>undoes</i> your edit scores
+great on realism and consistency — the old average-based compare would pick it. You saw this live:
+"the pipeline undid the changes I asked for."</div>
+<div class="rule green"><b>The keep-best gate:</b> a retry may replace the current best <b>only if</b>
+prompt-accuracy does not drop more than 5 points. A big accuracy gain (+10) wins even if the average
+slips a little; otherwise the higher average wins. In the logs: <code>a retry is never allowed to undo the edit</code>.</div>
+
+<!-- ============================================================ 5. OUTPAINT -->
+<h2><span class="n">5</span>Outpainting without the tell-tale seam</h2>
+<p>Outpainting = inpainting the new margins. Three rules keep it invisible — each one
+exists because its absence produced a real bug (hard seams, extra people, warping).</p>
+
+<div class="fig">
+<svg viewBox="0 0 860 330" xmlns="http://www.w3.org/2000/svg" font-family="Segoe UI, system-ui, sans-serif">
+  <!-- canvas diagram -->
+  <rect x="150" y="30" width="560" height="180" rx="6" fill="#26221a" stroke="#e8b64c" stroke-width="1.5" stroke-dasharray="7 5"/>
+  <rect x="290" y="30" width="280" height="180" fill="#1c1915" stroke="#7aa6d8" stroke-width="1.5"/>
+  <text x="430" y="110" text-anchor="middle" fill="#e8e4dc" font-size="13.5" font-weight="600">your image</text>
+  <text x="430" y="130" text-anchor="middle" fill="#a49c8e" font-size="11.5">(pixels locked — never repainted)</text>
+  <text x="220" y="110" text-anchor="middle" fill="#e8b64c" font-size="12.5" font-weight="600">new canvas</text>
+  <text x="220" y="128" text-anchor="middle" fill="#a49c8e" font-size="11.5">painted fresh</text>
+  <text x="640" y="110" text-anchor="middle" fill="#e8b64c" font-size="12.5" font-weight="600">new canvas</text>
+  <text x="640" y="128" text-anchor="middle" fill="#a49c8e" font-size="11.5">painted fresh</text>
+  <!-- feather gradients -->
+  <defs>
+    <linearGradient id="fL" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#e8b64c" stop-opacity="0"/><stop offset="1" stop-color="#e8b64c" stop-opacity="0.55"/>
+    </linearGradient>
+    <linearGradient id="fR" x1="1" y1="0" x2="0" y2="0">
+      <stop offset="0" stop-color="#e8b64c" stop-opacity="0"/><stop offset="1" stop-color="#e8b64c" stop-opacity="0.55"/>
+    </linearGradient>
+    <marker id="a5" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto">
+      <path d="M0,0 L8,4.5 L0,9 z" fill="#a49c8e"/>
+    </marker>
+  </defs>
+  <rect x="262" y="30" width="28" height="180" fill="url(#fL)"/>
+  <rect x="570" y="30" width="28" height="180" fill="url(#fR)"/>
+  <line x1="276" y1="222" x2="276" y2="240" stroke="#a49c8e" stroke-width="1.2"/>
+  <line x1="584" y1="222" x2="584" y2="240" stroke="#a49c8e" stroke-width="1.2"/>
+  <text x="430" y="240" text-anchor="middle" fill="#e8b64c" font-size="12">feathered blend zones (64 px) — the paint fades in, so there is no hard line</text>
+  <!-- rules -->
+  <text x="150" y="278" fill="#e8e4dc" font-size="12.5"><tspan fill="#e8b64c" font-weight="700">Prompt rule:</tspan> describe the CONTINUATION of the scene — never the subject.</text>
+  <text x="150" y="298" fill="#e8e4dc" font-size="12.5"><tspan fill="#e8b64c" font-weight="700">Why:</tspan> a prompt that says "a woman on a beach" paints ANOTHER woman in the margin.</text>
+  <text x="150" y="318" fill="#e8e4dc" font-size="12.5"><tspan fill="#e8b64c" font-weight="700">Afterwards:</tspan> the margins are seam-inspected like any inpaint, and bad renders retry.</text>
+</svg>
+</div>
+
+<div class="cards">
+  <div class="card"><b>soft blend, not hard cut</b><span>modern soft-inpaint conditioning (DifferentialDiffusion) replaced the legacy encode that produced the visible boundary.</span></div>
+  <div class="card"><b>best inpaint model</b><span>the highest-ranked installed inpaint checkpoint does the blending — not the 2022-era default.</span></div>
+  <div class="card"><b>anti-duplicate negative</b><span>"extra person, duplicated subject, cloned face, split image…" is always in the negative prompt.</span></div>
+</div>
+
+<!-- ============================================================ 6. FORGE -->
+<h2><span class="n">6</span>Forge: text → image from scratch</h2>
+<p>Generating is different from editing: there is no mask and no original to protect.
+Instead, the LLM <i>writes the render program</i> (a ComfyUI graph) and the pipeline
+refuses to run anything it can't verify.</p>
+
+<div class="fig">
+<svg viewBox="0 0 860 250" xmlns="http://www.w3.org/2000/svg" font-family="Segoe UI, system-ui, sans-serif">
+  <defs>
+    <marker id="a6" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto">
+      <path d="M0,0 L8,4.5 L0,9 z" fill="#a49c8e"/>
+    </marker>
+    <marker id="a6y" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto">
+      <path d="M0,0 L8,4.5 L0,9 z" fill="#e8b64c"/>
+    </marker>
+  </defs>
+  <rect x="15"  y="30" width="150" height="60" rx="9" fill="#1c1915" stroke="#35302a"/>
+  <text x="90" y="55" text-anchor="middle" fill="#e8b64c" font-size="12.5" font-weight="700">TRIAGE</text>
+  <text x="90" y="73" text-anchor="middle" fill="#a49c8e" font-size="11">pick workflow + models,</text>
+  <text x="90" y="86" text-anchor="middle" fill="#a49c8e" font-size="11" opacity="0">.</text>
+  <rect x="190" y="30" width="150" height="60" rx="9" fill="#1c1915" stroke="#35302a"/>
+  <text x="265" y="55" text-anchor="middle" fill="#e8b64c" font-size="12.5" font-weight="700">PLAN GRAPH</text>
+  <text x="265" y="73" text-anchor="middle" fill="#a49c8e" font-size="11">LLM writes the ComfyUI</text>
+  <text x="265" y="86" text-anchor="middle" fill="#a49c8e" font-size="11">node graph</text>
+  <rect x="365" y="30" width="150" height="60" rx="9" fill="#1c1915" stroke="#e07a6a" stroke-width="1.5"/>
+  <text x="440" y="55" text-anchor="middle" fill="#e07a6a" font-size="12.5" font-weight="700">VALIDATE</text>
+  <text x="440" y="73" text-anchor="middle" fill="#a49c8e" font-size="11">vs THIS machine's real</text>
+  <text x="440" y="86" text-anchor="middle" fill="#a49c8e" font-size="11">nodes, models, limits</text>
+  <rect x="540" y="30" width="150" height="60" rx="9" fill="#262219" stroke="#e8b64c" stroke-width="1.5"/>
+  <text x="615" y="55" text-anchor="middle" fill="#e8b64c" font-size="12.5" font-weight="700">RENDER</text>
+  <text x="615" y="73" text-anchor="middle" fill="#a49c8e" font-size="11">VRAM freed first,</text>
+  <text x="615" y="86" text-anchor="middle" fill="#a49c8e" font-size="11">hardware-clamped sizes</text>
+  <rect x="715" y="30" width="130" height="60" rx="9" fill="#1c1915" stroke="#35302a"/>
+  <text x="780" y="55" text-anchor="middle" fill="#e8b64c" font-size="12.5" font-weight="700">JUDGE</text>
+  <text x="780" y="73" text-anchor="middle" fill="#a49c8e" font-size="11">realism score /10</text>
+  <text x="780" y="86" text-anchor="middle" fill="#a49c8e" font-size="11">+ scorecard</text>
+  <line x1="165" y1="60" x2="186" y2="60" stroke="#a49c8e" stroke-width="1.5" marker-end="url(#a6)"/>
+  <line x1="340" y1="60" x2="361" y2="60" stroke="#a49c8e" stroke-width="1.5" marker-end="url(#a6)"/>
+  <line x1="515" y1="60" x2="536" y2="60" stroke="#a49c8e" stroke-width="1.5" marker-end="url(#a6)"/>
+  <line x1="690" y1="60" x2="711" y2="60" stroke="#a49c8e" stroke-width="1.5" marker-end="url(#a6)"/>
+  <!-- validate bounce -->
+  <path d="M 440 90 C 440 130 320 130 290 94" fill="none" stroke="#e07a6a" stroke-width="1.4" stroke-dasharray="6 4" marker-end="url(#a6)"/>
+  <text x="380" y="135" text-anchor="middle" fill="#e07a6a" font-size="11.5">invalid node/model → bounced back with the real options</text>
+  <!-- judge retry -->
+  <path d="M 780 90 C 780 190 300 190 262 94" fill="none" stroke="#e8b64c" stroke-width="1.5" stroke-dasharray="6 4" marker-end="url(#a6y)"/>
+  <text x="530" y="182" text-anchor="middle" fill="#e8b64c" font-size="11.5">low realism → CHANGE STRATEGY (different model / sampler / resolution), replan, render again</text>
+  <text x="430" y="230" text-anchor="middle" fill="#a49c8e" font-size="11.5">Every finished image carries a recipe card: model, sampler, steps, seed, repairs, retries — full provenance.</text>
+</svg>
+</div>
+
+<!-- ============================================================ 7. SELF-HEALING -->
+<h2><span class="n">7</span>The safety nets</h2>
+<p>Everything above assumes things go wrong — because on real hardware they do.
+Each net catches a specific, real failure we have seen:</p>
+
+<div class="cards">
+  <div class="card"><b>ComfyUI crashed?</b><span>auto-restarted from disk, render resumes — a health monitor probes it every 15 s.</span></div>
+  <div class="card"><b>Ollama down?</b><span>restarted before any planning or judging call.</span></div>
+  <div class="card"><b>LLM wrote a bad graph?</b><span>the real error goes back to the LLM for a repair round — with the machine's actual node list.</span></div>
+  <div class="card"><b>Wrong mask?</b><span>one corrective re-segmentation, kept only if the vision check now passes.</span></div>
+  <div class="card"><b>Model missing or gated?</b><span>auto-download with checksum, and a public-mirror hunt when the official file is gated.</span></div>
+  <div class="card"><b>Out of memory?</b><span>canvas/steps clamped to the hardware budget up front; video renders check free memory before the multi-minute load.</span></div>
+  <div class="card"><b>Better model exists?</b><span>the pipeline stages a modern inpaint model download in the background — the next edit uses it.</span></div>
+  <div class="card"><b>Lessons remembered</b><span>every failure diagnosis and proven fix lands in a knowledge base the planner reads next time.</span></div>
+</div>
+
+<p class="cap">PromptForge · render algorithm documentation · generated 2026-07-21 · lives in docs/render-algorithm.html</p>
+</div>
+</body>
+</html>

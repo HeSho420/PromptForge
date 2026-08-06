@@ -1,0 +1,129 @@
+{
+ "template": "generate_xl",
+ "version": 2,
+ "task": "generate",
+ "description": "SDXL text-to-image at 1024px for maximum detail. Needs >= 8 GB VRAM. SDXL wants shorter, natural-language prompts and cfg 5-7. The checkpoint and cfg are swappable so the adherence ladder can change MODEL or guidance strength when a render did not do what the prompt asked.",
+ "required_models": [
+  "sdxl-base"
+ ],
+ "parameters": {
+  "checkpoint": {
+   "node": "1",
+   "input": "ckpt_name"
+  },
+  "prompt": {
+   "node": "2",
+   "input": "text"
+  },
+  "negative": {
+   "node": "3",
+   "input": "text"
+  },
+  "seed": {
+   "node": "5",
+   "input": "seed"
+  },
+  "width": {
+   "node": "4",
+   "input": "width"
+  },
+  "height": {
+   "node": "4",
+   "input": "height"
+  },
+  "steps": {
+   "node": "5",
+   "input": "steps"
+  },
+  "cfg": {
+   "node": "5",
+   "input": "cfg"
+  }
+ },
+ "graph": {
+  "1": {
+   "class_type": "CheckpointLoaderSimple",
+   "inputs": {
+    "ckpt_name": "sd_xl_base_1.0.safetensors"
+   }
+  },
+  "2": {
+   "class_type": "CLIPTextEncode",
+   "inputs": {
+    "text": "",
+    "clip": [
+     "1",
+     1
+    ]
+   }
+  },
+  "3": {
+   "class_type": "CLIPTextEncode",
+   "inputs": {
+    "text": "cartoon, painting, sketch, blurry, low quality, deformed, bad anatomy, watermark, text, jpeg artifacts",
+    "clip": [
+     "1",
+     1
+    ]
+   }
+  },
+  "4": {
+   "class_type": "EmptyLatentImage",
+   "inputs": {
+    "width": 1024,
+    "height": 1024,
+    "batch_size": 1
+   }
+  },
+  "5": {
+   "class_type": "KSampler",
+   "inputs": {
+    "seed": 0,
+    "steps": 30,
+    "cfg": 6.0,
+    "sampler_name": "dpmpp_2m",
+    "scheduler": "karras",
+    "denoise": 1.0,
+    "model": [
+     "1",
+     0
+    ],
+    "positive": [
+     "2",
+     0
+    ],
+    "negative": [
+     "3",
+     0
+    ],
+    "latent_image": [
+     "4",
+     0
+    ]
+   }
+  },
+  "6": {
+   "class_type": "VAEDecode",
+   "inputs": {
+    "samples": [
+     "5",
+     0
+    ],
+    "vae": [
+     "1",
+     2
+    ]
+   }
+  },
+  "7": {
+   "class_type": "SaveImage",
+   "inputs": {
+    "filename_prefix": "promptforge",
+    "images": [
+     "6",
+     0
+    ]
+   }
+  }
+ }
+}

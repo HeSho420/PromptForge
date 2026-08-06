@@ -1,0 +1,94 @@
+{
+  "template": "scene3d",
+  "version": 1,
+  "task": "scene3d",
+  "description": "One ordinary photo to a navigable 3D scene, exported as a textured GLB. MoGe predicts a METRIC point map plus the camera's field of view - unlike the ControlNet depth preprocessors, which return 8-bit normalised disparity and cannot be meshed into a correctly-shaped room. MoGePointMapToMesh triangulates that point map, cuts the triangles that span a depth discontinuity (without which every silhouette drags a rubber sheet back to the horizon) and UV-maps the original photo onto it, so the texture is the photograph itself and needs no unwrapping. Unlike the avatar mesh this is a SCENE: it is viewed from the inside, walking, not orbited.",
+  "required_models": [
+    "moge-v2"
+  ],
+  "parameters": {
+    "model_name": {
+      "node": "1",
+      "input": "model_name"
+    },
+    "image": {
+      "node": "2",
+      "input": "image"
+    },
+    "resolution_level": {
+      "node": "3",
+      "input": "resolution_level"
+    },
+    "fov_x_degrees": {
+      "node": "3",
+      "input": "fov_x_degrees"
+    },
+    "decimation": {
+      "node": "4",
+      "input": "decimation"
+    },
+    "discontinuity_threshold": {
+      "node": "4",
+      "input": "discontinuity_threshold"
+    },
+    "filename_prefix": {
+      "node": "5",
+      "input": "filename_prefix"
+    }
+  },
+  "graph": {
+    "1": {
+      "class_type": "LoadMoGeModel",
+      "inputs": {
+        "model_name": "moge_2_vitl_normal_fp16.safetensors"
+      }
+    },
+    "2": {
+      "class_type": "LoadImage",
+      "inputs": {
+        "image": ""
+      }
+    },
+    "3": {
+      "class_type": "MoGeInference",
+      "inputs": {
+        "moge_model": [
+          "1",
+          0
+        ],
+        "image": [
+          "2",
+          0
+        ],
+        "resolution_level": 9,
+        "fov_x_degrees": 0.0,
+        "batch_size": 1,
+        "force_projection": true,
+        "apply_mask": true
+      }
+    },
+    "4": {
+      "class_type": "MoGePointMapToMesh",
+      "inputs": {
+        "moge_geometry": [
+          "3",
+          0
+        ],
+        "batch_index": 0,
+        "decimation": 4,
+        "discontinuity_threshold": 0.05,
+        "texture": true
+      }
+    },
+    "5": {
+      "class_type": "SaveGLB",
+      "inputs": {
+        "mesh": [
+          "4",
+          0
+        ],
+        "filename_prefix": "promptforge_scene3d"
+      }
+    }
+  }
+}

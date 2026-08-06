@@ -1,0 +1,173 @@
+{
+ "template": "img2img_canny",
+ "version": 1,
+ "task": "img2img",
+ "description": "Structure-locked restyle: extracts the source image's edges (canny) and generates a NEW image that follows them exactly - keeps composition and shapes while changing style/content. Needs the controlnet-union-sdxl model. Strength 0.8 = strict structure; lower it for looser guidance.",
+ "required_models": [
+  "sdxl-base",
+  "controlnet-union-sdxl"
+ ],
+ "parameters": {
+  "prompt": {
+   "node": "4",
+   "input": "text"
+  },
+  "negative": {
+   "node": "5",
+   "input": "text"
+  },
+  "image": {
+   "node": "2",
+   "input": "image"
+  },
+  "seed": {
+   "node": "9",
+   "input": "seed"
+  },
+  "width": {
+   "node": "8",
+   "input": "width"
+  },
+  "height": {
+   "node": "8",
+   "input": "height"
+  },
+  "strength": {
+   "node": "7",
+   "input": "strength"
+  }
+ },
+ "graph": {
+  "1": {
+   "class_type": "CheckpointLoaderSimple",
+   "inputs": {
+    "ckpt_name": "sd_xl_base_1.0.safetensors"
+   }
+  },
+  "2": {
+   "class_type": "LoadImage",
+   "inputs": {
+    "image": ""
+   }
+  },
+  "3": {
+   "class_type": "Canny",
+   "inputs": {
+    "low_threshold": 0.4,
+    "high_threshold": 0.8,
+    "image": [
+     "2",
+     0
+    ]
+   }
+  },
+  "4": {
+   "class_type": "CLIPTextEncode",
+   "inputs": {
+    "text": "",
+    "clip": [
+     "1",
+     1
+    ]
+   }
+  },
+  "5": {
+   "class_type": "CLIPTextEncode",
+   "inputs": {
+    "text": "blurry, low quality, deformed, watermark",
+    "clip": [
+     "1",
+     1
+    ]
+   }
+  },
+  "6": {
+   "class_type": "ControlNetLoader",
+   "inputs": {
+    "control_net_name": "controlnet_union_sdxl_promax.safetensors"
+   }
+  },
+  "7": {
+   "class_type": "ControlNetApplyAdvanced",
+   "inputs": {
+    "strength": 0.8,
+    "start_percent": 0.0,
+    "end_percent": 1.0,
+    "positive": [
+     "4",
+     0
+    ],
+    "negative": [
+     "5",
+     0
+    ],
+    "control_net": [
+     "6",
+     0
+    ],
+    "image": [
+     "3",
+     0
+    ]
+   }
+  },
+  "8": {
+   "class_type": "EmptyLatentImage",
+   "inputs": {
+    "width": 1024,
+    "height": 1024,
+    "batch_size": 1
+   }
+  },
+  "9": {
+   "class_type": "KSampler",
+   "inputs": {
+    "seed": 0,
+    "steps": 30,
+    "cfg": 6.0,
+    "sampler_name": "dpmpp_2m",
+    "scheduler": "karras",
+    "denoise": 1.0,
+    "model": [
+     "1",
+     0
+    ],
+    "positive": [
+     "7",
+     0
+    ],
+    "negative": [
+     "7",
+     1
+    ],
+    "latent_image": [
+     "8",
+     0
+    ]
+   }
+  },
+  "10": {
+   "class_type": "VAEDecode",
+   "inputs": {
+    "samples": [
+     "9",
+     0
+    ],
+    "vae": [
+     "1",
+     2
+    ]
+   }
+  },
+  "11": {
+   "class_type": "SaveImage",
+   "inputs": {
+    "filename_prefix": "promptforge_canny",
+    "images": [
+     "10",
+     0
+    ]
+   }
+  }
+ }
+}

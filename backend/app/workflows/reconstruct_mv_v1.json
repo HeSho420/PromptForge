@@ -1,0 +1,270 @@
+{
+  "template": "reconstruct_mv",
+  "version": 1,
+  "task": "reconstruct",
+  "description": "Four views to a 3D mesh, exported as GLB. Hunyuan3Dv2ConditioningMultiView takes front/left/back/right, and all four are OPTIONAL - so this same graph runs on one view when that is all there is, and gets steadily better as more are supplied. The views come from SV3D, which is already installed: the orbit that used to be the whole avatar now feeds the reconstruction, so the back of a subject is reconstructed from a rendered view rather than invented by the mesh model. Shape only - ComfyUI has no Hunyuan3D texture stage. ModelSamplingAuraFlow and FluxGuidance are NOT optional: without the AuraFlow sampling patch the DiT gets no positional embeddings and KSampler dies with \"'NoneType' object has no attribute 'dtype'\" - copied from ComfyUI's own shipped template after hitting exactly that.",
+  "required_models": [
+    "hunyuan3d-v2-mv"
+  ],
+  "parameters": {
+    "checkpoint": {
+      "node": "1",
+      "input": "ckpt_name"
+    },
+    "front": {
+      "node": "2",
+      "input": "image"
+    },
+    "left": {
+      "node": "3",
+      "input": "image"
+    },
+    "back": {
+      "node": "4",
+      "input": "image"
+    },
+    "right": {
+      "node": "5",
+      "input": "image"
+    },
+    "resolution": {
+      "node": "11",
+      "input": "resolution"
+    },
+    "seed": {
+      "node": "12",
+      "input": "seed"
+    },
+    "steps": {
+      "node": "12",
+      "input": "steps"
+    },
+    "cfg": {
+      "node": "12",
+      "input": "cfg"
+    },
+    "octree_resolution": {
+      "node": "13",
+      "input": "octree_resolution"
+    },
+    "num_chunks": {
+      "node": "13",
+      "input": "num_chunks"
+    },
+    "threshold": {
+      "node": "14",
+      "input": "threshold"
+    },
+    "filename_prefix": {
+      "node": "15",
+      "input": "filename_prefix"
+    },
+    "guidance": {
+      "node": "91",
+      "input": "guidance"
+    },
+    "shift": {
+      "node": "90",
+      "input": "shift"
+    }
+  },
+  "graph": {
+    "1": {
+      "class_type": "ImageOnlyCheckpointLoader",
+      "inputs": {
+        "ckpt_name": "hunyuan3d-dit-v2-mv-turbo_fp16.safetensors"
+      }
+    },
+    "2": {
+      "class_type": "LoadImage",
+      "inputs": {
+        "image": ""
+      }
+    },
+    "3": {
+      "class_type": "LoadImage",
+      "inputs": {
+        "image": ""
+      }
+    },
+    "4": {
+      "class_type": "LoadImage",
+      "inputs": {
+        "image": ""
+      }
+    },
+    "5": {
+      "class_type": "LoadImage",
+      "inputs": {
+        "image": ""
+      }
+    },
+    "6": {
+      "class_type": "CLIPVisionEncode",
+      "inputs": {
+        "clip_vision": [
+          "1",
+          1
+        ],
+        "image": [
+          "2",
+          0
+        ],
+        "crop": "center"
+      }
+    },
+    "7": {
+      "class_type": "CLIPVisionEncode",
+      "inputs": {
+        "clip_vision": [
+          "1",
+          1
+        ],
+        "image": [
+          "3",
+          0
+        ],
+        "crop": "center"
+      }
+    },
+    "8": {
+      "class_type": "CLIPVisionEncode",
+      "inputs": {
+        "clip_vision": [
+          "1",
+          1
+        ],
+        "image": [
+          "4",
+          0
+        ],
+        "crop": "center"
+      }
+    },
+    "9": {
+      "class_type": "CLIPVisionEncode",
+      "inputs": {
+        "clip_vision": [
+          "1",
+          1
+        ],
+        "image": [
+          "5",
+          0
+        ],
+        "crop": "center"
+      }
+    },
+    "10": {
+      "class_type": "Hunyuan3Dv2ConditioningMultiView",
+      "inputs": {
+        "front": [
+          "6",
+          0
+        ],
+        "left": [
+          "7",
+          0
+        ],
+        "back": [
+          "8",
+          0
+        ],
+        "right": [
+          "9",
+          0
+        ]
+      }
+    },
+    "11": {
+      "class_type": "EmptyLatentHunyuan3Dv2",
+      "inputs": {
+        "resolution": 3072,
+        "batch_size": 1
+      }
+    },
+    "12": {
+      "class_type": "KSampler",
+      "inputs": {
+        "seed": 0,
+        "steps": 20,
+        "cfg": 4.0,
+        "sampler_name": "euler",
+        "scheduler": "normal",
+        "denoise": 1.0,
+        "model": [
+          "90",
+          0
+        ],
+        "positive": [
+          "91",
+          0
+        ],
+        "negative": [
+          "10",
+          1
+        ],
+        "latent_image": [
+          "11",
+          0
+        ]
+      }
+    },
+    "13": {
+      "class_type": "VAEDecodeHunyuan3D",
+      "inputs": {
+        "samples": [
+          "12",
+          0
+        ],
+        "vae": [
+          "1",
+          2
+        ],
+        "num_chunks": 8000,
+        "octree_resolution": 256
+      }
+    },
+    "14": {
+      "class_type": "VoxelToMesh",
+      "inputs": {
+        "voxel": [
+          "13",
+          0
+        ],
+        "algorithm": "surface net",
+        "threshold": 0.6
+      }
+    },
+    "15": {
+      "class_type": "SaveGLB",
+      "inputs": {
+        "mesh": [
+          "14",
+          0
+        ],
+        "filename_prefix": "promptforge_mesh"
+      }
+    },
+    "90": {
+      "class_type": "ModelSamplingAuraFlow",
+      "inputs": {
+        "model": [
+          "1",
+          0
+        ],
+        "shift": 1.0
+      }
+    },
+    "91": {
+      "class_type": "FluxGuidance",
+      "inputs": {
+        "conditioning": [
+          "10",
+          0
+        ],
+        "guidance": 3.5
+      }
+    }
+  }
+}

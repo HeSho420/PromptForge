@@ -1,0 +1,159 @@
+{
+  "template": "kontext",
+  "version": 1,
+  "task": "kontext",
+  "description": "Instruction-based editing with FLUX.1 Kontext (12B, Q4 GGUF): give it the image and a plain instruction ('remove the hat', 'make it night') and it edits the whole picture coherently WITHOUT a mask, keeping everything else. Rendered at about 1 megapixel, which is the size it was trained on and 3x faster than native. Requires the 'gguf' node pack (Models tab) + the flux-kontext-q4 model.",
+  "required_models": [
+    "flux-kontext-q4",
+    "flux-t5-fp8",
+    "flux-clip-l",
+    "flux-ae"
+  ],
+  "parameters": {
+    "prompt": {
+      "node": "5",
+      "input": "text"
+    },
+    "image": {
+      "node": "4",
+      "input": "image"
+    },
+    "seed": {
+      "node": "9",
+      "input": "seed"
+    }
+  },
+  "graph": {
+    "1": {
+      "class_type": "UnetLoaderGGUF",
+      "inputs": {
+        "unet_name": "flux1-kontext-dev-Q4_K_S.gguf"
+      }
+    },
+    "2": {
+      "class_type": "DualCLIPLoader",
+      "inputs": {
+        "clip_name1": "clip_l.safetensors",
+        "clip_name2": "t5xxl_fp8_e4m3fn.safetensors",
+        "type": "flux"
+      }
+    },
+    "3": {
+      "class_type": "VAELoader",
+      "inputs": {
+        "vae_name": "ae.safetensors"
+      }
+    },
+    "4": {
+      "class_type": "LoadImage",
+      "inputs": {
+        "image": ""
+      }
+    },
+    "5": {
+      "class_type": "CLIPTextEncode",
+      "inputs": {
+        "text": "",
+        "clip": [
+          "2",
+          0
+        ]
+      }
+    },
+    "6": {
+      "class_type": "VAEEncode",
+      "inputs": {
+        "pixels": [
+          "4",
+          0
+        ],
+        "vae": [
+          "3",
+          0
+        ]
+      }
+    },
+    "7": {
+      "class_type": "ReferenceLatent",
+      "inputs": {
+        "conditioning": [
+          "5",
+          0
+        ],
+        "latent": [
+          "6",
+          0
+        ]
+      }
+    },
+    "8": {
+      "class_type": "FluxGuidance",
+      "inputs": {
+        "guidance": 2.5,
+        "conditioning": [
+          "7",
+          0
+        ]
+      }
+    },
+    "9": {
+      "class_type": "KSampler",
+      "inputs": {
+        "seed": 0,
+        "steps": 20,
+        "cfg": 1.0,
+        "sampler_name": "euler",
+        "scheduler": "simple",
+        "denoise": 1.0,
+        "model": [
+          "1",
+          0
+        ],
+        "positive": [
+          "8",
+          0
+        ],
+        "negative": [
+          "10",
+          0
+        ],
+        "latent_image": [
+          "6",
+          0
+        ]
+      }
+    },
+    "10": {
+      "class_type": "ConditioningZeroOut",
+      "inputs": {
+        "conditioning": [
+          "5",
+          0
+        ]
+      }
+    },
+    "11": {
+      "class_type": "VAEDecode",
+      "inputs": {
+        "samples": [
+          "9",
+          0
+        ],
+        "vae": [
+          "3",
+          0
+        ]
+      }
+    },
+    "12": {
+      "class_type": "SaveImage",
+      "inputs": {
+        "filename_prefix": "promptforge_kontext",
+        "images": [
+          "11",
+          0
+        ]
+      }
+    }
+  }
+}

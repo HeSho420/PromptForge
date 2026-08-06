@@ -1,0 +1,185 @@
+{
+ "template": "video_outpaint",
+ "version": 1,
+ "task": "video_outpaint",
+ "description": "Video outpainting with WAN 2.1 VACE: pad each frame (grey border where new content goes) and supply matching masks as control_video/control_masks; VACE fills the new area consistently across time.",
+ "required_models": [
+  "wan21-vace-1.3b",
+  "wan-umt5-xxl",
+  "wan21-vae"
+ ],
+ "parameters": {
+  "prompt": {
+   "node": "4",
+   "input": "text"
+  },
+  "negative": {
+   "node": "5",
+   "input": "text"
+  },
+  "seed": {
+   "node": "9",
+   "input": "seed"
+  },
+  "length": {
+   "node": "7",
+   "input": "length"
+  },
+  "reference": {
+   "node": "6",
+   "input": "image"
+  }
+ },
+ "graph": {
+  "1": {
+   "class_type": "UNETLoader",
+   "inputs": {
+    "unet_name": "wan2.1_vace_1.3B_fp16.safetensors",
+    "weight_dtype": "default"
+   }
+  },
+  "2": {
+   "class_type": "CLIPLoader",
+   "inputs": {
+    "clip_name": "umt5_xxl_fp8_e4m3fn_scaled.safetensors",
+    "type": "wan",
+    "device": "default"
+   }
+  },
+  "3": {
+   "class_type": "VAELoader",
+   "inputs": {
+    "vae_name": "wan_2.1_vae.safetensors"
+   }
+  },
+  "4": {
+   "class_type": "CLIPTextEncode",
+   "inputs": {
+    "text": "",
+    "clip": [
+     "2",
+     0
+    ]
+   }
+  },
+  "5": {
+   "class_type": "CLIPTextEncode",
+   "inputs": {
+    "text": "blurry, low quality, distorted, glitch, flicker, watermark",
+    "clip": [
+     "2",
+     0
+    ]
+   }
+  },
+  "8": {
+   "class_type": "ModelSamplingSD3",
+   "inputs": {
+    "model": [
+     "1",
+     0
+    ],
+    "shift": 8.0
+   }
+  },
+  "6": {
+   "class_type": "LoadImage",
+   "inputs": {
+    "image": ""
+   }
+  },
+  "7": {
+   "class_type": "WanVaceToVideo",
+   "inputs": {
+    "width": 480,
+    "height": 480,
+    "length": 49,
+    "batch_size": 1,
+    "strength": 1.0,
+    "positive": [
+     "4",
+     0
+    ],
+    "negative": [
+     "5",
+     0
+    ],
+    "vae": [
+     "3",
+     0
+    ],
+    "reference_image": [
+     "6",
+     0
+    ]
+   }
+  },
+  "9": {
+   "class_type": "KSampler",
+   "inputs": {
+    "seed": 0,
+    "steps": 20,
+    "cfg": 5.0,
+    "sampler_name": "uni_pc",
+    "scheduler": "simple",
+    "denoise": 1.0,
+    "model": [
+     "8",
+     0
+    ],
+    "positive": [
+     "7",
+     0
+    ],
+    "negative": [
+     "7",
+     1
+    ],
+    "latent_image": [
+     "7",
+     2
+    ]
+   }
+  },
+  "10": {
+   "class_type": "VAEDecode",
+   "inputs": {
+    "samples": [
+     "9b",
+     0
+    ],
+    "vae": [
+     "3",
+     0
+    ]
+   }
+  },
+  "11": {
+   "class_type": "SaveAnimatedWEBP",
+   "inputs": {
+    "filename_prefix": "promptforge_video",
+    "fps": 24.0,
+    "lossless": false,
+    "quality": 85,
+    "method": "default",
+    "images": [
+     "10",
+     0
+    ]
+   }
+  },
+  "9b": {
+   "class_type": "TrimVideoLatent",
+   "inputs": {
+    "samples": [
+     "9",
+     0
+    ],
+    "trim_amount": [
+     "7",
+     3
+    ]
+   }
+  }
+ }
+}

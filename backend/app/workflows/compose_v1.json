@@ -1,0 +1,238 @@
+{
+ "template": "compose",
+ "version": 1,
+ "task": "compose",
+ "description": "Put the subject of one photo into another photo. The subject image is scaled to the placement box, matted with BiRefNet (a SUBJECT matter - SAM is a PART segmenter and returns a shirt, not a person), the matte is shrunk 2px before feathering so no backdrop halo survives, and the composite then gets one low-denoise pass so lighting, grain and edges agree. denoise is the whole trick: ~0.22 harmonises, above ~0.35 the face starts dissolving, below ~0.12 the paste stays visible.",
+ "required_models": [],
+ "parameters": {
+  "checkpoint": {
+   "node": "1",
+   "input": "ckpt_name"
+  },
+  "image": {
+   "node": "2",
+   "input": "image"
+  },
+  "subject": {
+   "node": "3",
+   "input": "image"
+  },
+  "sub_w": {
+   "node": "4",
+   "input": "width"
+  },
+  "sub_h": {
+   "node": "4",
+   "input": "height"
+  },
+  "pos_x": {
+   "node": "8",
+   "input": "x"
+  },
+  "pos_y": {
+   "node": "8",
+   "input": "y"
+  },
+  "prompt": {
+   "node": "9",
+   "input": "text"
+  },
+  "negative": {
+   "node": "10",
+   "input": "text"
+  },
+  "seed": {
+   "node": "12",
+   "input": "seed"
+  },
+  "denoise": {
+   "node": "12",
+   "input": "denoise"
+  },
+  "steps": {
+   "node": "12",
+   "input": "steps"
+  },
+  "cfg": {
+   "node": "12",
+   "input": "cfg"
+  }
+ },
+ "graph": {
+  "1": {
+   "class_type": "CheckpointLoaderSimple",
+   "inputs": {
+    "ckpt_name": "v1-5-pruned-emaonly.safetensors"
+   }
+  },
+  "2": {
+   "class_type": "LoadImage",
+   "inputs": {
+    "image": ""
+   }
+  },
+  "3": {
+   "class_type": "LoadImage",
+   "inputs": {
+    "image": ""
+   }
+  },
+  "4": {
+   "class_type": "ImageScale",
+   "inputs": {
+    "image": [
+     "3",
+     0
+    ],
+    "upscale_method": "lanczos",
+    "width": 256,
+    "height": 256,
+    "crop": "disabled"
+   }
+  },
+  "5": {
+   "class_type": "BiRefNetRMBG",
+   "inputs": {
+    "image": [
+     "4",
+     0
+    ],
+    "model": "BiRefNet_lite",
+    "sensitivity": 1.0,
+    "mask_blur": 0,
+    "mask_offset": 0,
+    "invert_output": false,
+    "refine_foreground": true,
+    "background": "Alpha",
+    "background_color": "#222222"
+   }
+  },
+  "6": {
+   "class_type": "GrowMask",
+   "inputs": {
+    "mask": [
+     "5",
+     1
+    ],
+    "expand": -2,
+    "tapered_corners": true
+   }
+  },
+  "7": {
+   "class_type": "FeatherMask",
+   "inputs": {
+    "mask": [
+     "6",
+     0
+    ],
+    "left": 4,
+    "top": 4,
+    "right": 4,
+    "bottom": 4
+   }
+  },
+  "8": {
+   "class_type": "ImageCompositeMasked",
+   "inputs": {
+    "destination": [
+     "2",
+     0
+    ],
+    "source": [
+     "4",
+     0
+    ],
+    "x": 0,
+    "y": 0,
+    "resize_source": false,
+    "mask": [
+     "7",
+     0
+    ]
+   }
+  },
+  "9": {
+   "class_type": "CLIPTextEncode",
+   "inputs": {
+    "text": "",
+    "clip": [
+     "1",
+     1
+    ]
+   }
+  },
+  "10": {
+   "class_type": "CLIPTextEncode",
+   "inputs": {
+    "text": "cutout, pasted, sticker, hard edge, halo, floating, mismatched lighting, blurry, deformed, bad anatomy, watermark, text",
+    "clip": [
+     "1",
+     1
+    ]
+   }
+  },
+  "11": {
+   "class_type": "VAEEncode",
+   "inputs": {
+    "pixels": [
+     "8",
+     0
+    ],
+    "vae": [
+     "1",
+     2
+    ]
+   }
+  },
+  "12": {
+   "class_type": "KSampler",
+   "inputs": {
+    "seed": 0,
+    "steps": 24,
+    "cfg": 6.0,
+    "sampler_name": "dpmpp_2m",
+    "scheduler": "karras",
+    "denoise": 0.22,
+    "model": [
+     "1",
+     0
+    ],
+    "positive": [
+     "9",
+     0
+    ],
+    "negative": [
+     "10",
+     0
+    ],
+    "latent_image": [
+     "11",
+     0
+    ]
+   }
+  },
+  "13": {
+   "class_type": "VAEDecode",
+   "inputs": {
+    "samples": [
+     "12",
+     0
+    ],
+    "vae": [
+     "1",
+     2
+    ]
+   }
+  },
+  "14": {
+   "class_type": "SaveImage",
+   "inputs": {
+    "filename_prefix": "promptforge_compose",
+    "images": [
+     "13",
+     0
+    ]
+   }
+  }
+ }
+}

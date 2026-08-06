@@ -1,0 +1,139 @@
+{
+ "template": "upscale_creative",
+ "version": 1,
+ "task": "upscale",
+ "description": "Creative 2x upscale: latent upscale plus a 0.5-denoise diffusion pass. Invents plausible new detail \u2014 better-looking than pure upscalers, less faithful. Set width/height to 2x the source.",
+ "required_models": [],
+ "parameters": {
+  "prompt": {
+   "node": "3",
+   "input": "text"
+  },
+  "image": {
+   "node": "2",
+   "input": "image"
+  },
+  "seed": {
+   "node": "6",
+   "input": "seed"
+  },
+  "width": {
+   "node": "9",
+   "input": "width"
+  },
+  "height": {
+   "node": "9",
+   "input": "height"
+  }
+ },
+ "graph": {
+  "1": {
+   "class_type": "CheckpointLoaderSimple",
+   "inputs": {
+    "ckpt_name": "sd-v1-5-inpainting.safetensors"
+   }
+  },
+  "2": {
+   "class_type": "LoadImage",
+   "inputs": {
+    "image": ""
+   }
+  },
+  "3": {
+   "class_type": "CLIPTextEncode",
+   "inputs": {
+    "text": "extremely detailed, sharp, high resolution",
+    "clip": [
+     "1",
+     1
+    ]
+   }
+  },
+  "4": {
+   "class_type": "CLIPTextEncode",
+   "inputs": {
+    "text": "blurry, low quality, deformed, bad anatomy, watermark, text, jpeg artifacts",
+    "clip": [
+     "1",
+     1
+    ]
+   }
+  },
+  "5": {
+   "class_type": "VAEEncode",
+   "inputs": {
+    "pixels": [
+     "2",
+     0
+    ],
+    "vae": [
+     "1",
+     2
+    ]
+   }
+  },
+  "6": {
+   "class_type": "KSampler",
+   "inputs": {
+    "seed": 0,
+    "steps": 26,
+    "cfg": 7.0,
+    "sampler_name": "dpmpp_2m",
+    "scheduler": "karras",
+    "denoise": 0.5,
+    "model": [
+     "1",
+     0
+    ],
+    "positive": [
+     "3",
+     0
+    ],
+    "negative": [
+     "4",
+     0
+    ],
+    "latent_image": [
+     "9",
+     0
+    ]
+   }
+  },
+  "7": {
+   "class_type": "VAEDecode",
+   "inputs": {
+    "samples": [
+     "6",
+     0
+    ],
+    "vae": [
+     "1",
+     2
+    ]
+   }
+  },
+  "8": {
+   "class_type": "SaveImage",
+   "inputs": {
+    "filename_prefix": "promptforge",
+    "images": [
+     "7",
+     0
+    ]
+   }
+  },
+  "9": {
+   "class_type": "LatentUpscale",
+   "inputs": {
+    "samples": [
+     "5",
+     0
+    ],
+    "upscale_method": "nearest-exact",
+    "width": 1536,
+    "height": 1024,
+    "crop": "disabled"
+   }
+  }
+ }
+}

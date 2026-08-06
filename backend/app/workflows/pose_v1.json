@@ -1,0 +1,190 @@
+{
+  "template": "pose",
+  "version": 1,
+  "task": "pose",
+  "description": "Put a subject into a different pose. The skeleton is read off a REFERENCE image with DWPose and fed to the ControlNet as structure, while the appearance comes from the prompt - so the body moves without the picture being redrawn freehand. Two things this template deliberately does NOT do: it does not preserve the face (a new pose moves the head, so the original face cannot simply be composited back - the pipeline runs the face-swap step afterwards for that), and it does not run on SD1.5 (the only pose-capable ControlNet installed is the SDXL union model). bbox_detector MUST stay on the .torchscript.pt variant: onnxruntime here has no CUDA provider and the .onnx default runs on CPU at minutes per frame.",
+  "required_models": [
+    "sdxl-base",
+    "controlnet-union-sdxl"
+  ],
+  "parameters": {
+    "checkpoint": {
+      "node": "1",
+      "input": "ckpt_name"
+    },
+    "pose_reference": {
+      "node": "2",
+      "input": "image"
+    },
+    "prompt": {
+      "node": "4",
+      "input": "text"
+    },
+    "negative": {
+      "node": "5",
+      "input": "text"
+    },
+    "strength": {
+      "node": "7",
+      "input": "strength"
+    },
+    "width": {
+      "node": "8",
+      "input": "width"
+    },
+    "height": {
+      "node": "8",
+      "input": "height"
+    },
+    "seed": {
+      "node": "9",
+      "input": "seed"
+    },
+    "steps": {
+      "node": "9",
+      "input": "steps"
+    },
+    "cfg": {
+      "node": "9",
+      "input": "cfg"
+    }
+  },
+  "graph": {
+    "1": {
+      "class_type": "CheckpointLoaderSimple",
+      "inputs": {
+        "ckpt_name": "sd_xl_base_1.0.safetensors"
+      }
+    },
+    "2": {
+      "class_type": "LoadImage",
+      "inputs": {
+        "image": ""
+      }
+    },
+    "3": {
+      "class_type": "DWPreprocessor",
+      "inputs": {
+        "image": [
+          "2",
+          0
+        ],
+        "detect_hand": "enable",
+        "detect_body": "enable",
+        "detect_face": "enable",
+        "resolution": 768,
+        "bbox_detector": "yolox_l.torchscript.pt",
+        "pose_estimator": "dw-ll_ucoco_384_bs5.torchscript.pt",
+        "scale_stick_for_xinsr_cn": "disable"
+      }
+    },
+    "4": {
+      "class_type": "CLIPTextEncode",
+      "inputs": {
+        "text": "",
+        "clip": [
+          "1",
+          1
+        ]
+      }
+    },
+    "5": {
+      "class_type": "CLIPTextEncode",
+      "inputs": {
+        "text": "deformed anatomy, extra limbs, extra arms, extra legs, missing limbs, twisted joints, broken hands, fused fingers, disfigured, mangled, floating limbs, duplicate person, lowres, blurry, watermark, text",
+        "clip": [
+          "1",
+          1
+        ]
+      }
+    },
+    "6": {
+      "class_type": "ControlNetLoader",
+      "inputs": {
+        "control_net_name": "controlnet_union_sdxl_promax.safetensors"
+      }
+    },
+    "7": {
+      "class_type": "ControlNetApplyAdvanced",
+      "inputs": {
+        "positive": [
+          "4",
+          0
+        ],
+        "negative": [
+          "5",
+          0
+        ],
+        "control_net": [
+          "6",
+          0
+        ],
+        "image": [
+          "3",
+          0
+        ],
+        "strength": 0.85,
+        "start_percent": 0.0,
+        "end_percent": 0.85
+      }
+    },
+    "8": {
+      "class_type": "EmptyLatentImage",
+      "inputs": {
+        "width": 1024,
+        "height": 1024,
+        "batch_size": 1
+      }
+    },
+    "9": {
+      "class_type": "KSampler",
+      "inputs": {
+        "seed": 0,
+        "steps": 30,
+        "cfg": 6.0,
+        "sampler_name": "dpmpp_2m",
+        "scheduler": "karras",
+        "denoise": 1.0,
+        "model": [
+          "1",
+          0
+        ],
+        "positive": [
+          "7",
+          0
+        ],
+        "negative": [
+          "7",
+          1
+        ],
+        "latent_image": [
+          "8",
+          0
+        ]
+      }
+    },
+    "10": {
+      "class_type": "VAEDecode",
+      "inputs": {
+        "samples": [
+          "9",
+          0
+        ],
+        "vae": [
+          "1",
+          2
+        ]
+      }
+    },
+    "11": {
+      "class_type": "SaveImage",
+      "inputs": {
+        "filename_prefix": "promptforge_pose",
+        "images": [
+          "10",
+          0
+        ]
+      }
+    }
+  }
+}

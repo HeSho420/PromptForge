@@ -1,0 +1,126 @@
+{
+ "template": "style_transfer",
+ "version": 1,
+ "task": "img2img",
+ "description": "Style transfer via low-denoise img2img (0.45): keeps the subject and composition, repaints the style described in the prompt.",
+ "required_models": [],
+ "parameters": {
+  "prompt": {
+   "node": "3",
+   "input": "text"
+  },
+  "negative": {
+   "node": "4",
+   "input": "text"
+  },
+  "image": {
+   "node": "2",
+   "input": "image"
+  },
+  "seed": {
+   "node": "6",
+   "input": "seed"
+  },
+  "denoise": {
+   "node": "6",
+   "input": "denoise"
+  }
+ },
+ "graph": {
+  "1": {
+   "class_type": "CheckpointLoaderSimple",
+   "inputs": {
+    "ckpt_name": "sd-v1-5-inpainting.safetensors"
+   }
+  },
+  "2": {
+   "class_type": "LoadImage",
+   "inputs": {
+    "image": ""
+   }
+  },
+  "3": {
+   "class_type": "CLIPTextEncode",
+   "inputs": {
+    "text": "masterpiece, detailed",
+    "clip": [
+     "1",
+     1
+    ]
+   }
+  },
+  "4": {
+   "class_type": "CLIPTextEncode",
+   "inputs": {
+    "text": "blurry, low quality, deformed, bad anatomy, watermark, text, jpeg artifacts",
+    "clip": [
+     "1",
+     1
+    ]
+   }
+  },
+  "5": {
+   "class_type": "VAEEncode",
+   "inputs": {
+    "pixels": [
+     "2",
+     0
+    ],
+    "vae": [
+     "1",
+     2
+    ]
+   }
+  },
+  "6": {
+   "class_type": "KSampler",
+   "inputs": {
+    "seed": 0,
+    "steps": 30,
+    "cfg": 7.0,
+    "sampler_name": "dpmpp_2m",
+    "scheduler": "karras",
+    "denoise": 0.45,
+    "model": [
+     "1",
+     0
+    ],
+    "positive": [
+     "3",
+     0
+    ],
+    "negative": [
+     "4",
+     0
+    ],
+    "latent_image": [
+     "5",
+     0
+    ]
+   }
+  },
+  "7": {
+   "class_type": "VAEDecode",
+   "inputs": {
+    "samples": [
+     "6",
+     0
+    ],
+    "vae": [
+     "1",
+     2
+    ]
+   }
+  },
+  "8": {
+   "class_type": "SaveImage",
+   "inputs": {
+    "filename_prefix": "promptforge",
+    "images": [
+     "7",
+     0
+    ]
+   }
+  }
+ }
+}

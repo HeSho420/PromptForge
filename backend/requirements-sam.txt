@@ -1,0 +1,9 @@
+# Optional: real segmentation backend (PROMPTFORGE_SEGMENT_BACKEND=sam).
+# Installed separately because torch is large; the core app never imports these.
+# The sam-vit-b checkpoint itself is downloaded via the Models page (registry-
+# verified sha256), NOT by pip.
+torch>=2.2
+numpy>=1.26
+# zip archive rather than git+ so machines without a working git TLS stack
+# (AV interception) can still install; pip handles the download itself.
+segment-anything @ https://github.com/facebookresearch/segment-anything/archive/refs/heads/main.zip

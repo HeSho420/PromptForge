@@ -1,0 +1,180 @@
+{
+ "template": "outpaint",
+ "version": 2,
+ "task": "outpaint",
+ "description": "Soft outpainting: extends the canvas (default 192 px left+right) and continues the scene with the modern soft-inpaint recipe (DifferentialDiffusion + InpaintModelConditioning over a feathered pad mask) so the boundary blends without a visible seam. The prompt must describe the CONTINUATION of the existing scene (background, setting, lighting) - never name the subject, or the model paints a second copy of it in the new space; the negative blocks extra people. Adjust left/top/right/bottom on ImagePadForOutpaint for other directions. Set 'checkpoint' to a dedicated INPAINT model for the best blending.",
+ "required_models": [
+  "sd15-inpaint"
+ ],
+ "parameters": {
+  "checkpoint": {
+   "node": "1",
+   "input": "ckpt_name"
+  },
+  "prompt": {
+   "node": "4",
+   "input": "text"
+  },
+  "negative": {
+   "node": "5",
+   "input": "text"
+  },
+  "image": {
+   "node": "2",
+   "input": "image"
+  },
+  "seed": {
+   "node": "8",
+   "input": "seed"
+  },
+  "left": {
+   "node": "3",
+   "input": "left"
+  },
+  "right": {
+   "node": "3",
+   "input": "right"
+  },
+  "top": {
+   "node": "3",
+   "input": "top"
+  },
+  "bottom": {
+   "node": "3",
+   "input": "bottom"
+  }
+ },
+ "graph": {
+  "1": {
+   "class_type": "CheckpointLoaderSimple",
+   "inputs": {
+    "ckpt_name": "sd-v1-5-inpainting.safetensors"
+   }
+  },
+  "2": {
+   "class_type": "LoadImage",
+   "inputs": {
+    "image": ""
+   }
+  },
+  "3": {
+   "class_type": "ImagePadForOutpaint",
+   "inputs": {
+    "image": [
+     "2",
+     0
+    ],
+    "left": 192,
+    "top": 0,
+    "right": 192,
+    "bottom": 0,
+    "feathering": 64
+   }
+  },
+  "4": {
+   "class_type": "CLIPTextEncode",
+   "inputs": {
+    "text": "",
+    "clip": [
+     "1",
+     1
+    ]
+   }
+  },
+  "5": {
+   "class_type": "CLIPTextEncode",
+   "inputs": {
+    "text": "extra person, additional people, second person, duplicated person, cloned subject, twins, new objects, split image, collage, mirrored image, frame, border, seam, visible edge, blurry, low quality, deformed, bad anatomy, watermark, text, jpeg artifacts",
+    "clip": [
+     "1",
+     1
+    ]
+   }
+  },
+  "6": {
+   "class_type": "DifferentialDiffusion",
+   "inputs": {
+    "model": [
+     "1",
+     0
+    ]
+   }
+  },
+  "7": {
+   "class_type": "InpaintModelConditioning",
+   "inputs": {
+    "positive": [
+     "4",
+     0
+    ],
+    "negative": [
+     "5",
+     0
+    ],
+    "vae": [
+     "1",
+     2
+    ],
+    "pixels": [
+     "3",
+     0
+    ],
+    "mask": [
+     "3",
+     1
+    ],
+    "noise_mask": true
+   }
+  },
+  "8": {
+   "class_type": "KSampler",
+   "inputs": {
+    "seed": 0,
+    "steps": 32,
+    "cfg": 6.5,
+    "sampler_name": "dpmpp_2m",
+    "scheduler": "karras",
+    "denoise": 1.0,
+    "model": [
+     "6",
+     0
+    ],
+    "positive": [
+     "7",
+     0
+    ],
+    "negative": [
+     "7",
+     1
+    ],
+    "latent_image": [
+     "7",
+     2
+    ]
+   }
+  },
+  "9": {
+   "class_type": "VAEDecode",
+   "inputs": {
+    "samples": [
+     "8",
+     0
+    ],
+    "vae": [
+     "1",
+     2
+    ]
+   }
+  },
+  "10": {
+   "class_type": "SaveImage",
+   "inputs": {
+    "filename_prefix": "promptforge_outpaint",
+    "images": [
+     "9",
+     0
+    ]
+   }
+  }
+ }
+}

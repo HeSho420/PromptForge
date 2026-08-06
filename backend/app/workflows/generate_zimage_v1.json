@@ -1,0 +1,138 @@
+{
+ "template": "generate_zimage",
+ "version": 1,
+ "task": "generate",
+ "description": "Z-Image Turbo: photoreal 1024px in only 8 steps AND the best model for LEGIBLE TEXT in the image (signs, labels, posters) that fits 8 GB VRAM. Use for text-in-image requests and fast high-quality generations.",
+ "required_models": [
+  "zimage-turbo",
+  "zimage-text-encoder",
+  "flux-ae"
+ ],
+ "parameters": {
+  "prompt": {
+   "node": "5",
+   "input": "text"
+  },
+  "seed": {
+   "node": "8",
+   "input": "seed"
+  },
+  "width": {
+   "node": "7",
+   "input": "width"
+  },
+  "height": {
+   "node": "7",
+   "input": "height"
+  }
+ },
+ "graph": {
+  "1": {
+   "class_type": "UNETLoader",
+   "inputs": {
+    "unet_name": "z_image_turbo_int8_convrot.safetensors",
+    "weight_dtype": "default"
+   }
+  },
+  "2": {
+   "class_type": "CLIPLoader",
+   "inputs": {
+    "clip_name": "qwen_3_4b.safetensors",
+    "type": "lumina2"
+   }
+  },
+  "3": {
+   "class_type": "VAELoader",
+   "inputs": {
+    "vae_name": "ae.safetensors"
+   }
+  },
+  "4": {
+   "class_type": "ModelSamplingAuraFlow",
+   "inputs": {
+    "shift": 3,
+    "model": [
+     "1",
+     0
+    ]
+   }
+  },
+  "5": {
+   "class_type": "CLIPTextEncode",
+   "inputs": {
+    "text": "",
+    "clip": [
+     "2",
+     0
+    ]
+   }
+  },
+  "6": {
+   "class_type": "ConditioningZeroOut",
+   "inputs": {
+    "conditioning": [
+     "5",
+     0
+    ]
+   }
+  },
+  "7": {
+   "class_type": "EmptySD3LatentImage",
+   "inputs": {
+    "width": 1024,
+    "height": 1024,
+    "batch_size": 1
+   }
+  },
+  "8": {
+   "class_type": "KSampler",
+   "inputs": {
+    "seed": 0,
+    "steps": 8,
+    "cfg": 1.0,
+    "sampler_name": "res_multistep",
+    "scheduler": "simple",
+    "denoise": 1.0,
+    "model": [
+     "4",
+     0
+    ],
+    "positive": [
+     "5",
+     0
+    ],
+    "negative": [
+     "6",
+     0
+    ],
+    "latent_image": [
+     "7",
+     0
+    ]
+   }
+  },
+  "9": {
+   "class_type": "VAEDecode",
+   "inputs": {
+    "samples": [
+     "8",
+     0
+    ],
+    "vae": [
+     "3",
+     0
+    ]
+   }
+  },
+  "10": {
+   "class_type": "SaveImage",
+   "inputs": {
+    "filename_prefix": "promptforge_zimage",
+    "images": [
+     "9",
+     0
+    ]
+   }
+  }
+ }
+}

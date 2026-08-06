@@ -1,0 +1,159 @@
+{
+ "template": "outpaint",
+ "version": 1,
+ "task": "outpaint",
+ "description": "Outpainting: extends the canvas (default 192 px left+right) and paints the new area to continue the scene. Describe the WHOLE scene in the prompt. Adjust left/top/right/bottom on the ImagePadForOutpaint node for other directions.",
+ "required_models": [
+  "sd15-inpaint"
+ ],
+ "parameters": {
+  "prompt": {
+   "node": "4",
+   "input": "text"
+  },
+  "negative": {
+   "node": "5",
+   "input": "text"
+  },
+  "image": {
+   "node": "2",
+   "input": "image"
+  },
+  "seed": {
+   "node": "7",
+   "input": "seed"
+  },
+  "left": {
+   "node": "3",
+   "input": "left"
+  },
+  "right": {
+   "node": "3",
+   "input": "right"
+  },
+  "top": {
+   "node": "3",
+   "input": "top"
+  },
+  "bottom": {
+   "node": "3",
+   "input": "bottom"
+  }
+ },
+ "graph": {
+  "1": {
+   "class_type": "CheckpointLoaderSimple",
+   "inputs": {
+    "ckpt_name": "sd-v1-5-inpainting.safetensors"
+   }
+  },
+  "2": {
+   "class_type": "LoadImage",
+   "inputs": {
+    "image": ""
+   }
+  },
+  "3": {
+   "class_type": "ImagePadForOutpaint",
+   "inputs": {
+    "image": [
+     "2",
+     0
+    ],
+    "left": 192,
+    "top": 0,
+    "right": 192,
+    "bottom": 0,
+    "feathering": 40
+   }
+  },
+  "4": {
+   "class_type": "CLIPTextEncode",
+   "inputs": {
+    "text": "",
+    "clip": [
+     "1",
+     1
+    ]
+   }
+  },
+  "5": {
+   "class_type": "CLIPTextEncode",
+   "inputs": {
+    "text": "frame, border, seam, blurry, low quality, deformed, bad anatomy, watermark, text, jpeg artifacts",
+    "clip": [
+     "1",
+     1
+    ]
+   }
+  },
+  "6": {
+   "class_type": "VAEEncodeForInpaint",
+   "inputs": {
+    "pixels": [
+     "3",
+     0
+    ],
+    "vae": [
+     "1",
+     2
+    ],
+    "mask": [
+     "3",
+     1
+    ],
+    "grow_mask_by": 8
+   }
+  },
+  "7": {
+   "class_type": "KSampler",
+   "inputs": {
+    "seed": 0,
+    "steps": 34,
+    "cfg": 7.0,
+    "sampler_name": "dpmpp_2m",
+    "scheduler": "karras",
+    "denoise": 1.0,
+    "model": [
+     "1",
+     0
+    ],
+    "positive": [
+     "4",
+     0
+    ],
+    "negative": [
+     "5",
+     0
+    ],
+    "latent_image": [
+     "6",
+     0
+    ]
+   }
+  },
+  "8": {
+   "class_type": "VAEDecode",
+   "inputs": {
+    "samples": [
+     "7",
+     0
+    ],
+    "vae": [
+     "1",
+     2
+    ]
+   }
+  },
+  "9": {
+   "class_type": "SaveImage",
+   "inputs": {
+    "filename_prefix": "promptforge_outpaint",
+    "images": [
+     "8",
+     0
+    ]
+   }
+  }
+ }
+}

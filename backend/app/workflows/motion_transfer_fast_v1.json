@@ -1,0 +1,263 @@
+{
+ "template": "motion_transfer_fast",
+ "version": 1,
+ "task": "motion_transfer",
+ "description": "Motion transfer with the CausVid distill LoRA: the same WAN 2.1 VACE 1.3B pipeline in a quarter of the sampling steps, at cfg 1. Used for LONG clips, where the quality template would spend hours: the per-frame quality is a little lower, but it is the difference between a finished clip and no clip. cfg MUST stay at 1 - a distilled model given real guidance produces burnt frames. Same 4n+1 length rule and the same memory ceiling as motion_transfer.",
+ "required_models": [
+  "wan21-vace-1.3b",
+  "wan21-vae",
+  "wan-umt5-xxl",
+  "causvid-wan13b-lora"
+ ],
+ "parameters": {
+  "prompt": {
+   "node": "4",
+   "input": "text"
+  },
+  "negative": {
+   "node": "5",
+   "input": "text"
+  },
+  "reference": {
+   "node": "6",
+   "input": "image"
+  },
+  "control": {
+   "node": "7",
+   "input": "image"
+  },
+  "mask": {
+   "node": "8",
+   "input": "image"
+  },
+  "width": {
+   "node": "10",
+   "input": "width"
+  },
+  "height": {
+   "node": "10",
+   "input": "height"
+  },
+  "length": {
+   "node": "10",
+   "input": "length"
+  },
+  "strength": {
+   "node": "10",
+   "input": "strength"
+  },
+  "seed": {
+   "node": "12",
+   "input": "seed"
+  },
+  "steps": {
+   "node": "12",
+   "input": "steps"
+  },
+  "cfg": {
+   "node": "12",
+   "input": "cfg"
+  },
+  "fps": {
+   "node": "15",
+   "input": "fps"
+  },
+  "lora_strength": {
+   "node": "16",
+   "input": "strength_model"
+  }
+ },
+ "graph": {
+  "1": {
+   "class_type": "UNETLoader",
+   "inputs": {
+    "unet_name": "wan2.1_vace_1.3B_fp16.safetensors",
+    "weight_dtype": "default"
+   }
+  },
+  "2": {
+   "class_type": "CLIPLoader",
+   "inputs": {
+    "clip_name": "umt5_xxl_fp8_e4m3fn_scaled.safetensors",
+    "type": "wan",
+    "device": "default"
+   }
+  },
+  "3": {
+   "class_type": "VAELoader",
+   "inputs": {
+    "vae_name": "wan_2.1_vae.safetensors"
+   }
+  },
+  "4": {
+   "class_type": "CLIPTextEncode",
+   "inputs": {
+    "text": "",
+    "clip": [
+     "2",
+     0
+    ]
+   }
+  },
+  "5": {
+   "class_type": "CLIPTextEncode",
+   "inputs": {
+    "text": "blurry, low quality, distorted, glitch, flicker, watermark, text, static, frozen, deformed hands, extra limbs, duplicated person",
+    "clip": [
+     "2",
+     0
+    ]
+   }
+  },
+  "6": {
+   "class_type": "LoadImage",
+   "inputs": {
+    "image": ""
+   }
+  },
+  "7": {
+   "class_type": "LoadImage",
+   "inputs": {
+    "image": ""
+   }
+  },
+  "8": {
+   "class_type": "LoadImage",
+   "inputs": {
+    "image": ""
+   }
+  },
+  "9": {
+   "class_type": "ImageToMask",
+   "inputs": {
+    "image": [
+     "8",
+     0
+    ],
+    "channel": "red"
+   }
+  },
+  "10": {
+   "class_type": "WanVaceToVideo",
+   "inputs": {
+    "width": 480,
+    "height": 480,
+    "length": 25,
+    "batch_size": 1,
+    "strength": 1.0,
+    "positive": [
+     "4",
+     0
+    ],
+    "negative": [
+     "5",
+     0
+    ],
+    "vae": [
+     "3",
+     0
+    ],
+    "control_video": [
+     "7",
+     0
+    ],
+    "control_masks": [
+     "9",
+     0
+    ],
+    "reference_image": [
+     "6",
+     0
+    ]
+   }
+  },
+  "11": {
+   "class_type": "ModelSamplingSD3",
+   "inputs": {
+    "model": [
+     "16",
+     0
+    ],
+    "shift": 8.0
+   }
+  },
+  "12": {
+   "class_type": "KSampler",
+   "inputs": {
+    "seed": 0,
+    "steps": 6,
+    "cfg": 1.0,
+    "sampler_name": "uni_pc",
+    "scheduler": "simple",
+    "denoise": 1.0,
+    "model": [
+     "11",
+     0
+    ],
+    "positive": [
+     "10",
+     0
+    ],
+    "negative": [
+     "10",
+     1
+    ],
+    "latent_image": [
+     "10",
+     2
+    ]
+   }
+  },
+  "13": {
+   "class_type": "TrimVideoLatent",
+   "inputs": {
+    "samples": [
+     "12",
+     0
+    ],
+    "trim_amount": [
+     "10",
+     3
+    ]
+   }
+  },
+  "14": {
+   "class_type": "VAEDecode",
+   "inputs": {
+    "samples": [
+     "13",
+     0
+    ],
+    "vae": [
+     "3",
+     0
+    ]
+   }
+  },
+  "15": {
+   "class_type": "SaveAnimatedWEBP",
+   "inputs": {
+    "images": [
+     "14",
+     0
+    ],
+    "filename_prefix": "promptforge_motion",
+    "fps": 16.0,
+    "lossless": true,
+    "quality": 100,
+    "method": "default"
+   }
+  },
+  "16": {
+   "class_type": "LoraLoaderModelOnly",
+   "inputs": {
+    "model": [
+     "1",
+     0
+    ],
+    "lora_name": "Wan21_CausVid_bidirect2_T2V_1_3B_lora_rank32.safetensors",
+    "strength_model": 1.0
+   }
+  }
+ }
+}

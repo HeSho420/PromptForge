@@ -1,0 +1,152 @@
+{
+ "template": "restore_photo",
+ "version": 1,
+ "task": "img2img",
+ "description": "Old-photo restoration chain: 4x AI upscale to recover detail, resize, then a gentle 0.3-denoise diffusion pass to clean damage and noise.",
+ "required_models": [
+  "upscale-ultrasharp"
+ ],
+ "parameters": {
+  "image": {
+   "node": "2",
+   "input": "image"
+  },
+  "prompt": {
+   "node": "6",
+   "input": "text"
+  },
+  "seed": {
+   "node": "9",
+   "input": "seed"
+  }
+ },
+ "graph": {
+  "1": {
+   "class_type": "CheckpointLoaderSimple",
+   "inputs": {
+    "ckpt_name": "sd-v1-5-inpainting.safetensors"
+   }
+  },
+  "2": {
+   "class_type": "LoadImage",
+   "inputs": {
+    "image": ""
+   }
+  },
+  "3": {
+   "class_type": "UpscaleModelLoader",
+   "inputs": {
+    "model_name": "4x-UltraSharp.safetensors"
+   }
+  },
+  "4": {
+   "class_type": "ImageUpscaleWithModel",
+   "inputs": {
+    "upscale_model": [
+     "3",
+     0
+    ],
+    "image": [
+     "2",
+     0
+    ]
+   }
+  },
+  "5": {
+   "class_type": "ImageScale",
+   "inputs": {
+    "image": [
+     "4",
+     0
+    ],
+    "upscale_method": "lanczos",
+    "width": 1024,
+    "height": 1024,
+    "crop": "disabled"
+   }
+  },
+  "6": {
+   "class_type": "CLIPTextEncode",
+   "inputs": {
+    "text": "restored old photograph, clean, sharp, natural colors",
+    "clip": [
+     "1",
+     1
+    ]
+   }
+  },
+  "7": {
+   "class_type": "CLIPTextEncode",
+   "inputs": {
+    "text": "scratches, dust, noise, faded, blurry, low quality, deformed, bad anatomy, watermark, text, jpeg artifacts",
+    "clip": [
+     "1",
+     1
+    ]
+   }
+  },
+  "8": {
+   "class_type": "VAEEncode",
+   "inputs": {
+    "pixels": [
+     "5",
+     0
+    ],
+    "vae": [
+     "1",
+     2
+    ]
+   }
+  },
+  "9": {
+   "class_type": "KSampler",
+   "inputs": {
+    "seed": 0,
+    "steps": 30,
+    "cfg": 6.0,
+    "sampler_name": "dpmpp_2m",
+    "scheduler": "karras",
+    "denoise": 0.3,
+    "model": [
+     "1",
+     0
+    ],
+    "positive": [
+     "6",
+     0
+    ],
+    "negative": [
+     "7",
+     0
+    ],
+    "latent_image": [
+     "8",
+     0
+    ]
+   }
+  },
+  "10": {
+   "class_type": "VAEDecode",
+   "inputs": {
+    "samples": [
+     "9",
+     0
+    ],
+    "vae": [
+     "1",
+     2
+    ]
+   }
+  },
+  "11": {
+   "class_type": "SaveImage",
+   "inputs": {
+    "filename_prefix": "promptforge_restore",
+    "images": [
+     "10",
+     0
+    ]
+   }
+  }
+ }
+}

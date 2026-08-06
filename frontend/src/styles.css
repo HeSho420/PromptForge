@@ -1,0 +1,906 @@
+/* PromptForge — "darkroom" design system.
+   Graphite surfaces, amber safelight for actions, rubylith red reserved for
+   the mask overlay (the one place red means something). */
+
+:root {
+  --ink: #16181d;
+  --panel: #1e2128;
+  --panel-2: #24272f;
+  --line: #2e323c;
+  --text: #e9e7e2;
+  --muted: #9a978f;
+  --safelight: #e8a33d;
+  --safelight-dim: #8a6224;
+  --ruby: #e0442c;            /* mask overlay only */
+  --ok: #6fbf82;
+  --err: #d96a5b;
+  --radius: 10px;
+  --font-ui: "Instrument Sans", system-ui, sans-serif;
+  --font-display: "Bricolage Grotesque", var(--font-ui);
+  --font-mono: "Spline Sans Mono", ui-monospace, monospace;
+
+  /* ---- motion tokens ----------------------------------------------------
+     Every duration and easing in this file comes from here. That is not
+     tidiness: the reduced-motion rule at the end of the file collapses these
+     tokens, so any motion written with them is accessible by construction and
+     nobody has to remember. A literal duration is a bug.
+
+     Durations. Under ~100ms reads as instant rather than as an animation, so
+     --dur-1 is for pure colour feedback where a visible tween feels like lag.
+     150-250ms is the band for small controls; larger surfaces may take longer
+     without feeling slow, because perceived speed is distance over time. */
+  --dur-1: 90ms;    /* hover tint, focus ring, icon colour */
+  --dur-2: 160ms;   /* buttons, chips, segmented controls */
+  --dur-3: 240ms;   /* cards, list items, page content */
+  --dur-4: 360ms;   /* panels opening, large surfaces */
+  --dur-5: 560ms;   /* progress and gauges — slow reads as *measuring* */
+
+  /* Easing. Entrances DECELERATE: the element arrives fast (responsive) and
+     lands gently (natural). Exits accelerate away instead of lingering. The
+     browser default `ease` starts slow, which is exactly backwards for an
+     entrance and is why the old UI felt sluggish. */
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-in: cubic-bezier(0.55, 0, 1, 0.45);
+  --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);   /* small overshoot */
+
+  --slide: 10px;
+  --lift-1: 1px;
+  --lift-2: 3px;
+}
+
+* { box-sizing: border-box; }
+html, body, #root { height: 100%; margin: 0; }
+body {
+  background:
+    radial-gradient(1200px 700px at 85% -10%, #1d2027 0%, transparent 60%),
+    radial-gradient(1000px 640px at -8% 108%, #1e1b15 0%, transparent 55%),
+    var(--ink);
+  color: var(--text);
+  font-family: var(--font-ui);
+  font-size: 14.5px;
+  line-height: 1.5;
+}
+
+/* subtle custom scrollbars to match the darkroom */
+* { scrollbar-width: thin; scrollbar-color: var(--line) transparent; }
+*::-webkit-scrollbar { width: 10px; height: 10px; }
+*::-webkit-scrollbar-thumb { background: var(--line); border-radius: 99px; }
+*::-webkit-scrollbar-track { background: transparent; }
+
+.app { display: flex; height: 100%; }
+
+/* ---- left rail ---- */
+.rail {
+  width: 200px; flex-shrink: 0; display: flex; flex-direction: column;
+  border-right: 1px solid var(--line); padding: 18px 12px; gap: 4px;
+}
+.wordmark {
+  font-family: var(--font-display); font-weight: 700; font-size: 19px;
+  letter-spacing: 0.01em; padding: 4px 10px 16px;
+}
+/* The wordmark's glow. `text-shadow` cannot be composited, and the rail is
+   never hidden, so the old rule re-rasterised text forever. Same look, but
+   the shadow is painted once and only its opacity breathes. */
+.wordmark em { color: var(--safelight); font-style: normal; position: relative; }
+.wordmark em::after {
+  content: "Forge"; position: absolute; inset: 0; pointer-events: none;
+  color: transparent; text-shadow: 0 0 14px rgba(232, 163, 61, 0.45);
+  opacity: 0; will-change: opacity;
+  animation: glowFade 5s var(--ease-in-out) infinite;
+}
+@keyframes glowFade { 0%, 100% { opacity: 0; } 50% { opacity: 1; } }
+.rail button {
+  all: unset; cursor: pointer; padding: 9px 10px; border-radius: 8px;
+  color: var(--muted); font-weight: 500; display: flex; gap: 9px; align-items: center;
+  transition: color var(--dur-1) var(--ease-out), background var(--dur-1) var(--ease-out);
+}
+.rail button svg { flex-shrink: 0; opacity: 0.75; }
+.rail button:hover { color: var(--text); background: var(--panel); }
+.rail button { position: relative; }
+/* The active marker used to be an inset box-shadow, which snapped while the
+   background faded — a visible mismatch on the most-used control in the app.
+   As a scaled pseudo-element it grows in with the rest of the state change. */
+.rail button::before {
+  content: ""; position: absolute; left: 0; top: 7px; bottom: 7px; width: 2px;
+  background: var(--safelight); border-radius: 2px;
+  transform: scaleY(0); transform-origin: center;
+  transition: transform var(--dur-2) var(--ease-spring);
+}
+.rail button.active::before { transform: scaleY(1); }
+.rail button.active {
+  color: var(--text); background: var(--panel-2);
+}
+.rail button.active svg { color: var(--safelight); opacity: 1; }
+.rail button:focus-visible, button:focus-visible, [tabindex]:focus-visible {
+  outline: 2px solid var(--safelight); outline-offset: 2px;
+}
+.rail .spacer { flex: 1; }
+.rail-status {
+  display: flex; align-items: center; gap: 8px; padding: 8px 10px;
+  font-size: 12px; color: var(--muted);
+  font-family: var(--font-mono); letter-spacing: 0.02em;
+}
+.dot {
+  width: 8px; height: 8px; border-radius: 99px; background: var(--muted);
+  flex-shrink: 0;
+}
+.dot.good { background: var(--ok); box-shadow: 0 0 6px var(--ok); }
+.dot.bad { background: var(--err); box-shadow: 0 0 6px var(--err); }
+
+/* ---- motion (all disabled by the prefers-reduced-motion rule below) ---- */
+@keyframes fadeUp {
+  from { opacity: 0; transform: translateY(var(--slide)); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes imgIn {
+  from { opacity: 0; filter: saturate(0.4); }
+  to { opacity: 1; filter: none; }
+}
+@keyframes shimmer {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(240%); }
+}
+
+/* ---- main column ---- */
+.main { flex: 1; overflow-y: auto; padding: 26px 30px 60px; }
+/* scale sanely from laptop to ultrawide: content column caps, gutters grow */
+.main > * { max-width: 1240px; }
+
+/* Page switching.
+   The old rule staggered `.main > *`, but those children are the eight PAGE
+   HOSTS, not page content — so five of the eight tabs waited out a 120ms
+   delay at opacity 0, then faded in as the PRODUCT of two stacked curves,
+   settling at 400ms. Measured, not guessed. One curve, no delay, and the
+   outgoing page now actually leaves instead of vanishing. */
+/* FAIL-SAFE BY CONSTRUCTION. The visible state is plain `opacity: 1` and the
+   hidden state is plain `display: none` — neither waits on a transition.
+
+   The first attempt here transitioned `display` with `allow-discrete`, which
+   defers `display: none` until the transition FINISHES. Measured in a pane
+   that was not compositing: the outgoing page sat at `display: block;
+   opacity: 0` indefinitely — invisible but still occupying layout, with its
+   controls still focusable. Any environment where a transition stalls (a
+   background tab, a hitched frame) reproduces it.
+
+   So the entrance is an ANIMATION, not a transition. If it runs you get the
+   slide; if it never runs, the base style is already correct and the page is
+   simply there. The cost is losing the exit fade, which is a fair trade for
+   a page that can never strand itself. */
+.page-host { opacity: 1; transform: none; }
+.page-host:not(.is-hidden) {
+  animation: pageIn var(--dur-3) var(--ease-out);
+}
+.page-host.is-hidden { display: none; }
+@keyframes pageIn {
+  from { opacity: 0; transform: translateY(var(--slide)); }
+  to { opacity: 1; transform: none; }
+}
+@media (min-width: 1700px) {
+  .main { padding-left: max(30px, calc((100% - 1400px) / 2)); }
+  body { font-size: 15.5px; }
+}
+h1 {
+  font-family: var(--font-display); font-weight: 700; font-size: 26px;
+  margin: 0 0 4px;
+}
+.sub { color: var(--muted); margin: 0 0 22px; max-width: 62ch; }
+h2 { font-family: var(--font-display); font-weight: 500; font-size: 17px; margin: 0 0 10px; }
+
+/* ---- studio layout ---- */
+.studio { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 22px; align-items: start; }
+.panel {
+  background: linear-gradient(180deg, var(--panel) 0%, #1c1f26 100%);
+  border: 1px solid var(--line);
+  border-radius: var(--radius); padding: 16px;
+  /* the inset line is a lit top edge — surfaces read as facing the light */
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.22),
+              inset 0 1px 0 rgba(255, 255, 255, 0.035);
+}
+
+/* canvas gets a film-frame treatment */
+.frame {
+  position: relative; border-radius: var(--radius); overflow: hidden;
+  border: 1px solid var(--line); background:
+    repeating-linear-gradient(45deg, #1a1d23 0 12px, #191c22 12px 24px);
+  display: flex; align-items: center; justify-content: center; min-height: 340px;
+}
+.frame canvas { display: block; max-width: 100%; height: auto; touch-action: none; }
+
+/* upload area */
+.drop {
+  border: 1.5px dashed var(--line); border-radius: var(--radius);
+  padding: 46px 20px; text-align: center; color: var(--muted); cursor: pointer;
+  transition: border-color var(--dur-1) var(--ease-out), background var(--dur-1) var(--ease-out);
+}
+.drop.over, .drop:hover { border-color: var(--safelight); color: var(--text); }
+.drop input { display: none; }
+
+/* controls */
+label.field { display: block; font-size: 12.5px; color: var(--muted); margin: 14px 0 5px; }
+textarea, input[type="text"] {
+  width: 100%; background: var(--ink); color: var(--text);
+  border: 1px solid var(--line); border-radius: 8px; padding: 10px 11px;
+  font: inherit; resize: vertical;
+}
+textarea:focus, input[type="text"]:focus { outline: none; border-color: var(--safelight-dim); }
+
+.btn {
+  all: unset; cursor: pointer; border-radius: 8px; padding: 9px 14px;
+  font-weight: 600; text-align: center; display: inline-flex; gap: 7px;
+  align-items: center; justify-content: center;
+  transition: transform var(--dur-2) var(--ease-out), filter var(--dur-2) var(--ease-out), box-shadow var(--dur-2) var(--ease-out);
+}
+.btn:hover:not(:disabled) { transform: translateY(-1px); }
+.btn:active:not(:disabled) { transform: translateY(0) scale(0.985); }
+.btn.primary {
+  background: linear-gradient(180deg, #f0b658 0%, var(--safelight) 55%, #d9942f 100%);
+  color: #221a0c;
+}
+.btn.primary:hover { filter: brightness(1.07); box-shadow: 0 4px 14px rgba(232, 163, 61, 0.25); }
+.btn.primary:disabled { background: var(--safelight-dim); color: #3a3225; cursor: not-allowed; }
+.btn.ghost { border: 1px solid var(--line); color: var(--text); }
+.btn.ghost:hover { border-color: var(--muted); }
+.btn.danger { border: 1px solid var(--err); color: var(--err); }
+.btn.danger:hover:not(:disabled) { background: rgba(217, 106, 91, 0.12); box-shadow: 0 4px 14px rgba(217, 106, 91, 0.18); }
+.btn.danger:disabled { opacity: 0.5; cursor: not-allowed; }
+.btn.small { padding: 5px 10px; font-size: 12.5px; font-weight: 500; }
+.row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.stack { display: flex; flex-direction: column; gap: 10px; }
+
+/* brush toolbar */
+.toolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 10px; }
+.toolbar input[type="range"] { accent-color: var(--safelight); width: 110px; }
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+.seg button {
+  all: unset; cursor: pointer; padding: 6px 11px; font-size: 12.5px; color: var(--muted);
+  transition: color var(--dur-1) var(--ease-out),
+              background var(--dur-2) var(--ease-out);
+}
+.seg button:hover { color: var(--text); }
+.seg button.on { background: var(--panel-2); color: var(--text); }
+
+/* badges + status */
+.badge {
+  font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.04em;
+  padding: 2px 7px; border-radius: 99px; border: 1px solid var(--line);
+  color: var(--muted); text-transform: uppercase;
+}
+.badge.mock { border-color: var(--safelight-dim); color: var(--safelight); }
+.badge.prov-local { color: var(--ok); border-color: var(--ok); text-transform: none; }
+.badge.prov-api { color: #7fb2e5; border-color: #3d5a78; text-transform: none; }
+.badge.pending, .badge.retrying { color: var(--safelight); border-color: var(--safelight-dim); }
+.badge.running { color: var(--text); border-color: var(--muted); animation: pulse 1.6s ease-in-out infinite; }
+.badge.completed { color: var(--ok); border-color: var(--ok); }
+.badge.failed { color: var(--err); border-color: var(--err); }
+.badge.cancelled { color: var(--muted); }
+
+.notice { border-left: 3px solid var(--err); padding: 8px 12px; color: var(--err); background: var(--panel); border-radius: 0 8px 8px 0; }
+.notice.info { border-left-color: var(--safelight); color: var(--text); }
+
+/* job list */
+.job { border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel); }
+.job summary {
+  display: flex; gap: 10px; align-items: center; padding: 12px 14px;
+  cursor: pointer; list-style: none;
+}
+.job summary::-webkit-details-marker { display: none; }
+.job .mono { font-family: var(--font-mono); font-size: 12px; color: var(--muted); }
+.job .grow { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.logs {
+  border-top: 1px solid var(--line); padding: 10px 14px; margin: 0;
+  font-family: var(--font-mono); font-size: 12px; line-height: 1.7;
+  max-height: 260px; overflow-y: auto; white-space: pre-wrap;
+}
+.logs .error { color: var(--err); }
+.logs .debug { color: var(--muted); }
+
+/* gallery */
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 16px; }
+.card {
+  background: var(--panel); border: 1px solid var(--line);
+  border-radius: var(--radius); overflow: hidden;
+  transition: transform var(--dur-3) var(--ease-out), box-shadow var(--dur-3) var(--ease-out), border-color var(--dur-3) var(--ease-out);
+}
+.card:hover {
+  transform: translateY(-3px);
+  border-color: var(--muted);
+  box-shadow: 0 10px 26px rgba(0, 0, 0, 0.35);
+}
+.card img, .card video {
+  width: 100%; aspect-ratio: 4/3; object-fit: cover; display: block;
+  background: var(--ink);
+}
+/* Images fade in when they LOAD, not when they mount. The old rule ran the
+   fade on mount, but gallery images are lazy — so the animation played out
+   against a blank box and the decoded image then hard-popped in afterwards.
+   `.is-loaded` is set from the img's own onLoad. */
+.card img, .compare img, .thumb-row img, .panel > img, .civitai-card > img {
+  opacity: 0;
+  transition: opacity var(--dur-3) var(--ease-out);
+}
+.card img.is-loaded, .compare img.is-loaded, .thumb-row img.is-loaded,
+.panel > img.is-loaded, .civitai-card > img.is-loaded { opacity: 1; }
+.card .meta { padding: 10px 12px; font-size: 12.5px; color: var(--muted); }
+.card .meta strong { color: var(--text); font-weight: 600; }
+
+/* before/after slider — the AFTER image (in flow) sets the frame; the before
+   image is positioned by the component at the same scale, centered, so an
+   outpainted result is never stretched or cropped into the original's box. */
+.compare { position: relative; overflow: hidden; border-radius: var(--radius); border: 1px solid var(--line); background: var(--bg, #101010); }
+.compare img { display: block; width: 100%; }
+.compare .overlay { position: absolute; inset: 0; }
+.compare .handle {
+  position: absolute; top: 0; bottom: 0; width: 2px; background: var(--safelight);
+  cursor: ew-resize;
+}
+.compare .handle::after {
+  content: "◂ ▸"; position: absolute; top: 50%; left: 50%;
+  transform: translate(-50%, -50%); background: var(--safelight); color: #221a0c;
+  border-radius: 99px; padding: 3px 8px; font-size: 11px; white-space: nowrap;
+}
+
+/* tables (models) */
+table { width: 100%; border-collapse: collapse; }
+th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { color: var(--muted); font-weight: 500; font-size: 12.5px; }
+td .mono { font-family: var(--font-mono); font-size: 12px; }
+
+.empty { color: var(--muted); border: 1.5px dashed var(--line); border-radius: var(--radius); padding: 36px; text-align: center; }
+.dim { color: var(--muted); }
+
+/* pipeline stepper — live view of what the render is doing */
+.pipeline { display: flex; flex-direction: column; gap: 6px; }
+.pipe-row { display: flex; flex-wrap: wrap; gap: 6px 4px; align-items: center; }
+.pipe-step {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 12px; color: var(--muted); padding: 4px 10px;
+  border: 1px solid var(--line); border-radius: 99px;
+  position: relative; background: var(--panel);
+}
+.pipe-step svg { opacity: 0.85; flex-shrink: 0; }
+.pipe-step + .pipe-step::before {
+  content: ""; position: absolute; left: -5px; top: 50%; width: 5px;
+  border-top: 1px solid var(--line);
+}
+.pipe-step.done {
+  color: var(--ok); border-color: rgba(111, 191, 130, 0.55);
+  background: rgba(111, 191, 130, 0.07);
+}
+.pipe-step.done .pipe-dot { animation: chipPop 260ms cubic-bezier(0.34, 1.56, 0.64, 1); }
+/* The running step: a lit border that travels around the pill. Two stacked
+   backgrounds — panel fill in the padding box, a moving gradient in the
+   border box — so only the 1px rim animates, nothing repaints inside. */
+.pipe-step.current {
+  color: var(--safelight); border-color: transparent;
+  background:
+    linear-gradient(var(--panel-2), var(--panel-2)) padding-box,
+    linear-gradient(110deg, var(--safelight-dim) 0%, var(--safelight) 30%,
+      #f4c87e 50%, var(--safelight) 70%, var(--safelight-dim) 100%)
+      border-box;
+  background-size: auto, 240% 100%;
+  box-shadow: 0 0 16px rgba(232, 163, 61, 0.15);
+  animation: pipeRim 2.4s linear infinite;
+}
+@keyframes pipeRim {
+  from { background-position: 0 0, 240% 0; }
+  to { background-position: 0 0, 0% 0; }
+}
+.pipe-step.current .pipe-dot::after {
+  content: ""; display: inline-block; width: 8px; height: 8px;
+  border-radius: 99px; border: 2px solid var(--safelight);
+  border-top-color: transparent; animation: spin 0.8s linear infinite;
+}
+.pipe-dot { display: inline-flex; min-width: 10px; justify-content: center; }
+.pipe-detail { font-size: 11.5px; color: var(--muted); font-family: var(--font-mono); }
+.pipe-elapsed { font-size: 11px; color: var(--muted); margin-left: 4px; }
+@keyframes pulse { 50% { opacity: 0.55; } }
+
+/* download / render progress bar */
+.progress {
+  position: relative; height: 20px; border-radius: 99px;
+  background: var(--ink); border: 1px solid var(--line); overflow: hidden;
+}
+.progress-fill {
+  height: 100%; background: linear-gradient(90deg, var(--safelight-dim), var(--safelight));
+  transition: width var(--dur-5) var(--ease-out); position: relative; overflow: hidden;
+}
+.progress-fill::after {
+  content: ""; position: absolute; inset: 0; width: 40%;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.28), transparent);
+  animation: shimmer 1.4s var(--ease-in-out) infinite;
+}
+.progress-label {
+  position: absolute; inset: 0; display: flex; align-items: center;
+  justify-content: center; font-size: 11px; font-family: var(--font-mono);
+  color: var(--text); text-shadow: 0 1px 2px rgba(0,0,0,0.6);
+}
+
+/* GPU meter (rail) */
+.gpu-meter { padding: 6px 10px 2px; display: flex; flex-direction: column; gap: 4px; }
+.gpu-line {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 10.5px; color: var(--muted);
+}
+.gpu-line > span:first-child { width: 32px; }
+.gpu-line .mono { font-family: var(--font-mono); min-width: 34px; text-align: right; }
+.gpu-bar {
+  flex: 1; height: 5px; border-radius: 99px; background: var(--ink);
+  border: 1px solid var(--line); overflow: hidden;
+}
+.gpu-bar > div { height: 100%; background: var(--ok); transition: width var(--dur-5) var(--ease-out); }
+.gpu-bar > div.hot { background: var(--err); }
+
+/* avatar page */
+.thumb-row { display: flex; flex-wrap: wrap; gap: 8px; }
+.thumb-row img {
+  height: 72px; border-radius: 8px; border: 1px solid var(--line);
+  object-fit: cover;
+}
+.coverage {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(84px, 1fr));
+  gap: 8px;
+}
+.coverage-bin {
+  display: flex; flex-direction: column; align-items: center; gap: 2px;
+  padding: 10px 4px; border: 1px solid var(--line); border-radius: 10px;
+  font-size: 11.5px; color: var(--muted);
+}
+.coverage-bin strong { font-size: 16px; color: var(--text); }
+.coverage-bin.have { border-color: var(--ok); }
+.coverage-bin.have strong { color: var(--ok); }
+.coverage-bin.miss { border-style: dashed; border-color: var(--err); }
+.drop input[type="file"] { display: none; }
+
+/* inline spinner (respects reduced-motion via the global rule below) */
+.spinner {
+  width: 13px; height: 13px; border-radius: 99px; flex-shrink: 0;
+  border: 2px solid rgba(0, 0, 0, 0.35); border-top-color: transparent;
+  animation: spin 0.8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+@media (max-width: 900px) {
+  .app { flex-direction: column; }
+  .rail { width: 100%; flex-direction: row; overflow-x: auto; border-right: 0; border-bottom: 1px solid var(--line); padding: 10px; align-items: center; }
+  .wordmark { padding: 0 10px; }
+  .rail .spacer, .rail-status { display: none; }
+  .rail button svg { display: none; }
+  .studio { grid-template-columns: 1fr; }
+  .main { padding: 18px 14px 60px; }
+}
+
+/* The reduced-motion rule lives at the END of this file, so it wins without
+   !important on anything token-driven. See the block after the last section. */
+
+/* ---- behind-the-scenes log feed (Pipeline) ---- */
+.pipe-toggle { margin-left: auto; font-size: 11.5px; padding: 3px 9px; }
+.logfeed {
+  max-height: 220px; overflow-y: auto; border: 1px solid var(--line);
+  border-radius: 10px; padding: 8px 10px; background: var(--ink);
+  font-family: var(--font-mono); font-size: 11.5px; line-height: 1.55;
+  /* The feed auto-scrolls to the bottom every time it polls. Assigning
+     scrollTop is an instant jump; this turns the same assignment into a
+     glide, which is the actual perceived jank in the log panel. Explicitly
+     reset under reduced motion — scroll-behavior is NOT covered by the
+     duration overrides at the end of this file. */
+  scroll-behavior: smooth;
+}
+@media (prefers-reduced-motion: reduce) { .logfeed { scroll-behavior: auto; } }
+.logline { color: var(--muted); word-break: break-word; }
+/* Off-screen log lines and gallery tiles skip layout and paint entirely —
+   these lists grow to hundreds of rows while polling every 1.5s. */
+.logfeed > .logline { content-visibility: auto; contain-intrinsic-size: auto 20px; }
+.logline.stage { color: var(--text); font-weight: 600; margin-top: 4px; }
+.logline.err { color: var(--err); }
+.logline.llm { color: var(--accent, #d8b46a); }
+.log-t { opacity: 0.45; margin-right: 8px; font-size: 10.5px; }
+.log-brain { margin-right: 5px; }
+
+/* ---- orbit viewer (movable avatar) ---- */
+.orbit {
+  position: relative; user-select: none; touch-action: none;
+  border: 1px solid var(--line); border-radius: 12px; overflow: hidden;
+  background: var(--ink); cursor: grab; max-width: 420px;
+}
+.orbit:active { cursor: grabbing; }
+.orbit img { width: 100%; display: block; pointer-events: none; }
+.orbit .orbit-hint {
+  position: absolute; bottom: 8px; left: 0; right: 0; text-align: center;
+  font-size: 11.5px; color: var(--muted); pointer-events: none;
+  text-shadow: 0 1px 3px rgba(0,0,0,0.7);
+}
+.orbit .orbit-angle {
+  position: absolute; top: 8px; right: 10px; font-family: var(--font-mono);
+  font-size: 11px; color: var(--muted); pointer-events: none;
+}
+.avatar-list { display: flex; flex-wrap: wrap; gap: 8px; }
+.avatar-chip {
+  display: flex; align-items: center; gap: 8px; padding: 6px 12px 6px 6px;
+  border: 1px solid var(--line); border-radius: 99px; background: none;
+  color: var(--text); cursor: pointer; font-size: 13px;
+}
+.avatar-chip img {
+  width: 30px; height: 30px; border-radius: 99px; object-fit: cover;
+}
+.avatar-chip.on { border-color: var(--accent, #d8b46a); }
+
+/* models table: inline download progress */
+.cell-progress {
+  position: relative; height: 6px; border-radius: 99px; overflow: hidden;
+  background: var(--line); min-width: 90px; margin-top: 5px;
+}
+.cell-progress > div {
+  position: absolute; inset: 0 auto 0 0; background: var(--ok);
+  border-radius: 99px; transition: width var(--dur-5) var(--ease-out);
+}
+
+/* ---- web-search activity (the program is out on the internet) ---- */
+.searchbar {
+  position: relative; display: flex; align-items: center; gap: 8px;
+  padding: 8px 12px; border: 1px solid var(--line); border-radius: 10px;
+  overflow: hidden; font-size: 12.5px; color: var(--text);
+  background: var(--ink);
+}
+.searchbar .search-globe { animation: globeSpin 2.4s ease-in-out infinite; }
+@keyframes globeSpin {
+  0%, 100% { transform: rotate(-14deg) scale(1); }
+  50% { transform: rotate(14deg) scale(1.15); }
+}
+.searchbar .search-sweep {
+  position: absolute; inset: 0; pointer-events: none;
+  background: linear-gradient(100deg, transparent 20%,
+    rgba(216, 180, 106, 0.14) 50%, transparent 80%);
+  background-size: 220% 100%;
+  animation: sweep 1.6s linear infinite;
+}
+@keyframes sweep { from { background-position: 160% 0; } to { background-position: -60% 0; } }
+.logline.search { color: #7fb7e6; }
+
+/* ---- more life across the app ---- */
+.page-host > * { animation: fadeUp var(--dur-3) var(--ease-out) both; }
+.pipe-step { transition: color var(--dur-2) var(--ease-out), transform var(--dur-2) var(--ease-out); }
+.pipe-step.current { transform: translateY(-1px); }
+.avatar-chip { transition: border-color var(--dur-2) var(--ease-out), transform var(--dur-2) var(--ease-out); }
+.avatar-chip:hover { transform: translateY(-1px); }
+.avatar-chip.on { animation: chipPop 260ms cubic-bezier(0.34, 1.56, 0.64, 1); }
+@keyframes chipPop { from { transform: scale(0.94); } to { transform: scale(1); } }
+.orbit img { transition: opacity var(--dur-1) var(--ease-out); }
+.btn.primary { position: relative; overflow: hidden; }
+.btn.primary::after {
+  content: ""; position: absolute; inset: 0; pointer-events: none;
+  background: linear-gradient(110deg, transparent 30%,
+    rgba(255, 255, 255, 0.18) 50%, transparent 70%);
+  background-size: 250% 100%; background-position: 180% 0;
+  transition: background-position var(--dur-5) var(--ease-out);
+}
+.btn.primary:hover:not(:disabled)::after { background-position: -80% 0; }
+/* NOTE: this file used to redeclare .progress-fill and .cell-progress > div
+   here with a second, green, background-position sheen. Two consequences:
+   the later background-image overrode the amber gradient above, so the
+   progress bar rendered GREEN against a design language whose whole point is
+   an amber safelight; and the two sheens ran at different periods on the same
+   20px bar, beating against each other. Both duplicates are gone — the
+   definitions above are now the only ones, with a single composited
+   translateX shimmer. */
+
+/* ---- expected render time ---- */
+.pipe-eta {
+  font-size: 11.5px; color: var(--accent, #d8b46a); white-space: nowrap;
+  border: 1px solid var(--line); border-radius: 99px; padding: 1px 8px;
+}
+.logline.eta { color: var(--accent, #d8b46a); }
+
+/* ---- 3D-environment avatar viewer (dependency-free CSS 3D) ---- */
+.scene3d {
+  position: relative; width: 100%; max-width: 460px; height: 360px;
+  perspective: 900px; perspective-origin: 50% 40%; overflow: hidden;
+  border: 1px solid var(--line); border-radius: 14px; cursor: grab;
+  background:
+    radial-gradient(120% 90% at 50% 0%, rgba(120,150,190,0.10), transparent 60%),
+    linear-gradient(180deg, var(--panel, #14171c) 0%, var(--ink) 100%);
+  touch-action: none; user-select: none;
+}
+.scene3d:active { cursor: grabbing; }
+.scene3d-world {
+  position: absolute; inset: 0; transform-style: preserve-3d;
+  transition: transform 60ms linear;
+}
+/* ground plane laid flat under the subject */
+.scene3d-ground {
+  position: absolute; left: 50%; top: 72%; width: 900px; height: 900px;
+  margin-left: -450px; transform: rotateX(90deg); transform-origin: 50% 0;
+  background-image:
+    linear-gradient(rgba(150,170,200,0.14) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(150,170,200,0.14) 1px, transparent 1px);
+  background-size: 44px 44px;
+  -webkit-mask-image: radial-gradient(closest-side, #000 40%, transparent 78%);
+  mask-image: radial-gradient(closest-side, #000 40%, transparent 78%);
+}
+/* soft contact shadow on the ground */
+.scene3d-shadow {
+  position: absolute; left: 50%; top: 72%; width: 160px; height: 60px;
+  border-radius: 50%; transform-origin: 50% 50%;
+  background: radial-gradient(closest-side, rgba(0,0,0,0.5), transparent 72%);
+}
+/* the subject stands upright, faces the camera (billboard) */
+.scene3d-subject {
+  position: absolute; left: 50%; bottom: 26%; height: 62%;
+  transform-origin: 50% 100%; filter: drop-shadow(0 6px 10px rgba(0,0,0,0.45));
+  pointer-events: none; image-rendering: auto;
+}
+
+/* ---- ProcessFX: the live picture of what is being done to the image ----
+   A canvas overlay animates the ACTUAL operation (background dissolving,
+   grid refining, noise crystallising…) with a caption naming it. The old
+   generic render-sweep lived here; it survives as ProcessFX's fallback
+   effect, drawn on the canvas instead of by CSS. */
+.fx-layer {
+  position: absolute; inset: 0; pointer-events: none; z-index: 2;
+  border-radius: inherit; overflow: hidden;
+}
+.fx-layer canvas {
+  position: absolute; inset: 0; width: 100%; height: 100%; display: block;
+}
+.fx-caption {
+  position: absolute; left: 50%; bottom: 10px; transform: translateX(-50%);
+  display: inline-flex; align-items: center; gap: 7px; max-width: 92%;
+  padding: 5px 13px; border-radius: 99px; white-space: nowrap; overflow: hidden;
+  background: rgba(10, 12, 16, 0.74);
+  border: 1px solid rgba(232, 163, 61, 0.35);
+  color: var(--text); font-size: 12px; letter-spacing: 0.02em;
+  backdrop-filter: blur(3px);
+  animation: fadeUp var(--dur-3) var(--ease-out) both;
+}
+.fx-caption-dot {
+  width: 7px; height: 7px; border-radius: 99px; flex-shrink: 0;
+  background: var(--safelight); box-shadow: 0 0 8px var(--safelight);
+  animation: pulse 1.4s ease-in-out infinite;
+}
+.fx-caption-ellipsis::after {
+  content: "…";
+  animation: pulse 1.6s ease-in-out infinite;
+}
+
+/* A stage for workflows whose working image is not already on screen
+   (forge, motion, avatar): the source image with the FX above it, or —
+   with .empty — the FX alone on its own backdrop. */
+.fx-stage {
+  position: relative; border-radius: var(--radius); overflow: hidden;
+  border: 1px solid var(--line); background: var(--ink);
+  animation: fadeUp var(--dur-3) var(--ease-out) both;
+}
+.fx-stage.empty { aspect-ratio: 16 / 9; }
+.fx-stage-img {
+  display: block; width: 100%; max-height: 380px; object-fit: contain;
+  background: var(--ink);
+}
+/* The "rendering" glow. It used to animate box-shadow on `.frame` — the
+   largest element in the app, min 340px tall and up to 1240 wide — which
+   forces a full re-rasterisation every frame, for minutes, at exactly the
+   moment the machine is busy rendering. The shadow is now painted ONCE on a
+   pseudo-element and only its opacity moves, which the compositor handles for
+   free. Identical look, none of the cost. */
+.frame.render-live { position: relative; }
+.frame.render-live::after {
+  content: ""; position: absolute; inset: 0; border-radius: inherit;
+  pointer-events: none; will-change: opacity;
+  box-shadow: 0 0 14px 2px rgba(122, 162, 255, 0.35);
+  animation: edgeBreathe 2.4s var(--ease-in-out) infinite;
+}
+@keyframes edgeBreathe {
+  0%, 100% { opacity: 0.2; }
+  50% { opacity: 1; }
+}
+
+/* ---- SAM loading overlay (Select object) ---- */
+.sam-overlay {
+  position: absolute; inset: 0; display: flex; align-items: center;
+  justify-content: center; gap: 10px; font-size: 13.5px; color: #fff;
+  background: rgba(10, 12, 16, 0.55); backdrop-filter: blur(2px);
+  border-radius: inherit; z-index: 3; animation: fadeUp var(--dur-3) var(--ease-out) both;
+}
+.sam-overlay .spinner { border-color: rgba(255,255,255,0.6); border-top-color: transparent; }
+
+/* ---- Behind the Scenes ---- */
+.behind-feed { max-height: 72vh; }
+.log-src {
+  display: inline-block; min-width: 110px; margin-right: 8px;
+  color: var(--muted); opacity: 0.8; font-size: 10.5px;
+}
+
+/* ---- gallery selection + undo ---- */
+.gallery-selectable { position: relative; }
+.gallery-selectable.selecting { cursor: pointer; }
+.gallery-selectable.selecting .card { pointer-events: none; }
+.gallery-selectable.selected .card {
+  outline: 2px solid var(--accent, #d8b46a); border-radius: 14px;
+}
+.gallery-check {
+  position: absolute; top: 8px; left: 8px; z-index: 2; width: 22px;
+  height: 22px; border-radius: 6px; border: 1px solid var(--line);
+  background: var(--ink); color: var(--accent, #d8b46a); display: flex;
+  align-items: center; justify-content: center; font-size: 13px;
+}
+
+/* ---- civitai result cards ---- */
+.civitai-grid {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 12px;
+}
+.civitai-card {
+  border: 1px solid var(--line); border-radius: 12px; overflow: hidden;
+  background: var(--panel, var(--ink)); display: flex; flex-direction: column;
+  transition: transform var(--dur-3) var(--ease-out), border-color var(--dur-2) var(--ease-out);
+}
+.civitai-card:hover { transform: translateY(-2px); border-color: var(--accent, #d8b46a); }
+.civitai-card > img {
+  width: 100%; height: 150px; object-fit: cover; display: block;
+}
+.civitai-noimg {
+  width: 100%; height: 150px; display: flex; align-items: center;
+  justify-content: center; font-size: 32px; color: var(--muted);
+  background: var(--ink);
+}
+.civitai-body { padding: 10px 12px; display: flex; flex-direction: column; gap: 2px; }
+
+/* ---- generation recipe card ---- */
+.recipe {
+  border: 1px solid var(--line); border-radius: 10px; background: var(--ink);
+}
+.recipe > summary {
+  cursor: pointer; padding: 8px 12px; font-size: 12.5px; color: var(--muted);
+  user-select: none;
+}
+.recipe > summary:hover { color: var(--text); }
+.recipe-body {
+  padding: 4px 12px 10px; font-size: 11.5px; line-height: 1.7;
+  border-top: 1px solid var(--line); word-break: break-word;
+}
+
+/* ---- attached reference image / driving clip ---- */
+.ref-slot {
+  display: flex; align-items: center; gap: 10px; padding: 8px;
+  border: 1px solid var(--line); border-radius: var(--radius);
+  background: var(--panel-2);
+  animation: fadeUp var(--dur-3) var(--ease-out) both;
+}
+.ref-slot img, .ref-slot video {
+  width: 56px; height: 56px; object-fit: cover; border-radius: 7px;
+  flex-shrink: 0; border: 1px solid var(--line); background: var(--ink);
+}
+.ellipsis { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hint { color: var(--muted); font-size: 12.5px; margin: 0; }
+
+/* Two upload slots side by side on the motion page. */
+.slots { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+@media (max-width: 900px) { .slots { grid-template-columns: 1fr; } }
+.slots .drop { min-height: 128px; }
+
+/* Video results play inline in the gallery and on the motion page. */
+.result-video {
+  width: 100%; display: block; border-radius: var(--radius);
+  border: 1px solid var(--line); background: var(--ink);
+}
+
+/* step-preview fade on the single editing canvas */
+.canvas-flash { animation: imgIn var(--dur-5) var(--ease-out); }
+
+/* ==========================================================================
+   Reduced motion.
+
+   Layer 1 collapses the TOKENS. Because every duration and easing in this
+   file comes from a token, all of that motion becomes compliant here with no
+   per-rule work — and any motion a future edit adds is compliant the moment
+   it uses the tokens, which is the only version of this rule that survives
+   contact with a growing codebase.
+
+   Layer 2 is a backstop for anything that slipped past the tokens. It uses
+   1ms rather than 0s deliberately: at 0s `transitionend` never fires, so any
+   code awaiting it would wait forever.
+
+   Layer 3 keeps the loops that carry MEANING. A frozen spinner is worse than
+   no spinner — it reads as an application that has hung.
+   ========================================================================== */
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --dur-1: 1ms; --dur-2: 1ms; --dur-3: 1ms; --dur-4: 1ms; --dur-5: 1ms;
+    --slide: 0px; --lift-1: 0px; --lift-2: 0px;
+  }
+  *, *::before, *::after {
+    animation-duration: 1ms !important;
+    animation-delay: 0ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 1ms !important;
+    transition-delay: 0ms !important;
+    scroll-behavior: auto !important;
+  }
+  .spinner {
+    animation-duration: 1.2s !important;
+    animation-iteration-count: infinite !important;
+  }
+}
+
+/* ---- Studio workspace ------------------------------------------------------
+   One page for editing, forging, motion and avatars. The modes stay MOUNTED
+   and are hidden with display:none — each owns a running job poll, and
+   nothing in the app can re-attach to a job by id, so unmounting a mode with
+   work in flight would silently lose it. */
+.workspace { display: flex; flex-direction: column; gap: 14px; }
+.ws-panel.is-hidden { display: none; }
+/* The mode's own <header> repeats what the shell already says. */
+.ws-panel .page-head { display: none; }
+
+.ws-drop {
+  border: 1px dashed var(--line); border-radius: 12px;
+  padding: 14px 16px; display: flex; flex-direction: column; gap: 4px;
+  align-items: center; text-align: center; background: var(--panel);
+  transition: border-color var(--dur-2) var(--ease-out),
+              background var(--dur-2) var(--ease-out);
+}
+.ws-drop.over { border-color: var(--accent, var(--text)); background: var(--panel-2); }
+.ws-drop-btn {
+  all: unset; cursor: pointer; font-size: 13.5px; color: var(--text);
+  transition: opacity var(--dur-1) var(--ease-out);
+}
+.ws-drop-btn:hover { opacity: 0.8; }
+.ws-drop-btn:disabled { cursor: default; opacity: 0.5; }
+.ws-drop-hint { font-size: 11.5px; color: var(--muted); }
+
+.ws-modes { display: flex; gap: 8px; flex-wrap: wrap; }
+.ws-mode {
+  all: unset; cursor: pointer; display: inline-flex; align-items: center;
+  gap: 7px; padding: 7px 12px; border-radius: 99px; font-size: 12.5px;
+  color: var(--muted); border: 1px solid var(--line); position: relative;
+  transition: color var(--dur-1) var(--ease-out),
+              border-color var(--dur-2) var(--ease-out),
+              background var(--dur-2) var(--ease-out);
+}
+.ws-mode:hover { color: var(--text); }
+.ws-mode.active { background: var(--panel-2); color: var(--text); border-color: var(--muted); }
+.ws-mode:focus-visible { outline: 2px solid var(--text); outline-offset: 2px; }
+/* A job running in a mode you are not looking at. */
+.ws-dot {
+  width: 6px; height: 6px; border-radius: 99px; background: var(--safelight);
+  animation: pulse 1.6s ease-in-out infinite;
+}
+
+/* ---- 3D viewer -------------------------------------------------------------
+   Generated meshes are untextured, so the canvas background stays dark and the
+   lighting does the describing. */
+.viewer3d { display: flex; flex-direction: column; gap: 6px; }
+.viewer3d-canvas {
+  width: 100%; border-radius: 10px; overflow: hidden;
+  border: 1px solid var(--line); background: #101013;
+}
+.viewer3d-canvas canvas { display: block; width: 100% !important; }
+.viewer3d-note { font-size: 11.5px; color: var(--muted); }
+.viewer3d-note.err { color: var(--err); }
+/* Each mode used to be its own page and still carries its own <h1>; the shell
+   supplies the one heading now. */
+.ws-panel .ws-hide { display: none; }
+.ws-drop.is-hidden { display: none; }
+/* A mesh has no thumbnail — offer the download instead of a broken image. */
+.card-model {
+  display: flex; flex-direction: column; align-items: center;
+  justify-content: center; gap: 4px; aspect-ratio: 1; text-decoration: none;
+  background: var(--panel-2); color: var(--text); font-size: 13px;
+  border-bottom: 1px solid var(--line);
+}
+.card-model .dim { font-size: 11px; color: var(--muted); }
+
+/* "The app was rebuilt since this page loaded." Deliberately in the rail
+   rather than as a toast: a toast is missed, and the cost of missing this is
+   reporting a bug that was already fixed. */
+.rail-stale {
+  margin: 0 10px 8px;
+  padding: 7px 9px;
+  border: 1px solid var(--warn, #a9761d);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--warn, #a9761d) 12%, transparent);
+  color: var(--warn, #a9761d);
+  font-size: 11.5px;
+  text-align: left;
+  cursor: pointer;
+}
+.rail-stale:hover { background: color-mix(in srgb, var(--warn, #a9761d) 22%, transparent); }

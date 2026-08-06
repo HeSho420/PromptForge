@@ -1,0 +1,160 @@
+{
+ "template": "face_detail",
+ "version": 1,
+ "task": "inpaint",
+ "description": "Face refinement: mask the face, a focused low-strength inpaint pass fixes eyes/skin without touching the rest of the image.",
+ "required_models": [
+  "sd15-inpaint"
+ ],
+ "parameters": {
+  "prompt": {
+   "node": "6",
+   "input": "text"
+  },
+  "image": {
+   "node": "2",
+   "input": "image"
+  },
+  "mask": {
+   "node": "3",
+   "input": "image"
+  },
+  "seed": {
+   "node": "9",
+   "input": "seed"
+  }
+ },
+ "graph": {
+  "1": {
+   "class_type": "CheckpointLoaderSimple",
+   "inputs": {
+    "ckpt_name": "sd-v1-5-inpainting.safetensors"
+   }
+  },
+  "2": {
+   "class_type": "LoadImage",
+   "inputs": {
+    "image": ""
+   }
+  },
+  "3": {
+   "class_type": "LoadImageMask",
+   "inputs": {
+    "image": "",
+    "channel": "red"
+   }
+  },
+  "4": {
+   "class_type": "GrowMask",
+   "inputs": {
+    "mask": [
+     "3",
+     0
+    ],
+    "expand": 8,
+    "tapered_corners": true
+   }
+  },
+  "5": {
+   "class_type": "FeatherMask",
+   "inputs": {
+    "mask": [
+     "4",
+     0
+    ],
+    "left": 6,
+    "top": 6,
+    "right": 6,
+    "bottom": 6
+   }
+  },
+  "6": {
+   "class_type": "CLIPTextEncode",
+   "inputs": {
+    "text": "detailed face, sharp eyes, natural skin texture",
+    "clip": [
+     "1",
+     1
+    ]
+   }
+  },
+  "7": {
+   "class_type": "CLIPTextEncode",
+   "inputs": {
+    "text": "deformed face, crossed eyes, blurry, low quality, deformed, bad anatomy, watermark, text, jpeg artifacts",
+    "clip": [
+     "1",
+     1
+    ]
+   }
+  },
+  "8": {
+   "class_type": "VAEEncodeForInpaint",
+   "inputs": {
+    "pixels": [
+     "2",
+     0
+    ],
+    "vae": [
+     "1",
+     2
+    ],
+    "mask": [
+     "5",
+     0
+    ],
+    "grow_mask_by": 6
+   }
+  },
+  "9": {
+   "class_type": "KSampler",
+   "inputs": {
+    "seed": 0,
+    "steps": 34,
+    "cfg": 7.0,
+    "sampler_name": "dpmpp_2m",
+    "scheduler": "karras",
+    "denoise": 1.0,
+    "model": [
+     "1",
+     0
+    ],
+    "positive": [
+     "6",
+     0
+    ],
+    "negative": [
+     "7",
+     0
+    ],
+    "latent_image": [
+     "8",
+     0
+    ]
+   }
+  },
+  "10": {
+   "class_type": "VAEDecode",
+   "inputs": {
+    "samples": [
+     "9",
+     0
+    ],
+    "vae": [
+     "1",
+     2
+    ]
+   }
+  },
+  "11": {
+   "class_type": "SaveImage",
+   "inputs": {
+    "filename_prefix": "promptforge_inpaint",
+    "images": [
+     "10",
+     0
+    ]
+   }
+  }
+ }
+}
