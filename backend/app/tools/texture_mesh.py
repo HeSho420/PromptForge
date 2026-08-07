@@ -7,7 +7,7 @@ the official one needs a CUDA rasterizer with no wheel for this Python — so
 the colour has to come from the photographs rather than from a paint model.
 
     python texture_mesh.py <mesh.glb> <out.glb> --view <azimuth>:<image.png>
-                           [--view ...] [--tile 2048] [--json]
+                           [--view ...] [--tile 2048] [--synth az1,az2]
 
 What has to be true for the paint to land where it belongs, each of which was
 once missing and each of which left a measurable scar:
@@ -707,7 +707,9 @@ def smooth_mesh(mesh: trimesh.Trimesh) -> dict:
             "roughness_after": round(after, 2)}
 
 
-def retexture(mesh: trimesh.Trimesh, views: list[View], tile: int) -> dict:
+def retexture(mesh: trimesh.Trimesh, views: list[View], tile: int,
+              synth_azimuths: set[float] | frozenset[float] = frozenset()
+              ) -> dict:
     # Refuse to paint from views that are not photographs of the subject.
     # If every view fails, keep the single least-bad one: a mesh coloured
     # from one imperfect photograph still beats a bare grey mesh, and the
@@ -795,7 +797,13 @@ def retexture(mesh: trimesh.Trimesh, views: list[View], tile: int) -> dict:
     # but in the neighbourhood average the squarest view now outweighs an
     # oblique one quadratically — fewer single-face islands of a worse view
     # surviving the smoothing, which is what left seams mid-face.
-    smoothed = smooth_face_scores(mesh, face_score ** 2)
+    # A GENERATED view is evidence of last resort: it exists to cover arcs
+    # no camera saw, not to outvote a photograph. The 0.92 handicap means a
+    # real view within ~23° of squareness still beats a perfectly square
+    # invented one; beyond that the invented view wins, which is the point.
+    prio = np.array([0.92 if v.azimuth in synth_azimuths else 1.0
+                     for v in views])
+    smoothed = smooth_face_scores(mesh, (face_score * prio) ** 2)
     smoothed[face_score <= 0] = -1.0     # never pick a view missing a corner
     face_view = smoothed.argmax(axis=1)
     # Faces no camera sees at all: argmax over a row of zeros used to hand
@@ -851,6 +859,8 @@ def retexture(mesh: trimesh.Trimesh, views: list[View], tile: int) -> dict:
             "view_iou": view_iou, "tone": tone, "dropped": dropped,
             "smoothing": smoothing,
             "views_used": [v.azimuth for v in views],
+            "synthetic_views": sorted(a for a in synth_azimuths
+                                      if any(v.azimuth == a for v in views)),
             "tile_crops": [[round(c, 3) for c in r] for r in rects],
             "photometric": photometric,
             "mappings": [{k: round(float(v), 5) for k, v in m.items()}
@@ -864,6 +874,7 @@ def main() -> int:
     argv = sys.argv[1:]
     views: list[tuple[float, Path]] = []
     positional: list[str] = []
+    synth: set[float] = set()
     tile = 2048     # sources are upscaled to ~2300px and tiles are cropped
                     # to content, so 1024 was the resolution bottleneck
     i = 0
@@ -873,6 +884,13 @@ def main() -> int:
             try:
                 az, _, path = argv[i + 1].partition(":")
                 views.append((float(az), Path(path)))
+            except (IndexError, ValueError):
+                print(__doc__)
+                return 2
+            i += 2
+        elif a == "--synth":
+            try:
+                synth = {float(s) for s in argv[i + 1].split(",") if s}
             except (IndexError, ValueError):
                 print(__doc__)
                 return 2
@@ -898,7 +916,7 @@ def main() -> int:
     loaded = [View(az, np.asarray(Image.open(p).convert("RGB")))
               for az, p in views]
 
-    result = retexture(mesh, loaded, tile)
+    result = retexture(mesh, loaded, tile, synth)
     textured = result["mesh"]
     out_path.parent.mkdir(parents=True, exist_ok=True)
     textured.export(str(out_path))
@@ -917,6 +935,7 @@ def main() -> int:
         "tone": result["tone"],
         "views_used": result["views_used"],
         "views_dropped": result["dropped"],
+        "synthetic_views": result["synthetic_views"],
         "smoothing": result["smoothing"],
         "tile_crops": result["tile_crops"],
         "photometric": result["photometric"],

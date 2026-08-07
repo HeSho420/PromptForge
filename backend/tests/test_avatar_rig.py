@@ -78,7 +78,7 @@ class Wiring(unittest.TestCase):
         split; the second pass must start from the untextured mesh."""
         src = self.source()
         self.assertIn("self._texture_mesh(\n                            "
-                      "job, bare, photos + synth)", src)
+                      "job, bare, photos + synth,", src)
 
     def test_every_uncovered_arc_gets_a_generated_view(self):
         """The back, left and right arcs are all checked — an honest render

@@ -7064,21 +7064,33 @@ class Services:
             job.log("info", f"Could not extend the frame ({exc}); "
                             "reconstructing from what is visible")
             return image
-        # Did it actually finish the body? Cheap to ask, and the answer is
-        # the difference between "a whole figure was invented below the crop"
-        # and "the crop moved down a bit". Reported either way rather than
-        # assumed, because everything downstream inherits it.
-        if partial:
-            after = self._figure_aspect(out)
-            if after is not None and after >= self._FULL_FIGURE_ASPECT:
+        # Did it actually finish the body? "No longer touches an edge" is
+        # NOT the answer — a live run logged "the body is complete now"
+        # while the outpaint had extended the canvas and painted background
+        # below the hips, and the mesh shipped as a bust anyway. The honest
+        # test is the silhouette's aspect; when it still is not a standing
+        # figure, the instruction model gets one shot at zooming the camera
+        # out — it rebuilt this same subject's back convincingly, and
+        # inventing the lower body is the same class of task.
+        aspect = self._figure_aspect(out)
+        if aspect is not None and aspect < self._FULL_FIGURE_ASPECT:
+            job.log("info", "The extended frame still does not hold a full "
+                            "figure — zooming the camera out instead (the "
+                            "lower body is invented)")
+            zoomed = self._zoom_out_full_body(job, image)
+            z_aspect = (self._figure_aspect(zoomed)
+                        if zoomed is not None else None)
+            if z_aspect is not None and z_aspect > aspect:
+                out, aspect = zoomed, z_aspect
+        if aspect is not None:
+            if aspect >= self._FULL_FIGURE_ASPECT:
                 job.log("info", "The figure is full-length now (silhouette "
-                                f"{after:.1f}x taller than wide), with "
+                                f"{aspect:.1f}x taller than wide), with "
                                 "everything below the original photo "
                                 "invented")
             else:
-                job.log("info", "The extension did not clearly produce a "
-                                "full figure — the mesh may still end where "
-                                "the photograph does")
+                job.log("info", "The figure could not be completed — the "
+                                "mesh will end where the photograph does")
             return out
         still = self._cut_edges(out)
         if still:
@@ -7091,6 +7103,34 @@ class Services:
                             f"{image.height} to {out.width}x{out.height}, "
                             "with the part below the crop invented")
         return out
+
+    # The instruction Kontext follows to invent the missing lower body.
+    _FULL_BODY_PROMPT = (
+        "zoom the camera out to show the person's whole body from head to "
+        "toe: the same person in the same outfit, the clothing continuing "
+        "naturally into matching bottoms, legs and feet fully visible, "
+        "standing, same plain background")
+
+    def _zoom_out_full_body(self, job: Job,
+                            image: Image.Image) -> Image.Image | None:
+        """A generated full-length view of the subject, or None."""
+        ok, _why = self.kontext_ready()
+        if not ok:
+            return None
+        try:
+            template = self.workflows.load("kontext")
+            graph = build_workflow(template, {
+                "prompt": self._FULL_BODY_PROMPT,
+                "image": self.comfy.upload_image(image, "fullbody_src"),
+                "seed": int.from_bytes(os.urandom(4), "big") & 0x7FFFFFFF,
+            })
+            self._free_vram(job)
+            self._prepare_graph(job, graph)
+            out, _pid = self.comfy.run_graph(graph)
+            return out.convert("RGB")
+        except Exception as exc:  # noqa: BLE001 — the figure stays partial
+            job.log("info", f"Could not zoom out to a full body ({exc})")
+            return None
 
     # Which orbit frame stands in for each Hunyuan3D view input. The mesh
     # model wants front/left/back/right; the orbit runs anticlockwise from
@@ -7418,7 +7458,9 @@ class Services:
             return dst.read_bytes(), report
 
     def _texture_mesh(self, job: Job, glb: bytes,
-                      photos: list[tuple[float, Image.Image]]) -> tuple[bytes, dict]:
+                      photos: list[tuple[float, Image.Image]],
+                      synth_azimuths: list[float] | None = None
+                      ) -> tuple[bytes, dict]:
         """Paint the mesh with every view of it that exists.
 
         The mesh model produces geometry only, and the official texture stage
@@ -7451,6 +7493,9 @@ class Services:
             out = Path(tmp) / "textured.glb"
             src.write_bytes(glb)
             args = [python, str(tool), str(src), str(out), "--tile", "2048"]
+            if synth_azimuths:
+                args += ["--synth",
+                         ",".join(str(a) for a in synth_azimuths)]
             for i, (azimuth, photo) in enumerate(photos):
                 pic = Path(tmp) / f"view_{i}.png"
                 photo.convert("RGB").save(pic, format="PNG")
@@ -7770,7 +7815,8 @@ class Services:
                              is not None]
                     if synth:
                         coloured2, report2 = self._texture_mesh(
-                            job, bare, photos + synth)
+                            job, bare, photos + synth,
+                            synth_azimuths=[az for az, _ in synth])
                         gained = ((report2.get("seen_pct") or 0)
                                   > (report.get("seen_pct") or 0) + 1)
                         if gained:
