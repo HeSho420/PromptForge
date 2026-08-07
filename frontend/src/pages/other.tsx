@@ -1239,6 +1239,124 @@ function SafetyRules() {
   );
 }
 
+/* -------- Updates: pull what was pushed through git -------- */
+
+function UpdatePanel() {
+  const [status, setStatus] = useState<Awaited<
+    ReturnType<typeof api.updateStatus>
+  > | null>(null);
+  const [checking, setChecking] = useState(false);
+  const [applying, setApplying] = useState(false);
+  const [note, setNote] = useState<string | null>(null);
+
+  const check = async (fetchRemote: boolean) => {
+    setChecking(true);
+    setNote(null);
+    try {
+      setStatus(await api.updateStatus(fetchRemote));
+    } catch (e) {
+      setNote(`Could not check: ${(e as Error).message}`);
+    } finally {
+      setChecking(false);
+    }
+  };
+
+  useEffect(() => {
+    void check(false); // instant answer from the last fetch; no network
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const apply = async () => {
+    if (
+      !window.confirm(
+        "Install the update now? The app restarts itself and is back in " +
+          "about 15 seconds. If the new version fails to start, the " +
+          "previous one is restored automatically.",
+      )
+    )
+      return;
+    setApplying(true);
+    setNote("Updating… the app will restart itself.");
+    try {
+      await api.applyUpdate();
+      // Poll health until the restarted backend answers, then reload.
+      const until = Date.now() + 120_000;
+      const probe = async () => {
+        try {
+          await api.health();
+          window.location.reload();
+        } catch {
+          if (Date.now() < until) setTimeout(() => void probe(), 2000);
+          else setNote("The app did not come back — check the console.");
+        }
+      };
+      setTimeout(() => void probe(), 8000);
+    } catch (e) {
+      setApplying(false);
+      setNote(`Update failed: ${(e as Error).message}`);
+    }
+  };
+
+  const behind = status?.behind ?? 0;
+  const dirty = status?.dirty ?? [];
+  return (
+    <div className="panel stack" style={{ marginTop: 18 }}>
+      <h2 style={{ margin: 0 }}>Updates</h2>
+      <p className="dim" style={{ margin: 0, fontSize: 12.5, maxWidth: "64ch" }}>
+        Updates arrive through git: push to the repository and every install
+        can pull them. Your data folder (photos, models, database) is never
+        touched by an update.
+      </p>
+      {status?.error && <div className="notice">{status.error}</div>}
+      {status && !status.error && (
+        <div className="dim" style={{ fontSize: 12.5 }}>
+          Version {status.commit} on {status.branch}
+          {behind > 0
+            ? ` — ${behind} update${behind === 1 ? "" : "s"} available`
+            : " — up to date at last check"}
+        </div>
+      )}
+      {behind > 0 && (
+        <ul className="dim" style={{ margin: 0, fontSize: 12, paddingLeft: 18 }}>
+          {(status?.incoming ?? []).slice(0, 6).map((c) => (
+            <li key={c.sha}>{c.subject}</li>
+          ))}
+        </ul>
+      )}
+      {dirty.length > 0 && (
+        <div className="notice">
+          Locally edited files block updates: {dirty.join(", ")}
+        </div>
+      )}
+      <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
+        <button
+          type="button"
+          className="btn"
+          disabled={checking || applying}
+          onClick={() => void check(true)}
+        >
+          {checking ? "Checking…" : "Check for updates"}
+        </button>
+        {behind > 0 && dirty.length === 0 && (
+          <button
+            type="button"
+            className="btn primary"
+            disabled={applying}
+            onClick={() => void apply()}
+          >
+            {applying ? "Updating…" : `Install ${behind} update${behind === 1 ? "" : "s"} & restart`}
+          </button>
+        )}
+      </div>
+      {note && (
+        <div className="dim" role="status" aria-live="polite" style={{ fontSize: 12.5 }}>
+          {note}
+        </div>
+      )}
+    </div>
+  );
+}
+
 /* -------- Privacy: delete Behind-the-Scenes logs / prompt history -------- */
 
 function PrivacyHistory() {
@@ -1451,6 +1569,7 @@ export function Settings() {
           )}
         </div>
       )}
+      <UpdatePanel />
       <CivitaiToken />
       <PrivacyHistory />
       <SafetyRules />

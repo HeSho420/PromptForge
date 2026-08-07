@@ -213,6 +213,22 @@ def create_app(services: Services | None = None) -> Flask:
         })
 
     # -- system (GPU) telemetry ----------------------------------------------------
+    @api.get("/update")
+    def update_status():
+        """Where this install stands against the git remote.
+
+        ?fetch=0 skips the network fetch and answers from the last one —
+        the Settings page polls that way to stay instant."""
+        fetch = request.args.get("fetch", "1") not in ("0", "false")
+        return jsonify(services.updates.status(fetch=fetch))
+
+    @api.post("/update/apply")
+    def update_apply():
+        """Pull the pushed commits, refresh dependencies, restart. Runs as
+        a visible job; the app is briefly down while it restarts itself."""
+        job = services.queue.enqueue("update", {})
+        return jsonify(job.to_dict()), 202
+
     @api.get("/peers")
     def peers():
         """Other PromptForge machines discovered on the local network."""

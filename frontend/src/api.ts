@@ -111,6 +111,18 @@ export const api = {
 
   jobs: () => request<Job[]>("/api/jobs"),
   job: (id: string) => request<Job>(`/api/jobs/${id}`),
+  updateStatus: (fetchRemote = true) =>
+    request<{
+      repo: boolean;
+      error?: string;
+      branch?: string;
+      commit?: string;
+      behind?: number;
+      ahead?: number;
+      dirty?: string[];
+      incoming?: { sha: string; subject: string }[];
+    }>(`/api/update?fetch=${fetchRemote ? 1 : 0}`),
+  applyUpdate: () => request<Job>("/api/update/apply", { method: "POST" }),
   cancelJob: (id: string) =>
     request<Job>(`/api/jobs/${id}/cancel`, { method: "POST" }),
   retryJob: (id: string) =>

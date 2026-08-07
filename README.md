@@ -93,6 +93,27 @@ if you eventually use everything). Set `PROMPTFORGE_AUTO_INSTALL=0` to
 forbid all automatic downloads, or `PROMPTFORGE_FIRST_RUN_SETUP=0` to skip
 only the first-run pre-staging.
 
+## Updating
+
+Updates travel the way the project does: **push to the repository, and
+every install picks it up.**
+
+- **At launch** — `launch.ps1` fetches and fast-forwards to the pushed
+  commits before starting (set `PROMPTFORGE_AUTO_UPDATE=0` on a machine
+  you want frozen). Dependency and UI changes are then handled by the
+  launcher's normal self-repair in the same run.
+- **While running** — Settings → *Updates* shows the current version and
+  what was pushed; one click pulls, reinstalls dependencies only if
+  `requirements.txt` changed, rebuilds the UI only if `frontend/` changed,
+  and restarts the app. If the new version fails to come up within a
+  minute, the updater automatically rolls back to the previous commit and
+  restarts the old version.
+
+Updates are **fast-forward only** and refuse when local file edits exist
+(they are listed by name), so an install can never lose local work — and
+`data/` (models, photos, database) is untracked, so no update can ever
+touch it.
+
 ## Setup
 
 **Windows (PowerShell)** — from the project folder (e.g. `C:\Users\you\Desktop\claude`):

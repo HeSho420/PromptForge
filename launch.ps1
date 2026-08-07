@@ -113,6 +113,39 @@ Write-Host ""
 Write-Host "  == PromptForge ==" -ForegroundColor Cyan
 Write-Host ""
 
+# --- 0. Updates pushed through git -----------------------------------------------
+# Push to the repository and every install picks it up here on next launch.
+# Fast-forward only, refused when local edits exist, and data/ (models,
+# photos, database) is untracked so an update can never touch it. Runs
+# BEFORE the self-repair steps so new dependencies install in this same run.
+# Set PROMPTFORGE_AUTO_UPDATE=0 to keep a machine on its current version.
+if (($env:PROMPTFORGE_AUTO_UPDATE -ne "0") -and
+    (Test-Path (Join-Path $root ".git")) -and
+    (Get-Command git -ErrorAction SilentlyContinue)) {
+    Push-Location $root
+    $prevEap = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"   # git talks on stderr; PS 5.1 landmine
+    try {
+        git fetch --quiet origin 2>$null
+        $branch = (git rev-parse --abbrev-ref HEAD 2>$null | Out-String).Trim()
+        $behind = (git rev-list --count "HEAD..origin/$branch" 2>$null | Out-String).Trim()
+        $dirty  = (git status --porcelain --untracked-files=no 2>$null | Out-String).Trim()
+        if ($behind -match '^\d+$' -and [int]$behind -gt 0) {
+            if ($dirty) {
+                Write-Host "  [--] $behind update(s) pushed, but local file edits block them (see git status)." -ForegroundColor Yellow
+            } else {
+                Write-Host "  Updating: $behind new commit(s) were pushed..." -ForegroundColor Cyan
+                git pull --ff-only origin $branch 2>&1 | Out-Null
+                $now = (git rev-parse --short HEAD 2>$null | Out-String).Trim()
+                Write-Host "  [ok] Now on $now" -ForegroundColor Green
+            }
+        }
+    } catch {} finally {
+        $ErrorActionPreference = $prevEap
+        Pop-Location
+    }
+}
+
 # --- 1. Python backend environment -------------------------------------------
 $python = Join-Path $root "backend\.venv\Scripts\python.exe"
 if (-not (Test-Path $python)) {

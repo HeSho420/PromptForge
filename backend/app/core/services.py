@@ -56,7 +56,7 @@ from ..adapters.comfyui import (
 )
 from ..adapters.mock import MockInpaintingAdapter, MockSegmentationAdapter
 from ..adapters.sam import SamSegmentationAdapter
-from ..config import Settings
+from ..config import PROJECT_ROOT, Settings
 from . import eta, motion, node_packs, quality
 from . import scene_graph as scene_module
 from . import video as video_io
@@ -89,6 +89,7 @@ from .registry import DownloadError, ModelDownloader, ModelInfo, ModelRegistry
 from .safety import SafetyFilter, SafetyRuleStore, consent_verdict
 from .storage import AssetStore
 from .trust import Evidence, TrustJudge
+from .update import UpdateError, UpdateManager
 from .workflow_ai import WorkflowGenerationError, WorkflowGenerator
 
 
@@ -922,6 +923,11 @@ class Services:
         self.queue.register("setup", self._handle_setup)
         self.queue.register("discover", self._handle_discover)
         self.queue.register("node_pack", self._handle_node_pack)
+        # Updates arrive the way the project does: through git. The check
+        # is an API call; applying is a visible job that pulls, refreshes
+        # dependencies, and restarts into the new version.
+        self.updates = UpdateManager(PROJECT_ROOT)
+        self.queue.register("update", self._handle_update)
 
         for model in DEFAULT_MODELS:
             existing = self.registry.get(model.name)
@@ -1041,6 +1047,13 @@ class Services:
     @comfy.setter
     def comfy(self, client: Any) -> None:
         self._comfy_main = client
+
+    def _handle_update(self, job: Job) -> dict[str, Any]:
+        """Pull what was pushed, refresh what changed, restart into it."""
+        try:
+            return self.updates.apply(job)
+        except UpdateError as exc:
+            raise PermanentError(str(exc)) from exc
 
     def _peer_model_url(self, name: str) -> str | None:
         model = self.registry.get(name)
