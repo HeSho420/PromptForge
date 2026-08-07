@@ -56,8 +56,36 @@ database) is deliberately untracked. On a fresh clone the app rebuilds it:
   from sources listed in the model registry (`core/services.py`
   DEFAULT_MODELS: Hugging Face and Civitai). Progress is visible in the
   Models tab and the job log.
-- `launch.ps1` also self-repairs the rest: backend venv + torch (CUDA/ROCm
-  detected), the UI build, ComfyUI, and Ollama if missing.
+- `launch.ps1` installs and self-repairs everything else: Python and
+  Node.js (via winget) if the machine has neither, the backend venv with
+  the right torch for your GPU brand (NVIDIA CUDA / AMD ROCm / CPU),
+  the UI build, **ComfyUI itself** (downloaded into `tools\ComfyUI` when
+  no install is found), and Ollama with a planner model sized to your
+  hardware.
+
+**Tuned to the machine, automatically.** The launcher prints a summary of
+every decision: torch build by GPU brand, planner LLM size by VRAM/RAM
+(3B/7B/14B), SageAttention installed and enabled on capable NVIDIA cards
+(measured +11% render speed), checkpoint RAM caching on ≥20 GB machines
+and disabled below (prevents OOM kills), and the backend scales the rest
+per job — mesh detail, video resolution/length and model choices all
+follow VRAM and RAM.
+
+**Two PromptForge machines on one network help each other** (both default
+on):
+
+- *Model transfer* — a fresh install copies model weights from a peer's
+  library instead of the internet (`PROMPTFORGE_LAN_SHARE=0` to disable).
+  Only the model library is served, never photos or projects, and every
+  copied file is verified against the registry's pinned SHA-256 before it
+  is accepted.
+- *Render delegation* — when this machine's queue is busy and a peer is
+  idle, whole render jobs run on the peer's GPU through a proxy the peer
+  controls; the peer refuses while it is doing its own work, and any
+  failure falls back to rendering locally (`PROMPTFORGE_LAN_RENDER=0` to
+  disable). Peers find each other automatically (UDP beacon on ports
+  8766-8769, transfers on 8765) — allow PromptForge through the Windows
+  firewall prompt on first run for this to work.
 
 Expect roughly 2–10 GB of downloads for the starter set depending on your
 GPU tier, and more as features are first used (the full library is ~100 GB

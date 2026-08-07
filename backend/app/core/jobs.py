@@ -101,6 +101,7 @@ class JobQueue:
         self._backoff_s = backoff_s
         self._stop = threading.Event()
         self._worker: threading.Thread | None = None
+        self._helper: threading.Thread | None = None
         self._load_history()
 
     def _load_history(self) -> None:
@@ -138,12 +139,40 @@ class JobQueue:
         self._worker = threading.Thread(target=self._run, name="pf-worker", daemon=True)
         self._worker.start()
 
+    def start_helper(self, gate, wrap, types: set[str]) -> None:
+        """A SECOND worker that exists to hand work to an idle network peer.
+
+        It takes a pending job only when the main worker is already busy,
+        the job's type is delegatable, and `gate()` — a network probe, so
+        never called under the queue lock — confirms a peer can carry it.
+        The job then runs through `wrap(execute, job)`, which binds its
+        render traffic to the peer and falls back to local on failure."""
+        helper = getattr(self, "_helper", None)
+        if helper is not None and helper.is_alive():
+            return
+        self._helper_gate = gate
+        self._helper_wrap = wrap
+        self._helper_types = set(types)
+        self._helper = threading.Thread(target=self._run_helper,
+                                        name="pf-worker-peer", daemon=True)
+        self._helper.start()
+
     def stop(self, timeout: float = 5.0) -> None:
         self._stop.set()
         with self._cv:
             self._cv.notify_all()  # wake the worker
         if self._worker:
             self._worker.join(timeout=timeout)
+        helper = getattr(self, "_helper", None)
+        if helper is not None:
+            helper.join(timeout=timeout)
+
+    def busy(self) -> bool:
+        """Anything running or waiting? The peer service answers delegation
+        offers with this — an idle machine is one whose queue is empty."""
+        with self._lock:
+            return bool(self._pending) or any(
+                j.state is JobState.RUNNING for j in self._jobs.values())
 
     def register(self, job_type: str, handler: Handler) -> None:
         self._handlers[job_type] = handler
@@ -325,6 +354,40 @@ class JobQueue:
             if job is None or job.state is JobState.CANCELLED:
                 continue
             self._execute(job)
+
+    def _run_helper(self) -> None:
+        while not self._stop.is_set():
+            candidate: str | None = None
+            with self._lock:
+                running = any(j.state is JobState.RUNNING
+                              for j in self._jobs.values())
+                if running and not self._paused:
+                    for jid in self._pending:
+                        j = self._jobs.get(jid)
+                        if j is not None and j.type in self._helper_types:
+                            candidate = jid
+                            break
+            if candidate is None:
+                self._stop.wait(1.5)
+                continue
+            # The network probe runs OUTSIDE every lock: it can take seconds
+            # and the main worker must never wait on it.
+            try:
+                ready = self._helper_gate()
+            except Exception:  # noqa: BLE001 — a broken probe means "no"
+                ready = False
+            if not ready:
+                self._stop.wait(4.0)
+                continue
+            with self._cv:
+                try:
+                    self._pending.remove(candidate)
+                except ValueError:
+                    continue      # the main worker got there first — fine
+            job = self.get(candidate)
+            if job is None or job.state is JobState.CANCELLED:
+                continue
+            self._helper_wrap(self._execute, job)
 
     def _execute(self, job: Job) -> None:
         handler = self._handlers[job.type]

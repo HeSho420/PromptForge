@@ -117,12 +117,24 @@ Write-Host ""
 $python = Join-Path $root "backend\.venv\Scripts\python.exe"
 if (-not (Test-Path $python)) {
     Write-Host "  First run: creating the Python environment..."
+    if (-not (Get-Command py -ErrorAction SilentlyContinue) -and
+        -not (Get-Command python -ErrorAction SilentlyContinue)) {
+        # A fresh clone on a fresh machine: install Python silently rather
+        # than sending the user to a website.
+        if (Get-Command winget -ErrorAction SilentlyContinue) {
+            Write-Host "  Installing Python 3.12 (one time)..." -ForegroundColor Yellow
+            winget install Python.Python.3.12 --source winget --accept-package-agreements `
+                --accept-source-agreements --disable-interactivity | Out-Null
+            $env:Path = [Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' +
+                        [Environment]::GetEnvironmentVariable('Path', 'User') + ';' + $env:Path
+        }
+    }
     if (Get-Command py -ErrorAction SilentlyContinue) {
         py -3 -m venv (Join-Path $root "backend\.venv")
     } elseif (Get-Command python -ErrorAction SilentlyContinue) {
         python -m venv (Join-Path $root "backend\.venv")
     } else {
-        throw "Python 3.12+ not found. Install it from python.org and re-run."
+        throw "Python 3.12+ not found and winget could not install it. Install from python.org and re-run."
     }
 }
 # Self-repair: make sure backend deps import (cheap check, fixes broken installs).
@@ -150,6 +162,14 @@ if (-not (Test-PyImport $python "torch, segment_anything")) {
 
 # --- 2. UI build ---------------------------------------------------------------
 if (-not (Test-Path (Join-Path $root "frontend\dist\index.html"))) {
+    if (-not (Get-Command npm -ErrorAction SilentlyContinue) -and
+        (Get-Command winget -ErrorAction SilentlyContinue)) {
+        Write-Host "  Installing Node.js LTS for the UI (one time)..." -ForegroundColor Yellow
+        winget install OpenJS.NodeJS.LTS --source winget --accept-package-agreements `
+            --accept-source-agreements --disable-interactivity | Out-Null
+        $env:Path = [Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' +
+                    [Environment]::GetEnvironmentVariable('Path', 'User') + ';' + $env:Path
+    }
     if (Get-Command npm -ErrorAction SilentlyContinue) {
         Write-Host "  First run: building the UI (one time)..."
         Push-Location (Join-Path $root "frontend")
@@ -308,6 +328,7 @@ function Start-ComfyUI($dir) {
     $repoMain = Join-Path $dir "main.py"
     if (Test-Path $repoMain) {
         if (-not (Repair-ComfyVenv $dir)) { return $null }
+        Optimize-ComfyPerf $dir
         $venvPy = Join-Path $dir ".venv\Scripts\python.exe"
         if (-not (Test-Path $venvPy)) { $venvPy = Join-Path $dir "venv\Scripts\python.exe" }
         if (Test-Path $venvPy) {
@@ -318,6 +339,11 @@ function Start-ComfyUI($dir) {
             if ((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1GB -le 20) {
                 $comfyArgs += "--disable-smart-memory"
             }
+            # The flag aborts startup when the package is missing, so it is
+            # gated on the same probe the backend's own spawner uses.
+            if (Test-PyImport $venvPy "sageattention") {
+                $comfyArgs += "--use-sage-attention"
+            }
             return Start-Process -PassThru -WindowStyle Hidden -WorkingDirectory $dir `
                 -RedirectStandardOutput $out -RedirectStandardError $err `
                 $venvPy -ArgumentList $comfyArgs
@@ -326,7 +352,57 @@ function Start-ComfyUI($dir) {
     return $null
 }
 
+function Install-ComfyUI {
+    # A fresh clone has no ComfyUI. Fetch the repo layout into tools\ComfyUI;
+    # Repair-ComfyVenv then installs the right torch for this GPU.
+    $dest = Join-Path $root "tools\ComfyUI"
+    if (Test-Path (Join-Path $dest "main.py")) { return $dest }
+    Write-Host "  Installing ComfyUI (one time, the render engine)..." -ForegroundColor Yellow
+    $zip = Join-Path $env:TEMP "pf-comfyui.zip"
+    $stage = Join-Path $env:TEMP "pf-comfyui-unzip"
+    try {
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        Invoke-WebRequest -UseBasicParsing -TimeoutSec 300 `
+            -Uri "https://github.com/comfyanonymous/ComfyUI/archive/refs/heads/master.zip" `
+            -OutFile $zip
+        if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
+        Expand-Archive -Path $zip -DestinationPath $stage -Force
+        $inner = Get-ChildItem $stage -Directory | Select-Object -First 1
+        New-Item -ItemType Directory -Force (Split-Path $dest) | Out-Null
+        if (Test-Path $dest) { Remove-Item -Recurse -Force $dest }
+        Move-Item $inner.FullName $dest
+        Write-Host "  ComfyUI files in place." -ForegroundColor Green
+        return $dest
+    } catch {
+        Write-Host "  [--] Could not download ComfyUI ($($_.Exception.Message)); renders fall back to the mock." -ForegroundColor Yellow
+        return $null
+    } finally {
+        Remove-Item $zip -ErrorAction SilentlyContinue
+        Remove-Item -Recurse -Force $stage -ErrorAction SilentlyContinue
+    }
+}
+
+function Optimize-ComfyPerf($dir) {
+    # Measured on an RTX 4060: SageAttention via Triton = 11% faster renders
+    # with the image unchanged. NVIDIA-only (Triton kernels), never fatal.
+    if ((Get-GpuMode) -ne "cuda") { return }
+    $venvPy = Join-Path $dir ".venv\Scripts\python.exe"
+    if (-not (Test-Path $venvPy)) { return }
+    if (Test-PyImport $venvPy "sageattention") { return }
+    Write-Host "  Installing SageAttention (faster renders on NVIDIA)..." -ForegroundColor DarkGray
+    $log = Join-Path $logDir "sage-install.log"
+    $pip = Join-Path $dir ".venv\Scripts\pip.exe"
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    & $pip install --retries 6 --timeout 120 triton-windows sageattention *> $log
+    $ErrorActionPreference = $prev
+    if (Test-PyImport $venvPy "sageattention") {
+        Write-Host "  [ok] SageAttention ready (+~11% render speed)" -ForegroundColor Green
+    }
+}
+
 $comfyDir = Find-ComfyUI
+if (-not $comfyDir) { $comfyDir = Install-ComfyUI }
 $comfyUp = Test-Http "http://127.0.0.1:8188/system_stats"
 if (-not $comfyUp -and $comfyDir) {
     Write-Host "  Starting ComfyUI from $comfyDir ..." -ForegroundColor DarkGray
@@ -377,6 +453,28 @@ if ($comfyUp) {
     Write-Host "  [--] ComfyUI not available - edits use the clearly-labeled mock renderer." -ForegroundColor Yellow
     Write-Host "       (Logs: $logDir\comfyui*.log - or set PROMPTFORGE_COMFYUI_PATH.)" -ForegroundColor DarkGray
 }
+
+# --- Performance summary ---------------------------------------------------------
+# Every tuning decision in one place, so "is it using my hardware?" has an
+# answer without reading logs. The backend scales the rest automatically:
+# model sizes, mesh octree detail and video limits all follow VRAM/RAM.
+$cores = (Get-CimInstance Win32_ComputerSystem).NumberOfLogicalProcessors
+$gpuMode = Get-GpuMode
+$sageOn = $false
+if ($comfyDir) {
+    $comfyPy = Join-Path $comfyDir ".venv\Scripts\python.exe"
+    if (Test-Path $comfyPy) { $sageOn = Test-PyImport $comfyPy "sageattention" }
+}
+Write-Host ""
+Write-Host "  Tuned for this machine:" -ForegroundColor Cyan
+Write-Host ("    GPU: {0} ({1} GB VRAM) | RAM: {2} GB | CPU threads: {3}" -f `
+    $gpuMode, $vramGb, $ramGb, $cores) -ForegroundColor DarkGray
+Write-Host ("    torch build: {0} | planner LLM: {1} | SageAttention: {2}" -f `
+    $gpuMode, $llmModel, $(if ($sageOn) { "on (+11% renders)" } else { "off" })) -ForegroundColor DarkGray
+Write-Host ("    checkpoint RAM cache: {0}" -f `
+    $(if ($ramGb -le 20) { "dropped between renders (protects $ramGb GB RAM)" }
+      else { "kept between renders (RAM headroom)" })) -ForegroundColor DarkGray
+Write-Host "    LAN: models copy from other PromptForge machines; idle peers accept renders" -ForegroundColor DarkGray
 
 # --- 5. PromptForge itself -------------------------------------------------------
 # Free port 8000 if a stale PromptForge backend is still holding it.

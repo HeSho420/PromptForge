@@ -21,7 +21,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -162,6 +162,10 @@ class ModelDownloader:
         self.civitai_token = civitai_token
         # Injectable so tests don't actually wait through the retry backoff.
         self._sleep = sleep
+        # Optional LAN source: name -> URL on a discovered PromptForge peer
+        # that already holds the file. Wired by Services when peer sharing
+        # is on; None means the internet path runs exactly as before.
+        self.peer_source: Callable[[str], str | None] | None = None
 
     def _fetch_url(self, model: ModelInfo) -> str:
         """The URL actually requested. Civitai downloads need an account
@@ -229,27 +233,51 @@ class ModelDownloader:
         self.registry.notes.pop(name, None)
 
         digest: hashlib._Hash | None = None
-        for attempt in range(1, self.MAX_ATTEMPTS + 1):
+        # A machine on the local network that already holds this exact file
+        # beats any internet mirror by an order of magnitude. The peer is
+        # NOT trusted — the checksum verification below is what accepts the
+        # bytes — so this path exists only for sha-pinned entries, skips
+        # the host allowlist for that reason alone, and any failure falls
+        # straight through to the normal download.
+        if self.peer_source is not None and model.sha256:
             try:
-                digest = self._attempt(name, model, part, progress)
-                break
-            except _PermanentDownload as exc:
-                part.unlink(missing_ok=True)
-                raise self._fail(name, model, str(exc)) from exc
-            except _TransientDownload as exc:
-                if not is_remote or attempt == self.MAX_ATTEMPTS:
-                    # Keep the .part on a remote give-up so a future run resumes.
-                    if not is_remote:
-                        part.unlink(missing_ok=True)
-                    raise self._fail(
-                        name, model,
-                        f"failed after {attempt} attempt(s): {exc}",
-                        keep_part=is_remote) from exc
-                wait = min(2 ** attempt, 30)
-                self.registry.notes[name] = (
-                    f"Attempt {attempt}/{self.MAX_ATTEMPTS} failed ({exc}); "
-                    f"resuming in {wait}s…")
-                self._sleep(wait)
+                peer_url = self.peer_source(name)
+            except Exception:  # noqa: BLE001 — discovery must never block
+                peer_url = None
+            if peer_url:
+                self.registry.notes[name] = ("Copying from another "
+                                             "PromptForge on your network…")
+                try:
+                    digest = self._attempt(name, replace(model, url=peer_url),
+                                           part, progress)
+                except Exception as exc:  # noqa: BLE001
+                    digest = None
+                    self.registry.notes[name] = (
+                        f"Network copy failed ({str(exc)[:80]}); "
+                        "downloading from the internet instead")
+        if digest is None:
+            for attempt in range(1, self.MAX_ATTEMPTS + 1):
+                try:
+                    digest = self._attempt(name, model, part, progress)
+                    break
+                except _PermanentDownload as exc:
+                    part.unlink(missing_ok=True)
+                    raise self._fail(name, model, str(exc)) from exc
+                except _TransientDownload as exc:
+                    if not is_remote or attempt == self.MAX_ATTEMPTS:
+                        # Keep the .part on a remote give-up so a future
+                        # run resumes.
+                        if not is_remote:
+                            part.unlink(missing_ok=True)
+                        raise self._fail(
+                            name, model,
+                            f"failed after {attempt} attempt(s): {exc}",
+                            keep_part=is_remote) from exc
+                    wait = min(2 ** attempt, 30)
+                    self.registry.notes[name] = (
+                        f"Attempt {attempt}/{self.MAX_ATTEMPTS} failed "
+                        f"({exc}); resuming in {wait}s…")
+                    self._sleep(wait)
 
         assert digest is not None
         if model.sha256:

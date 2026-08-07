@@ -70,6 +70,20 @@ class Settings:
         default_factory=lambda: os.environ.get(
             "PROMPTFORGE_FIRST_RUN_SETUP", "1") not in ("0", "false", "no")
     )
+    # Share downloaded model weights with other PromptForge installs on the
+    # local network, and copy from them before touching the internet. Only
+    # the model library is ever served — never photos, assets or jobs — and
+    # every copied file is verified against the registry's pinned checksum.
+    lan_share: bool = field(
+        default_factory=lambda: os.environ.get(
+            "PROMPTFORGE_LAN_SHARE", "1") not in ("0", "false", "no")
+    )
+    # Accept render work from LAN peers while this machine is idle, and
+    # hand renders to an idle peer when this machine's queue is busy.
+    lan_render: bool = field(
+        default_factory=lambda: os.environ.get(
+            "PROMPTFORGE_LAN_RENDER", "1") not in ("0", "false", "no")
+    )
     # How many times a failing workflow may be sent back to the LLM for repair.
     workflow_max_repairs: int = field(
         default_factory=lambda: int(os.environ.get("PROMPTFORGE_WORKFLOW_REPAIRS", "2"))

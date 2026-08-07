@@ -213,6 +213,15 @@ def create_app(services: Services | None = None) -> Flask:
         })
 
     # -- system (GPU) telemetry ----------------------------------------------------
+    @api.get("/peers")
+    def peers():
+        """Other PromptForge machines discovered on the local network."""
+        return jsonify({
+            "share": services.settings.lan_share,
+            "render": services.settings.lan_render,
+            "port": getattr(services.peers, "http_port", None),
+            "peers": [p.to_dict() for p in services.peers.peers_list()]})
+
     @api.get("/system")
     def system_stats():
         import subprocess

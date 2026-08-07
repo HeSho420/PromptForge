@@ -84,6 +84,7 @@ from .llm import (
 from .model_intel import ModelIntel
 from .model_scout import ModelScout
 from .model_search import ModelIndex, ModelSearch
+from .peers import PeerService
 from .registry import DownloadError, ModelDownloader, ModelInfo, ModelRegistry
 from .safety import SafetyFilter, SafetyRuleStore, consent_verdict
 from .storage import AssetStore
@@ -854,6 +855,11 @@ class Services:
         # nothing. Cleared whenever the cache is actually dropped.
         self._comfy_heavy_cached: str | None = None
         self.model_search = ModelSearch(self.registry)
+        # Thread-local ComfyUI override: the peer-delegation worker binds
+        # ITS jobs' render traffic to another machine without touching what
+        # every other thread sees. Must exist before the `comfy` property
+        # is first read.
+        self._comfy_tls = threading.local()
         self.comfy = ComfyUIClient(self.settings.comfyui_url)
         self.hardware = probe(self.settings.data_dir)
         self.trust = TrustJudge(self.llm)
@@ -887,6 +893,24 @@ class Services:
         self.queue = JobQueue(self.db,
                               max_retries=self.settings.job_max_retries,
                               backoff_s=self.settings.job_retry_backoff_s)
+        # Two PromptForge machines on one network help each other: model
+        # weights copy from a peer before the internet (sha-verified), and
+        # a busy queue hands whole render jobs to an idle peer. The peer
+        # listener serves ONLY the model library and a ComfyUI proxy — the
+        # app itself stays on 127.0.0.1.
+        self.peers = PeerService(
+            self.registry, comfy_url=self.settings.comfyui_url,
+            share=self.settings.lan_share, render=self.settings.lan_render,
+            busy_check=self.queue.busy)
+        # Sockets only open for real rendering setups: the mock backend is
+        # what every test fixture uses, and hundreds of tests each opening
+        # LAN listeners would fight over the ports for nothing.
+        if self.settings.inpaint_backend != "mock":
+            try:
+                self.peers.start()
+            except Exception as exc:  # noqa: BLE001 — LAN help is optional
+                self.registry.notes["_peers"] = f"peer service off: {exc}"
+        self.downloader.peer_source = self._peer_model_url
         self.queue.register("image_edit", self._handle_image_edit)
         self.queue.register("model_download", self._handle_model_download)
         self.queue.register("model_research", self._handle_model_research)
@@ -968,6 +992,13 @@ class Services:
 
     def start(self) -> None:
         self.queue.start()
+        # The peer worker only ever takes a job when this machine is BUSY
+        # and a discovered peer is idle — otherwise it sleeps.
+        if (self.settings.lan_render
+                and self.settings.inpaint_backend != "mock"):
+            self.queue.start_helper(gate=self._peer_gate,
+                                    wrap=self._delegate_wrap,
+                                    types=self._DELEGATABLE)
         # Reclaim disk for images deleted in previous sessions.
         try:
             purged = self.store.purge_trash()
@@ -987,8 +1018,52 @@ class Services:
     def stop(self) -> None:
         self._monitor_stop.set()
         self.queue.stop()
+        try:
+            self.peers.stop()
+        except Exception:  # noqa: BLE001
+            pass
         if self._monitor:
             self._monitor.join(timeout=2)
+
+    # -- peer network -------------------------------------------------------------
+    # Job types worth sending across the network: the render-heavy ones.
+    # Setup, downloads and research stay local by definition.
+    _DELEGATABLE = frozenset({"image_edit", "workflow", "video",
+                              "motion_transfer", "avatar", "avatar_render"})
+
+    @property
+    def comfy(self) -> Any:
+        """This thread's ComfyUI. Delegated worker threads see the peer's
+        proxy; every other thread sees the local client. The setter keeps
+        the dozens of tests that stub `services.comfy = Fake()` working."""
+        return getattr(self._comfy_tls, "client", None) or self._comfy_main
+
+    @comfy.setter
+    def comfy(self, client: Any) -> None:
+        self._comfy_main = client
+
+    def _peer_model_url(self, name: str) -> str | None:
+        model = self.registry.get(name)
+        return self.peers.find_model_url(name,
+                                         model.sha256 if model else None)
+
+    def _peer_gate(self) -> bool:
+        return self.peers.best_idle_peer() is not None
+
+    def _delegate_wrap(self, execute, job) -> None:
+        """Run one job with its ComfyUI traffic bound to an idle peer."""
+        peer = self.peers.best_idle_peer()
+        if peer is None:
+            execute(job)
+            return
+        job.log("info", f"[peer] this machine is busy and '{peer.name}' "
+                        f"({peer.host}) is idle — its GPU renders this job")
+        self._comfy_tls.client = ComfyUIClient(
+            f"{peer.base}/pf-peer/comfy")
+        try:
+            execute(job)
+        finally:
+            self._comfy_tls.client = None
 
     # -- health monitoring --------------------------------------------------------
     MONITOR_INTERVAL_S = 15
@@ -5424,6 +5499,16 @@ class Services:
         A generated workflow once hard-crashed ComfyUI and every render after
         that failed until a manual reboot — this is the guard against that.
         """
+        # A DELEGATED job talks to another machine's ComfyUI. That machine
+        # is not ours to restart: if the peer stops answering, drop the
+        # binding and carry on with the local checks below — the job simply
+        # finishes on this machine instead.
+        if getattr(self._comfy_tls, "client", None) is not None:
+            if self.comfy.is_up():
+                return
+            job.log("info", "[peer] the delegated machine stopped "
+                            "answering — continuing on this machine")
+            self._comfy_tls.client = None
         # health() is an OPTIONAL capability, probed the same way free_memory()
         # is. The adapter boundary here is duck-typed and every fake in the
         # tests implements is_up() only — requiring the richer method broke
