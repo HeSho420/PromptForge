@@ -7094,11 +7094,17 @@ class Services:
             job.log("info", "The extended frame still does not hold a full "
                             "figure — zooming the camera out instead (the "
                             "lower body is invented)")
-            zoomed = self._zoom_out_full_body(job, image)
-            z_aspect = (self._figure_aspect(zoomed)
-                        if zoomed is not None else None)
-            if z_aspect is not None and z_aspect > aspect:
-                out, aspect = zoomed, z_aspect
+            # Two attempts, fresh seed each: the zoom-out is a generation,
+            # and a single unlucky seed was measured producing a figure
+            # still too squat while the next one measured 2.9x.
+            for _attempt in range(2):
+                zoomed = self._zoom_out_full_body(job, image)
+                z_aspect = (self._figure_aspect(zoomed)
+                            if zoomed is not None else None)
+                if z_aspect is not None and z_aspect > aspect:
+                    out, aspect = zoomed, z_aspect
+                if aspect >= self._FULL_FIGURE_ASPECT:
+                    break
         if aspect is not None:
             if aspect >= self._FULL_FIGURE_ASPECT:
                 job.log("info", "The figure is full-length now (silhouette "
@@ -7720,6 +7726,14 @@ class Services:
                         + ". A rejected view's surface takes neighbouring "
                         "colour instead — painting an unusable view onto "
                         "the avatar is what used to smear it.")
+            broken = report.get("components_dropped") or 0
+            if broken:
+                job.log("info", f"The reconstruction contained {broken} "
+                                "disconnected fragment(s) — usually an "
+                                "invented body part that did not fuse to "
+                                "the figure — and they were removed. A "
+                                "standing, full-length photo reconstructs "
+                                "in one piece.")
             return out.read_bytes(), report
 
     def _render_scene3d_step(self, job: Job,

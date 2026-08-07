@@ -737,6 +737,23 @@ def retexture(mesh: trimesh.Trimesh, views: list[View], tile: int,
         dropped = [d for d in dropped if d["azimuth"] != best.azimuth]
     views = kept
 
+    # A reconstruction can FRACTURE — seen live when an invented lower
+    # body did not fuse to the torso: the figure shipped severed at the
+    # hips with a floating leg fragment. A clearly-minor disconnected
+    # piece is dropped (and reported); two comparable halves are kept,
+    # because deleting half a person is worse than a visible seam.
+    components_dropped = 0
+    parts = mesh.split(only_watertight=False)
+    if len(parts) > 1:
+        biggest = max(len(p.faces) for p in parts)
+        keep = [p for p in parts if len(p.faces) >= 0.4 * biggest]
+        components_dropped = len(parts) - len(keep)
+        if components_dropped:
+            print(f"note: dropped {components_dropped} disconnected "
+                  "fragment(s) of the reconstruction", file=sys.stderr)
+            mesh = (keep[0] if len(keep) == 1
+                    else trimesh.util.concatenate(keep))
+
     repaired = repair_normals(mesh)
     smoothing = smooth_mesh(mesh)
     # Centre ONCE, in place. Projecting from a centred copy while ray-testing
@@ -884,6 +901,7 @@ def retexture(mesh: trimesh.Trimesh, views: list[View], tile: int,
             "view_bbox": [[round(c, 6) for c in v.bbox] for v in views],
             "tile": tile, "cols": cols, "rows": rows,
             "islands_flipped": islands_flipped,
+            "components_dropped": components_dropped,
             "photometric": photometric,
             "mappings": [{k: round(float(v), 5) for k, v in m.items()}
                          for m in mappings],
@@ -970,6 +988,13 @@ def paste_tile(glb: Path, report: dict, index: int, refined: Path,
         (tile, tile), Image.LANCZOS), float)
     mask = np.asarray(Image.open(alpha_path).convert("L").resize(
         (tile, tile), Image.NEAREST)) > 127
+    # The repaint is a generation: it can shift the silhouette inward a
+    # pixel or two, leaving BACKGROUND on texels the raster's alpha calls
+    # subject — rendered, that is a spray of white specks along every
+    # silhouette. Shave the trust region before flooding, so edge texels
+    # take interior colour instead of the repaint's backdrop.
+    if mask.any():
+        mask = ndimage.binary_erosion(mask, iterations=6)
     # Same flood the original tiles got: texels just outside the subject
     # must read as subject, or bilinear taps at the silhouette go grey.
     if mask.any() and not mask.all():
@@ -1075,6 +1100,7 @@ def main() -> int:
         "tile": result["tile"], "cols": result["cols"],
         "rows": result["rows"],
         "islands_flipped": result["islands_flipped"],
+        "components_dropped": result["components_dropped"],
         "photometric": result["photometric"],
         "mappings": result["mappings"],
         "winding_repaired": bool(result["repaired"]),
