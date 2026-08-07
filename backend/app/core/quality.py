@@ -1147,9 +1147,10 @@ _REPLACE_WITH = re.compile(
 _STATE_WORDS = frozenset("""
 red orange yellow green teal cyan blue navy purple violet pink magenta white
 black grey gray brown beige tan cream gold golden silver darker lighter
-brighter striped plaid checkered floral polka-dot dotted metallic leather
-denim silk velvet wool knitted lace shiny matte glossy transparent sheer
-bigger smaller longer shorter wider tighter looser new old clean dirty wet
+brighter bright dark light deep pale vivid neon hot pastel striped plaid
+checkered floral polka-dot dotted metallic leather denim silk velvet wool
+knitted lace shiny matte glossy transparent sheer bigger smaller longer
+shorter wider tighter looser new old clean dirty wet
 """.split())
 
 
@@ -1661,51 +1662,73 @@ def requirement_colour(text: str) -> str | None:
     return _COLOUR_ALIASES.get(word, word)
 
 
+def _band(channel: Image.Image, lo: int, hi: int) -> Image.Image:
+    """255 where lo <= value <= hi, else 0 — one C-level point() pass."""
+    return channel.point([255 if lo <= i <= hi else 0 for i in range(256)])
+
+
+def _count(mask: Image.Image) -> int:
+    return mask.histogram()[255]
+
+
 def _colour_share(image: Image.Image, mask: Image.Image,
                   colour: str) -> float | None:
     """The share of the masked pixels that read as `colour`. None when the
-    mask selects nothing."""
+    mask selects nothing.
+
+    Built from per-channel lookup tables and multiplies — all C — because
+    the first version walked the pixels in Python and its seconds-per-call
+    showed up as timeouts across the mock test suite."""
     if max(image.size) > 512:
         scale = 512 / max(image.size)
         image = image.resize((max(1, int(image.width * scale)),
                               max(1, int(image.height * scale))),
                              Image.LANCZOS)
-    img = image.convert("HSV")
+    h, sat, val = image.convert("HSV").split()
     m = fit_mask(mask, image.size).point(lambda v: 255 if v >= 128 else 0)
-    pixels = [p for p, keep in zip(img.getdata(), m.getdata(), strict=True)
-              if keep]
-    if not pixels:
+    total = _count(m)
+    if not total:
         return None
-    hits = 0
-    for h, s, v in pixels:
-        if colour == "white":
-            hit = s < 50 and v > 190
-        elif colour == "black":
-            hit = v < 60
-        elif colour == "grey":
-            hit = s < 50 and 60 <= v <= 190
-        elif colour == "silver":
-            hit = s < 60 and v > 120
-        elif colour == "brown":
-            hit = 8 <= h <= 40 and s > 60 and 40 < v < 170
-        elif colour == "beige":
-            hit = 14 <= h <= 50 and 20 <= s <= 110 and v > 150
-        elif colour == "gold":
-            hit = 25 <= h <= 48 and s > 90 and v > 130
-        else:
-            ranges = _HUE_RANGES.get(colour)
-            if ranges is None:
-                return None
-            # A colour needs saturation and light to BE that colour — a
-            # near-black or washed-out pixel is not "blue".
-            hit = (s > 60 and v > 50
-                   and any(lo <= h <= hi for lo, hi in ranges))
-        hits += hit
-    return hits / len(pixels)
+
+    def all_of(*conds: Image.Image) -> Image.Image:
+        out = m
+        for c in conds:
+            out = ImageChops.multiply(out, c)
+        return out
+
+    if colour == "white":
+        hit = all_of(_band(sat, 0, 49), _band(val, 191, 255))
+    elif colour == "black":
+        hit = all_of(_band(val, 0, 59))
+    elif colour == "grey":
+        hit = all_of(_band(sat, 0, 49), _band(val, 60, 190))
+    elif colour == "silver":
+        hit = all_of(_band(sat, 0, 59), _band(val, 121, 255))
+    elif colour == "brown":
+        hit = all_of(_band(h, 8, 40), _band(sat, 61, 255),
+                     _band(val, 41, 169))
+    elif colour == "beige":
+        hit = all_of(_band(h, 14, 50), _band(sat, 20, 110),
+                     _band(val, 151, 255))
+    elif colour == "gold":
+        hit = all_of(_band(h, 25, 48), _band(sat, 91, 255),
+                     _band(val, 131, 255))
+    else:
+        ranges = _HUE_RANGES.get(colour)
+        if ranges is None:
+            return None
+        hue = _band(h, *ranges[0])
+        for extra in ranges[1:]:
+            hue = ImageChops.lighter(hue, _band(h, *extra))
+        # A colour needs saturation and light to BE that colour — a
+        # near-black or washed-out pixel is not "blue".
+        hit = all_of(hue, _band(sat, 61, 255), _band(val, 51, 255))
+    return _count(hit) / total
 
 
 def colour_delivered(image: Image.Image, mask: Image.Image,
-                     colour: str) -> bool | None:
+                     colour: str,
+                     before: Image.Image | None = None) -> bool | None:
     """Did the masked region come out `colour`? Arithmetic, no model.
 
     The measured failure this settles: colour requirements were judged by the
@@ -1721,7 +1744,20 @@ def colour_delivered(image: Image.Image, mask: Image.Image,
     share = _colour_share(image, mask, colour)
     if share is None:
         return None
-    if share >= 0.30:
+    if before is not None:
+        base = _colour_share(before, mask, colour)
+        if base is not None:
+            # The mask is never surgical — arms and hair inside it measured
+            # 0.18 "red" while the garment stayed black. What a delivered
+            # recolour cannot avoid is RAISING the share; what a miss cannot
+            # fake is leaving it flat.
+            delta = share - base
+            if delta >= 0.22 or share >= 0.60:
+                return True
+            if delta <= 0.05 and share < 0.50:
+                return False
+            return None
+    if share >= 0.35:
         return True
     if share <= 0.08:
         return False
@@ -1733,14 +1769,12 @@ def region_change(before: Image.Image, after: Image.Image,
     """Mean absolute change inside the mask, 0..1. None without mask pixels.
 
     Below ~0.02 the sampler returned the region essentially untouched — the
-    edit did not happen, whatever any judge says. That case used to buy a
-    same-recipe retry with an emphasized prompt; an unchanged region is
-    evidence the RECIPE ignored the prompt, so emphasis alone re-rolls the
-    same failure."""
-    # RGB, not luma: a recolour at equal luminance (grey jacket to red) is
-    # a large edit that greyscale cannot see at all — measured 0.016 on a
-    # region that had been fully repainted, which would have branded a
-    # delivered edit a no-op.
+    edit did not happen, whatever any judge says.
+
+    Per-channel, not luma: a recolour at equal luminance (grey jacket to
+    red) is a large edit greyscale cannot see — measured 0.016 on a fully
+    repainted region. And built on C-level channel ops, because the Python
+    pixel walk it replaces was slow enough to time out the mock suite."""
     b = before.convert("RGB")
     a = after.convert("RGB")
     if max(b.size) > 512:
@@ -1750,14 +1784,13 @@ def region_change(before: Image.Image, after: Image.Image,
     if a.size != b.size:
         a = a.resize(b.size, Image.LANCZOS)
     m = fit_mask(mask, b.size).point(lambda v: 255 if v >= 128 else 0)
-    diff = ImageChops.difference(a, b)
-    total = n = 0
-    for (dr, dg, db), keep in zip(diff.getdata(), m.getdata(), strict=True):
-        if keep:
-            total += max(dr, dg, db)
-            n += 1
+    n = m.histogram()[255]
     if not n:
         return None
+    r1, g1, b1 = ImageChops.difference(a, b).split()
+    peak = ImageChops.lighter(ImageChops.lighter(r1, g1), b1)
+    inside = ImageChops.multiply(peak, m)
+    total = sum(i * c for i, c in enumerate(inside.histogram()))
     return (total / n) / 255.0
 
 
@@ -1774,8 +1807,7 @@ _RECOLOUR = re.compile(
     + _COLOUR_WORD + r"\s*(?=$|[,.;)]|\band\b)|"
     r"\b(make|paint|dye)\b[^.]{0,30}\b"
     r"(bright\s+|dark\s+|light\s+|deep\s+|pale\s+|vivid\s+|neon\s+)?"
-    + _COLOUR_WORD + r"\s*(?=$|[,.;)]|\band\b)",
-    re.IGNORECASE)
+    + _COLOUR_WORD + r"\s*(?=$|[,.;)]|\band\b)", re.IGNORECASE)
 
 
 def is_recolour(text: str) -> bool:

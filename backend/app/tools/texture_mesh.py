@@ -7,7 +7,7 @@ the official one needs a CUDA rasterizer with no wheel for this Python — so
 the colour has to come from the photographs rather than from a paint model.
 
     python texture_mesh.py <mesh.glb> <out.glb> --view <azimuth>:<image.png>
-                           [--view ...] [--tile 1024] [--json]
+                           [--view ...] [--tile 2048] [--json]
 
 What has to be true for the paint to land where it belongs, each of which was
 once missing and each of which left a measurable scar:
@@ -121,6 +121,38 @@ def subject_mask(img: np.ndarray) -> np.ndarray:
     return ndimage.binary_fill_holes(m)
 
 
+def clean_mask(mask: np.ndarray) -> np.ndarray:
+    """The paintable part of a matte: drop far debris, shave the halo ring.
+
+    Rendered honestly in Blender, the shipped avatar wore two artefacts the
+    quality gate cannot catch because they live INSIDE views that pass it:
+    beige scraps of hallucinated wall floating near the shoulders (matted as
+    subject, painted as subject), and a pink smear where flooded EDGE pixels
+    — the matting halo, half skin half backdrop — were dragged across every
+    surface no camera saw. Both are properties of the mask, so both are
+    fixed here: connected components beyond arm's reach of the main figure
+    are debris (a real hand attaches through the body; a wall scrap does
+    not), and a few edge pixels are shaved so the flood fill and the
+    sampler read clean interior colour instead of the mixed rim."""
+    from scipy import ndimage
+    if not mask.any():
+        return mask
+    out = mask
+    lab, n = ndimage.label(out)
+    if n > 1:
+        sizes = ndimage.sum(out, lab, range(1, n + 1))
+        main = int(sizes.argmax()) + 1
+        dist = ndimage.distance_transform_edt(lab != main)
+        reach = 0.02 * max(out.shape)
+        drop = [c for c in range(1, n + 1)
+                if c != main and dist[lab == c].min() > reach]
+        if drop:
+            out = out & ~np.isin(lab, drop)
+    shave = max(2, int(round(0.003 * max(out.shape))))
+    shaved = ndimage.binary_erosion(out, iterations=shave)
+    return shaved if shaved.any() else out
+
+
 def _fit_square(mask: np.ndarray) -> np.ndarray:
     """Crop to content and fit into a fixed square, so two silhouettes are
     compared on shape alone rather than on how they happened to be framed."""
@@ -230,7 +262,10 @@ class View:
         from scipy import ndimage
         self.azimuth = azimuth
         self.image = image
-        self.mask = subject_mask(image)
+        # The RAW matte is what the quality gate must judge — cleaning first
+        # would hide exactly the fragmentation the gate exists to catch.
+        self.mask_raw = subject_mask(image)
+        self.mask = clean_mask(self.mask_raw)
         ys, xs = np.nonzero(self.mask)
         h, w = image.shape[:2]
         if len(ys):
@@ -355,6 +390,93 @@ def solve_view_mapping(mesh: trimesh.Trimesh, view: View,
                         improved = True
     return {"sx": params[0], "sy": params[1], "dx": params[2],
             "dy": params[3], "cx": cx, "cy": cy, "iou": round(best, 3)}
+
+
+def compose_mapping(mapping: dict, extra: tuple[float, float, float, float]
+                    ) -> dict:
+    """Fold a further similarity (about the same centre) into a mapping."""
+    sx, sy, dx, dy = extra
+    return {**mapping,
+            "sx": mapping["sx"] * sx, "sy": mapping["sy"] * sy,
+            "dx": mapping["dx"] * sx + dx, "dy": mapping["dy"] * sy + dy}
+
+
+def refine_photometric(views: list[View], mappings: list[dict],
+                       uvs: list[np.ndarray], scores: list[np.ndarray],
+                       order: list[int],
+                       base_uvs: list[np.ndarray]) -> list[dict]:
+    """Nudge each view's 2D mapping until overlapping views AGREE.
+
+    The silhouette fit lines up the outline, and the outline only. Two views
+    that both pass it can still disagree by ten pixels in the middle of the
+    face — and at atlas resolution that renders as a second pair of lips at
+    every seam. The silhouette carries no information about interior
+    features; the photograph does. So after the outline fit, each view is
+    nudged (scale and shift, tightly bounded) to minimise the colour
+    difference against the views already accepted, on the vertices both see
+    squarely — the same chained order the tone match uses, so the front
+    view stays the anchor and never moves."""
+    report: list[dict] = []
+    for i in order[1:]:
+        done = [j for j in order[:order.index(i)]]
+        score_done = np.stack([scores[j] for j in done], axis=1)
+        anchor = score_done.max(axis=1)
+        anchor_view = np.array(done)[score_done.argmax(axis=1)]
+        shared = (scores[i] > 0.3) & (anchor > 0.3)
+        if shared.sum() < 300:
+            report.append({"view": i, "skipped": "overlap too small"})
+            continue
+        idx = np.nonzero(shared)[0]
+        if len(idx) > 8000:
+            idx = idx[np.linspace(0, len(idx) - 1, 8000).astype(int)]
+        ref = np.zeros((len(idx), 3))
+        for j in done:
+            pick = anchor_view[idx] == j
+            if pick.any():
+                ref[pick] = sample(views[j].filled, uvs[j][idx][pick])
+        m = mappings[i]
+        cx, cy = m["cx"], m["cy"]
+        u0 = base_uvs[i][idx]
+
+        def cost(extra: tuple[float, float, float, float], *,
+                 m=m, cx=cx, cy=cy, u0=u0, img=views[i].filled,
+                 ref=ref) -> float:
+            mm = compose_mapping(m, extra)
+            uu = np.stack(
+                [cx + (u0[:, 0] - cx) * mm["sx"] + mm["dx"],
+                 cy + (u0[:, 1] - cy) * mm["sy"] + mm["dy"]], axis=1)
+            return float(np.abs(sample(img, uu) - ref).mean())
+
+        params = [1.0, 1.0, 0.0, 0.0]
+        best = start = cost(tuple(params))
+        lo, hi = (0.94, 0.94, -0.025, -0.025), (1.06, 1.06, 0.025, 0.025)
+        for step in (0.008, 0.004, 0.002, 0.001):
+            improved = True
+            while improved:
+                improved = False
+                for k in range(4):
+                    for direction in (step, -step):
+                        trial = list(params)
+                        trial[k] = float(np.clip(trial[k] + direction,
+                                                 lo[k], hi[k]))
+                        if trial[k] == params[k]:
+                            continue
+                        got = cost(tuple(trial))
+                        if got < best - 1e-4:
+                            params, best = trial, got
+                            improved = True
+        if best < start * 0.99:
+            mm = mappings[i] = compose_mapping(m, tuple(params))
+            # Later views in the chain must anchor against the REFINED
+            # position of this one, not where it used to be.
+            uvs[i] = np.stack(
+                [cx + (base_uvs[i][:, 0] - cx) * mm["sx"] + mm["dx"],
+                 cy + (base_uvs[i][:, 1] - cy) * mm["sy"] + mm["dy"]], axis=1)
+            report.append({"view": i, "colour_err": [round(start, 1),
+                                                     round(best, 1)]})
+        else:
+            report.append({"view": i, "kept": round(start, 1)})
+    return report
 
 
 def project(mesh: trimesh.Trimesh, view: View, deg: float,
@@ -485,13 +607,43 @@ def smooth_face_scores(mesh: trimesh.Trimesh,
 # --------------------------------------------------------------------------
 # atlas
 # --------------------------------------------------------------------------
-def build_atlas(images: list[np.ndarray], tile: int) -> tuple[Image.Image, int]:
+def content_rect(view: View, uv_used: np.ndarray | None
+                 ) -> tuple[float, float, float, float]:
+    """The part of the frame worth spending texels on, in UV units.
+
+    A staged photograph is mostly backdrop — the reference set measured the
+    subject at 30-50% of the frame per axis — and resizing the WHOLE frame
+    into an atlas tile spends over half the tile on grey. Cropping each tile
+    to the subject (plus every UV the mesh actually maps into it, plus a
+    margin) is a >2x gain in texels-on-subject per axis at the same atlas
+    size: the difference between a face carried by ~250 pixels and one
+    carried by ~600."""
+    x0, y0, x1, y1 = view.bbox
+    if uv_used is not None and len(uv_used):
+        x0 = min(x0, float(uv_used[:, 0].min()))
+        y0 = min(y0, float(uv_used[:, 1].min()))
+        x1 = max(x1, float(uv_used[:, 0].max()))
+        y1 = max(y1, float(uv_used[:, 1].max()))
+    mx, my = 0.015 * (x1 - x0), 0.015 * (y1 - y0)
+    return (max(0.0, x0 - mx), max(0.0, y0 - my),
+            min(1.0, x1 + mx), min(1.0, y1 + my))
+
+
+def build_atlas(images: list[np.ndarray], tile: int,
+                rects: list[tuple[float, float, float, float]] | None = None
+                ) -> tuple[Image.Image, int]:
     cols = 2 if len(images) > 1 else 1
     rows = (len(images) + cols - 1) // cols
     atlas = Image.new("RGB", (cols * tile, rows * tile), (128, 128, 128))
     for i, img in enumerate(images):
-        pic = Image.fromarray(np.clip(img, 0, 255).astype(np.uint8)).resize(
-            (tile, tile), Image.LANCZOS)
+        pic = Image.fromarray(np.clip(img, 0, 255).astype(np.uint8))
+        box = None
+        if rects is not None:
+            h, w = img.shape[:2]
+            r = rects[i]
+            box = (r[0] * (w - 1), r[1] * (h - 1),
+                   r[2] * (w - 1) + 1, r[3] * (h - 1) + 1)
+        pic = pic.resize((tile, tile), Image.LANCZOS, box=box)
         atlas.paste(pic, ((i % cols) * tile, (i // cols) * tile))
     return atlas, cols
 
@@ -512,6 +664,49 @@ def atlas_uv(uv: np.ndarray, index: int, cols: int, rows: int,
     return np.stack([u, 1.0 - v], axis=1)
 
 
+SMOOTH_ITERATIONS = 8
+SMOOTH_WHEN_ROUGHER_THAN = 12.0   # degrees, mean adjacent-face normal angle
+
+
+def smooth_mesh(mesh: trimesh.Trimesh) -> dict:
+    """Take real roughness off the surface — and prove it did, or undo it.
+
+    Every step here is measured, because the obvious version of this function
+    was measured making things WORSE. The production mesher (surface nets)
+    already relaxes its vertices: the reference figure measured a 6.3° mean
+    angle between adjacent face normals — smooth — and a blanket Taubin pass
+    RAISED that to 22.8° while the same filter cleaned a noisy sphere just
+    fine (11.6° → 2.9°). Something in AI-mesher topology (degenerate slivers,
+    odd valences) upsets a uniform Laplacian, and a smoother that cannot
+    check its own work would have shipped the damage.
+
+    So: skip when the surface is already smooth; drop degenerate faces
+    first; use Humphrey (measured best on the sphere: 11.6° → 1.6°, volume
+    1.0000); and REVERT unless the roughness actually fell."""
+    mesh.merge_vertices()
+
+    def roughness() -> float:
+        angles = mesh.face_adjacency_angles
+        return float(np.degrees(angles).mean()) if len(angles) else 0.0
+
+    before = roughness()
+    if before < SMOOTH_WHEN_ROUGHER_THAN:
+        return {"applied": False, "roughness": round(before, 2),
+                "note": "already smooth"}
+    mesh.update_faces(mesh.nondegenerate_faces())
+    mesh.remove_unreferenced_vertices()
+    kept = mesh.vertices.copy()
+    trimesh.smoothing.filter_humphrey(mesh, alpha=0.1, beta=0.5,
+                                      iterations=SMOOTH_ITERATIONS)
+    after = roughness()
+    if after >= before:
+        mesh.vertices = kept
+        return {"applied": False, "roughness": round(before, 2),
+                "note": "smoothing did not improve this surface; reverted"}
+    return {"applied": True, "roughness_before": round(before, 2),
+            "roughness_after": round(after, 2)}
+
+
 def retexture(mesh: trimesh.Trimesh, views: list[View], tile: int) -> dict:
     # Refuse to paint from views that are not photographs of the subject.
     # If every view fails, keep the single least-bad one: a mesh coloured
@@ -520,7 +715,7 @@ def retexture(mesh: trimesh.Trimesh, views: list[View], tile: int) -> dict:
     dropped: list[dict] = []
     kept: list[View] = []
     for view in views:
-        quality = view_quality(view.image, view.mask)
+        quality = view_quality(view.image, view.mask_raw)
         reason = usable(quality)
         if reason is None:
             kept.append(view)
@@ -531,7 +726,7 @@ def retexture(mesh: trimesh.Trimesh, views: list[View], tile: int) -> dict:
                   file=sys.stderr)
     if not kept and views:
         def least_bad(v: View) -> float:
-            q = view_quality(v.image, v.mask)
+            q = view_quality(v.image, v.mask_raw)
             # Low flatness AND a decent amount of subject: a big imperfect
             # view beats a textured sliver of nothing.
             return q["slab_share"] - q["area"]
@@ -541,6 +736,7 @@ def retexture(mesh: trimesh.Trimesh, views: list[View], tile: int) -> dict:
     views = kept
 
     repaired = repair_normals(mesh)
+    smoothing = smooth_mesh(mesh)
     # Centre ONCE, in place. Projecting from a centred copy while ray-testing
     # against the uncentred original silently offsets every ray by the
     # centroid, which reads as "occluded" almost everywhere.
@@ -555,13 +751,14 @@ def retexture(mesh: trimesh.Trimesh, views: list[View], tile: int) -> dict:
     except Exception as exc:                           # noqa: BLE001
         print(f"note: no ray engine ({exc}); facing test only", file=sys.stderr)
 
-    mappings, uvs, scores = [], [], []
+    mappings, uvs, scores, base_uvs = [], [], [], []
     for deg, view in zip(angles, views, strict=False):
         mapping = solve_view_mapping(mesh, view, deg)
         uv, sc = project(mesh, view, deg, intersector, mapping)
         mappings.append(mapping)
         uvs.append(uv)
         scores.append(sc)
+        base_uvs.append(_base_uv(mesh.vertices, view, deg))
     score = np.stack(scores, axis=1)                   # (V, views)
     seen = score.max(axis=1) > 0
     view_iou = [m["iou"] for m in mappings]
@@ -574,12 +771,31 @@ def retexture(mesh: trimesh.Trimesh, views: list[View], tile: int) -> dict:
                           360 - abs(angles[i] - angles[0])))
     tone = harmonise(views, uvs, score, order) if len(views) > 1 else []
 
+    # --- interior alignment: the outline fit cannot see a feature ten
+    # pixels adrift inside the silhouette; the colour difference can.
+    photometric: list[dict] = []
+    if len(views) > 1:
+        photometric = refine_photometric(
+            views, mappings, uvs,
+            [score[:, j] for j in range(len(views))], order, base_uvs)
+        uvs, scores = [], []
+        for k, (deg, view) in enumerate(zip(angles, views, strict=False)):
+            uv, sc = project(mesh, view, deg, intersector, mappings[k])
+            uvs.append(uv)
+            scores.append(sc)
+        score = np.stack(scores, axis=1)
+        seen = score.max(axis=1) > 0
+
     # --- per-face view: the worst corner decides visibility, smoothing
     # decides among the views that qualify.
     faces = mesh.faces
     face_score = score[faces].min(axis=1)              # (F, views)
     face_seen = face_score.max(axis=1) > 0
-    smoothed = smooth_face_scores(mesh, face_score)
+    # Squared before smoothing: monotone, so no face's own preference flips,
+    # but in the neighbourhood average the squarest view now outweighs an
+    # oblique one quadratically — fewer single-face islands of a worse view
+    # surviving the smoothing, which is what left seams mid-face.
+    smoothed = smooth_face_scores(mesh, face_score ** 2)
     smoothed[face_score <= 0] = -1.0     # never pick a view missing a corner
     face_view = smoothed.argmax(axis=1)
     # Faces no camera sees at all: argmax over a row of zeros used to hand
@@ -599,16 +815,29 @@ def retexture(mesh: trimesh.Trimesh, views: list[View], tile: int) -> dict:
 
     rows = (len(views) + 1) // 2 if len(views) > 1 else 1
     cols = 2 if len(views) > 1 else 1
+    # Every tile is cropped to its subject plus whatever the mesh actually
+    # maps into it, so the atlas spends its texels on the person, not on the
+    # backdrop. UVs are expressed in crop-local coordinates to match.
+    rects = []
+    for i in range(len(views)):
+        sel_faces = face_view == i
+        used_uv = (uvs[i][np.unique(faces[sel_faces])]
+                   if sel_faces.any() else None)
+        rects.append(content_rect(views[i], used_uv))
     new_uv = np.zeros((len(uniq), 2))
     for i in range(len(views)):
         sel = uniq[:, 1] == i
         if sel.any():
-            new_uv[sel] = atlas_uv(uvs[i][uniq[sel, 0]], i, cols, rows, tile)
+            r = rects[i]
+            span = np.array([max(r[2] - r[0], 1e-6), max(r[3] - r[1], 1e-6)])
+            local = (uvs[i][uniq[sel, 0]] - np.array([r[0], r[1]])) / span
+            new_uv[sel] = atlas_uv(np.clip(local, 0.0, 1.0),
+                                   i, cols, rows, tile)
 
     # The FLOODED (and now tone-matched) images go in the atlas: a texel that
     # falls a pixel outside the silhouette reads as skin or hair rather than
     # as backdrop.
-    atlas, _ = build_atlas([v.filled for v in views], tile)
+    atlas, _ = build_atlas([v.filled for v in views], tile, rects)
     textured = trimesh.Trimesh(vertices=new_verts, faces=new_faces,
                                process=False)
     textured.visual = trimesh.visual.TextureVisuals(
@@ -620,7 +849,12 @@ def retexture(mesh: trimesh.Trimesh, views: list[View], tile: int) -> dict:
     return {"mesh": textured, "seen": seen,
             "fit": aligned_fit, "detail": detail, "repaired": repaired,
             "view_iou": view_iou, "tone": tone, "dropped": dropped,
+            "smoothing": smoothing,
             "views_used": [v.azimuth for v in views],
+            "tile_crops": [[round(c, 3) for c in r] for r in rects],
+            "photometric": photometric,
+            "mappings": [{k: round(float(v), 5) for k, v in m.items()}
+                         for m in mappings],
             "per_view": [int((best_view[seen] == i).sum())
                          for i in range(len(views))]}
 
@@ -630,7 +864,8 @@ def main() -> int:
     argv = sys.argv[1:]
     views: list[tuple[float, Path]] = []
     positional: list[str] = []
-    tile = 1024
+    tile = 2048     # sources are upscaled to ~2300px and tiles are cropped
+                    # to content, so 1024 was the resolution bottleneck
     i = 0
     while i < len(argv):
         a = argv[i]
@@ -682,6 +917,10 @@ def main() -> int:
         "tone": result["tone"],
         "views_used": result["views_used"],
         "views_dropped": result["dropped"],
+        "smoothing": result["smoothing"],
+        "tile_crops": result["tile_crops"],
+        "photometric": result["photometric"],
+        "mappings": result["mappings"],
         "winding_repaired": bool(result["repaired"]),
         "atlas_px": [tile * (2 if len(result["views_used"]) > 1 else 1),
                      tile * max(1, (len(result["views_used"]) + 1) // 2

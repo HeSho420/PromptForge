@@ -1990,8 +1990,8 @@ class Services:
                         col = quality.requirement_colour(need)
                         if not col:
                             continue
-                        if quality.colour_delivered(img, last_mask,
-                                                    col) is True:
+                        if quality.colour_delivered(img, last_mask, col,
+                                                    final_input) is True:
                             out.remove(need)
                             job.log("info", "[stage] verify — the measured "
                                             f"hue settles it: the region IS "
@@ -2003,7 +2003,8 @@ class Services:
                             and not any(quality.requirement_colour(m) == want
                                         for m in out)
                             and quality.colour_delivered(
-                                img, last_mask, want) is False):
+                                img, last_mask, want,
+                                final_input) is False):
                         out.append(f"the region actually turning {want}")
                         job.log("info", "[stage] verify — the measured hue "
                                         f"says the region did NOT turn "
@@ -2015,15 +2016,19 @@ class Services:
                 # recipe ignored the prompt. Re-rolling the SAME recipe with
                 # an emphasized prompt re-rolls the same failure — go
                 # straight to a different model or technique.
+                # A separate FLAG, deliberately never an entry in
+                # best_missing and never a retry trigger of its own: a
+                # synthetic missing-entry let a worse retry displace a good
+                # first attempt, and a forced extra round second-guessed a
+                # checklist that was already satisfied (both caught by the
+                # integration suite). Its one job: when adherence has
+                # already demanded a retry, skip the same-recipe gamble.
                 force_swap = False
                 if last_step["task"] == "inpaint" and last_mask is not None:
                     moved = quality.region_change(final_input, current,
                                                   last_mask)
                     if moved is not None and moved < 0.02:
                         force_swap = True
-                        if not best_missing:
-                            best_missing = ["the selected region actually "
-                                            "changing"]
                         job.log("info", "[stage] verify — the selected "
                                         f"region changed by only "
                                         f"{moved * 100:.1f}% — the edit did "
@@ -6958,15 +6963,19 @@ class Services:
         right = sum(1 for y in range(h) if px[w - 1, y] > thresh) / max(1, h)
         return {"top": top, "bottom": bottom, "left": left, "right": right}
 
-    def _cut_edges(self, image: Image.Image) -> dict[str, float]:
-        """Which frame edges the subject runs off, and by how much."""
+    def _subject_matte(self, image: Image.Image) -> Image.Image | None:
+        """The BiRefNet matte of the whole subject, or None off-pack."""
         if not self._pack_active("rmbg"):
-            return {}
-        matte = self._region_mask(image, "BiRefNetRMBG", {
+            return None
+        return self._region_mask(image, "BiRefNetRMBG", {
             "model": self._MATTE_GENERAL, "sensitivity": 1.0, "mask_blur": 0,
             "mask_offset": 0, "invert_output": False,
             "refine_foreground": False, "background": "Alpha",
             "background_color": "#222222"})
+
+    def _cut_edges(self, image: Image.Image) -> dict[str, float]:
+        """Which frame edges the subject runs off, and by how much."""
+        matte = self._subject_matte(image)
         if matte is None:
             return {}
         return {k: v for k, v in self._subject_edges(matte).items()
@@ -6974,6 +6983,22 @@ class Services:
 
     def _is_cut_off(self, image: Image.Image) -> bool:
         return bool(self._cut_edges(image))
+
+    # A standing person is much taller than wide. Below this, a figure is
+    # partial — the rigger uses the same threshold to tell a bust from a
+    # full body, so the two ends of the pipeline agree on what "whole" is.
+    _FULL_FIGURE_ASPECT = 1.9
+
+    def _figure_aspect(self, image: Image.Image) -> float | None:
+        """Subject bounding-box height over width, from the BiRefNet matte."""
+        matte = self._subject_matte(image)
+        if matte is None:
+            return None
+        box = matte.convert("L").point(
+            lambda v: 255 if v > 127 else 0).getbbox()
+        if not box:
+            return None
+        return (box[3] - box[1]) / max(1, box[2] - box[0])
 
     def _complete_subject(self, job: Job,
                           image: Image.Image) -> Image.Image:
@@ -6985,11 +7010,22 @@ class Services:
         there is a whole body to reconstruct. The invented part is a guess and
         is logged as one.
 
-        Returns the input unchanged whenever nothing is cut off or the
+        A subject can also be partial WITHOUT touching an edge: a waist-up
+        photo with margin all round is the common case, and it used to sail
+        through this check and reconstruct as a floating bust. A figure whose
+        silhouette is much wider than a standing person's is treated as
+        ending at the waist and extended downward the same way.
+
+        Returns the input unchanged whenever the figure is whole or the
         outpaint is unavailable."""
         cut = self._cut_edges(image)
+        partial = False
         if not cut:
-            return image
+            aspect = self._figure_aspect(image)
+            partial = (aspect is not None
+                       and aspect < self._FULL_FIGURE_ASPECT)
+            if not partial:
+                return image
         w, h = image.size
         # Enough room to hold what is missing without ballooning the canvas —
         # a subject cut at the hips needs roughly its own height again.
@@ -6997,10 +7033,18 @@ class Services:
         for edge in cut:
             span = h if edge in ("top", "bottom") else w
             pad[edge] = int(span * (0.55 if edge == "bottom" else 0.35))
-        job.log("info", "The subject runs off the "
-                        + ", ".join(sorted(cut))
-                        + " of the frame — extending it to reconstruct a whole "
-                          "body (the added part is invented)")
+        if partial:
+            pad["bottom"] = int(h * 0.9)
+            job.log("info", "The photo shows a partial figure (its "
+                            "silhouette is squatter than any standing "
+                            "person) — extending it downward so a whole "
+                            "body can be reconstructed (the added part is "
+                            "invented)")
+        else:
+            job.log("info", "The subject runs off the "
+                            + ", ".join(sorted(cut))
+                            + " of the frame — extending it to reconstruct "
+                              "a whole body (the added part is invented)")
         try:
             template = self.workflows.load("outpaint")
             graph = build_workflow(template, {
@@ -7024,6 +7068,18 @@ class Services:
         # the difference between "a whole figure was invented below the crop"
         # and "the crop moved down a bit". Reported either way rather than
         # assumed, because everything downstream inherits it.
+        if partial:
+            after = self._figure_aspect(out)
+            if after is not None and after >= self._FULL_FIGURE_ASPECT:
+                job.log("info", "The figure is full-length now (silhouette "
+                                f"{after:.1f}x taller than wide), with "
+                                "everything below the original photo "
+                                "invented")
+            else:
+                job.log("info", "The extension did not clearly produce a "
+                                "full figure — the mesh may still end where "
+                                "the photograph does")
+            return out
         still = self._cut_edges(out)
         if still:
             job.log("info", "Extended the frame, but the subject still "
@@ -7203,12 +7259,163 @@ class Services:
         ordered = sorted(picked.items(),
                          key=lambda kv: min(kv[1][0], 360 - kv[1][0]))
         photos: list[tuple[float, Image.Image]] = []
+        can_upscale = self._template_runnable("upscale")[0]
+        upscaled = 0
         for aid, (az, real, _dist) in ordered:
             image = self.open_asset_image(aid)
             if not real:
                 image = self._matte_on_grey(job, image)
+            # The orbit stages everything at 576px and the atlas tiles are
+            # 1024: plain resampling would fill the texture with blur. The
+            # detail-reconstructing upscaler is on disk — use it, and fall
+            # back silently because sharpness is a bonus, not a requirement.
+            if can_upscale and min(image.size) < 1024:
+                try:
+                    image = self._render_template_step(job, "upscale",
+                                                       image, "")
+                    upscaled += 1
+                except Exception:  # noqa: BLE001
+                    can_upscale = False
             photos.append((float(az), image))
+        if upscaled:
+            job.log("info", f"[stage] texture — {upscaled} colour view(s) "
+                            "upscaled with the detail model before "
+                            "projection, so the texture is limited by the "
+                            "photograph rather than by the orbit's 576px")
         return photos
+
+    # The instructions Kontext follows to invent a missing camera. Fixed
+    # wording, measured working for the back; the sides use the same shape.
+    # In this pipeline's convention the camera at azimuth 90° sees the
+    # subject's LEFT profile (and 270° the right).
+    _VIEW_PROMPTS = {
+        "back": (
+            "turn the camera to directly behind the person, showing them "
+            "from the back: back of the head, back of any hat, hair falling "
+            "down the back, back of the clothing, same plain grey "
+            "background"),
+        "left": (
+            "turn the camera to the person's left side, showing their left "
+            "profile: left side of the face and of any hat, left ear and "
+            "cheek, hair falling over the left shoulder, left arm and the "
+            "left side of the clothing, same plain grey background"),
+        "right": (
+            "turn the camera to the person's right side, showing their "
+            "right profile: right side of the face and of any hat, right "
+            "ear and cheek, hair falling over the right shoulder, right arm "
+            "and the right side of the clothing, same plain grey "
+            "background"),
+    }
+
+    def _synthesize_view(self, job: Job, which: str) -> Image.Image | None:
+        """A generated photograph of the subject from a camera nobody held.
+
+        The orbit model hallucinates walls off the front arc — measured, a
+        third of its views were unusable, leaving the back and both sides
+        with no camera at all. Kontext, handed the STAGED FRONT photo,
+        renders the same person from the missing angle well enough to pass
+        the texturer's quality gate; the back view alone lifted real
+        coverage from 66% to 77% and replaced the surface-fill smear with
+        actual hair, and an honest Blender render showed the uncovered
+        SIDES carrying the worst junk on the whole figure. Every generated
+        view is judged by the same gate as a real one and clearly labelled
+        invented: no photograph of it exists."""
+        ok, _why = self.kontext_ready()
+        if not ok:
+            return None
+        front = getattr(self, "_avatar_front_view", None)
+        if front is None:
+            return None
+        try:
+            template = self.workflows.load("kontext")
+            graph = build_workflow(template, {
+                "prompt": self._VIEW_PROMPTS[which],
+                "image": self.comfy.upload_image(front, f"{which}_synth"),
+                "seed": int.from_bytes(os.urandom(4), "big") & 0x7FFFFFFF,
+            })
+            self._free_vram(job)
+            self._prepare_graph(job, graph)
+            out, _pid = self.comfy.run_graph(graph)
+            return self._matte_on_grey(job, out.convert("RGB"))
+        except Exception as exc:  # noqa: BLE001 — the arc stays approximate
+            job.log("info", f"Could not generate a {which} view ({exc}); "
+                            "that arc keeps its neighbours' colour")
+            return None
+
+    def _synthesize_back_view(self, job: Job) -> Image.Image | None:
+        return self._synthesize_view(job, "back")
+
+    @staticmethod
+    def _find_blender() -> str | None:
+        """blender.exe, from the env override or the standard install dirs."""
+        override = os.environ.get("PROMPTFORGE_BLENDER")
+        if override and Path(override).exists():
+            return override
+        for base in (Path(os.environ.get("ProgramFiles",
+                                         r"C:\Program Files"))
+                     / "Blender Foundation",):
+            if base.exists():
+                exes = sorted(base.glob("Blender */blender.exe"),
+                              reverse=True)
+                if exes:
+                    return str(exes[0])
+        return None
+
+    def _rig_avatar(self, job: Job, glb: bytes) -> tuple[bytes, dict]:
+        """Give the textured mesh a posable humanoid skeleton, via Blender.
+
+        Headless: the mesh goes through app/tools/rig_avatar.py, which
+        measures the figure (neck and shoulders from band widths, bust
+        against full body from the aspect ratio), builds the armature,
+        cleans the 60k+ doubled vertices that make Blender's heat solver
+        fail, binds — falling back to envelope weights rather than refusing
+        — and exports a GLB any DCC or engine can pose. Returns the input
+        unchanged when Blender is not installed or anything fails: a rig is
+        an upgrade, never a requirement."""
+        blender = self._find_blender()
+        if blender is None:
+            job.log("info", "Blender is not installed, so the mesh ships "
+                            "unrigged (install Blender to get a posable "
+                            "skeleton for free)")
+            return glb, {}
+        tool = Path(__file__).resolve().parent.parent / "tools" /             "rig_avatar.py"
+        if not tool.exists():
+            return glb, {}
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "mesh.glb"
+            dst = Path(tmp) / "rigged.glb"
+            src.write_bytes(glb)
+            job.log("info", "[stage] rig — building a posable skeleton "
+                            "(joints measured from the mesh, weights from "
+                            "Blender's heat solver)")
+            try:
+                proc = subprocess.run(
+                    [blender, "--background", "--factory-startup",
+                     "--python", str(tool), "--", str(src), str(dst)],
+                    capture_output=True, text=True, timeout=600)
+            except Exception as exc:  # noqa: BLE001
+                job.log("info", f"Rigging unavailable ({exc}); the mesh "
+                                "ships unrigged")
+                return glb, {}
+            report: dict = {}
+            for line in reversed((proc.stdout or "").strip().splitlines()):
+                if line.startswith("{"):
+                    try:
+                        report = json.loads(line)
+                    except json.JSONDecodeError:
+                        pass
+                    break
+            if proc.returncode != 0 or not dst.exists() or "error" in report:
+                job.log("info", "Rigging did not complete "
+                                f"({(report.get('error') or proc.stderr or '')[:120]}); "
+                                "the mesh ships unrigged")
+                return glb, {}
+            job.log("info", f"Rigged with {report.get('bones')} bones "
+                            f"({'full figure' if report.get('full_body') else 'bust'}, "
+                            f"{report.get('weights')} weights) — pose it in "
+                            "Blender, Unity, Unreal or any glTF viewer with "
+                            "bone support")
+            return dst.read_bytes(), report
 
     def _texture_mesh(self, job: Job, glb: bytes,
                       photos: list[tuple[float, Image.Image]]) -> tuple[bytes, dict]:
@@ -7243,7 +7450,7 @@ class Services:
             src = Path(tmp) / "mesh.glb"
             out = Path(tmp) / "textured.glb"
             src.write_bytes(glb)
-            args = [python, str(tool), str(src), str(out)]
+            args = [python, str(tool), str(src), str(out), "--tile", "2048"]
             for i, (azimuth, photo) in enumerate(photos):
                 pic = Path(tmp) / f"view_{i}.png"
                 photo.convert("RGB").save(pic, format="PNG")
@@ -7424,7 +7631,8 @@ class Services:
             return out.read_bytes()
 
     def _build_mesh(self, job: Job, frame_ids: list[str], fallback_id: str,
-                    texture: bool = True) -> dict[str, Any] | None:
+                    texture: bool = True,
+                    rig: bool = True) -> dict[str, Any] | None:
         """Turn the orbit into a real 3D mesh, saved as a .glb asset.
 
         Hardware sets the octree resolution — the surface detail — and the
@@ -7525,9 +7733,56 @@ class Services:
                 photos = colour_photos or [
                     (0.0, self._matte_on_grey(
                         job, self.open_asset_image(fallback_id)))]
-                coloured, report = self._texture_mesh(job, data, photos)
-                textured_here = coloured is not data
+                # Remember the front view: it is what the back synthesis
+                # shows Kontext when the back arc has no usable camera.
+                self._avatar_front_view = photos[0][1] if photos else None
+                bare = data          # the untextured geometry, for re-runs
+                coloured, report = self._texture_mesh(job, bare, photos)
+                textured_here = coloured is not bare
                 data = coloured
+                # A whole arc with no camera is the one gap texture
+                # arithmetic cannot close — and rendered honestly, the
+                # uncovered arcs (usually the back AND both sides) carry
+                # the worst pixels on the figure. Generate every missing
+                # view and re-texture THE BARE GEOMETRY with them added;
+                # keep the result only when coverage actually rose — the
+                # quality gate judges a generated view like any other.
+                used = report.get("views_used") or []
+
+                def _covered(lo: float, hi: float) -> bool:
+                    return any(lo <= a <= hi for a in used)
+
+                wanted: list[tuple[float, str]] = []
+                if textured_here and not _covered(145, 215):
+                    wanted.append((180.0, "back"))
+                if textured_here and not _covered(55, 125):
+                    wanted.append((90.0, "left"))
+                if textured_here and not _covered(235, 305):
+                    wanted.append((270.0, "right"))
+                if wanted:
+                    names = ", ".join(w for _, w in wanted)
+                    job.log("info", "[stage] texture — no usable camera on "
+                                    f"the {names} arc(s); generating the "
+                                    "missing view(s) (invented, and "
+                                    "recorded as such)")
+                    synth = [(az, img) for az, which in wanted
+                             if (img := self._synthesize_view(job, which))
+                             is not None]
+                    if synth:
+                        coloured2, report2 = self._texture_mesh(
+                            job, bare, photos + synth)
+                        gained = ((report2.get("seen_pct") or 0)
+                                  > (report.get("seen_pct") or 0) + 1)
+                        if gained:
+                            data, report = coloured2, report2
+                            azs = [az for az, _ in synth]
+                            report["synthesized_views"] = azs
+                            if 180.0 in azs:
+                                report["back_synthesized"] = True
+                            job.log("info", f"{len(synth)} generated "
+                                            "view(s) passed the quality "
+                                            "gate and cover the missing "
+                                            "arcs")
             except Exception as exc:  # noqa: BLE001
                 job.log("info", f"Mesh colouring skipped ({exc})")
         # The texturing step has to solve where the cameras are, and how well
@@ -7545,9 +7800,19 @@ class Services:
                     "was built from has an arm or an object across the body, "
                     "or cuts the subject off. A plain, full-length, "
                     "front-facing photo reconstructs far better.")
+        rig_report: dict = {}
+        if rig:
+            data, rig_report = self._rig_avatar(job, data)
         asset = self.store.save_upload(
             f"avatar_mesh_{job.id}{Path(fname).suffix or '.glb'}", data,
+            limit_mb=256,
             meta={"synthetic": True, "engine": "hunyuan3d",
+                  "rigged": bool(rig_report),
+                  "rig_bones": rig_report.get("bones"),
+                  "rig_weights": rig_report.get("weights"),
+                  "rig_full_body": rig_report.get("full_body"),
+                  "back_synthesized": bool(report.get("back_synthesized")),
+                  "views_synthesized": report.get("synthesized_views"),
                   "tier": tier.name, "octree": tier.octree,
                   "textured": textured_here,
                   "colour": "photo-projected" if textured_here else "none",
@@ -7563,6 +7828,7 @@ class Services:
                         f"{asset.id}); download it as GLB or orbit it in Studio")
         return {"mesh_asset": asset.id, "tier": tier.level,
                 "tier_name": tier.name, "textured": textured_here,
+                "rigged": bool(rig_report),
                 "surface_covered_pct": report.get("seen_pct"),
                 "photo_agreement": report.get("orientation_iou"),
                 "note": note}
@@ -7712,10 +7978,11 @@ class Services:
                                     "full-length shot would fix that.")
                 # A body cropped by the frame reconstructs as a cropped body.
                 # Extend the picture first when the subject runs off an edge.
-                source_image = self.open_asset_image(source_id)
+                original = self.open_asset_image(source_id)
+                source_image = original
                 if p.get("complete_body", True) is not False:
-                    source_image = self._complete_subject(job, source_image)
-                elif self._is_cut_off(source_image):
+                    source_image = self._complete_subject(job, original)
+                elif self._is_cut_off(original):
                     job.log("info", "The subject runs off the frame and "
                                     "completing the body is switched off, so "
                                     "the model will end where the photograph "
@@ -7744,13 +8011,21 @@ class Services:
                                 f"most frontal photo in the set (a "
                                 f"{source_view} view, so the orbit starts at "
                                 f"{offset} degrees)")
-                # If the frame was extended the old matte no longer lines up,
-                # so let the orbit re-cut it.
-                extended = source_image is not self.open_asset_image(source_id)
+                # If the frame was extended the old matte no longer lines
+                # up, so cut a FRESH one. Two bugs lived on this line: the
+                # old `is not open_asset_image(...)` compared against a
+                # freshly opened copy, so "extended" was ALWAYS true — and
+                # the mask it then passed was None, which _stage_for_orbit
+                # answers by not cutting the subject out at all. Every
+                # avatar orbit was fed the photo WITH its background, and
+                # SV3D rotated the room: that is where the "hallucinated
+                # wall" views came from.
+                extended = source_image is not original
+                orbit_mask = masks.get(source_id)
+                if extended:
+                    orbit_mask = self._subject_matte(source_image)
                 files = self._orbit_from_photo(
-                    job, source_image,
-                    None if extended else masks.get(source_id),
-                    prefix="avatar_src")
+                    job, source_image, orbit_mask, prefix="avatar_src")
                 used_real: set[str] = set()
                 for i, (data, fname) in enumerate(files):
                     angle = round((offset + i * 360 / max(1, len(files)))
@@ -7776,9 +8051,21 @@ class Services:
                                        focus.get(a, 0.0)),
                         default=None)
                     if real_id:
+                        # The real photo of this side is better evidence
+                        # than an invented frame — EXCEPT when it is the
+                        # very photo the body completion just extended.
+                        # Staging the RAW original here handed the waist-up
+                        # crop back to the reconstruction as its "real
+                        # front", which is exactly how a job that logged
+                        # "the body is complete now" still shipped a bust.
+                        # The completed image's upper half IS the original
+                        # pixels, so nothing real is lost by staging it.
+                        use_completed = real_id == source_id and extended
                         staged = self._stage_for_orbit(
-                            self.open_asset_image(real_id),
-                            masks.get(real_id), self.VIEW_SIZE)
+                            source_image if use_completed
+                            else self.open_asset_image(real_id),
+                            orbit_mask if use_completed
+                            else masks.get(real_id), self.VIEW_SIZE)
                         buf = io.BytesIO()
                         staged.save(buf, format="PNG")
                         data, suffix, is_synth = buf.getvalue(), ".png", False
@@ -7809,7 +8096,8 @@ class Services:
         # A real 3D mesh, when the hardware can build one. Never fatal: an
         # avatar with orbit frames and no mesh is still a working avatar.
         mesh = (self._build_mesh(job, frame_ids, face_asset_hint,
-                                 texture=p.get("texture", True) is not False)
+                                 texture=p.get("texture", True) is not False,
+                                 rig=p.get("rig", True) is not False)
                 if frame_ids or asset_ids else None)
 
         job.log("info", "[stage] save — saving the avatar profile")

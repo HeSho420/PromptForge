@@ -87,7 +87,12 @@ class AssetStore:
 
     # -- assets ---------------------------------------------------------------
     def save_upload(self, filename: str, data: bytes,
-                    meta: dict[str, Any] | None = None) -> Asset:
+                    meta: dict[str, Any] | None = None,
+                    limit_mb: int | None = None) -> Asset:
+        """`limit_mb` overrides the size cap for INTERNALLY generated files:
+        a rigged avatar mesh carries a texture atlas plus per-vertex
+        skinning data and legitimately exceeds a cap sized for user photo
+        uploads. Callers pass it explicitly; HTTP requests never can."""
         ext = Path(filename).suffix.lower()
         if ext in ALLOWED_IMAGE_EXTS:
             kind = "image"
@@ -101,10 +106,11 @@ class AssetStore:
                 f"Images: {', '.join(sorted(ALLOWED_IMAGE_EXTS))}. "
                 f"Video: {', '.join(sorted(ALLOWED_VIDEO_EXTS))}. "
                 f"3D: {', '.join(sorted(ALLOWED_MODEL_EXTS))}.")
-        max_bytes = self._settings.max_upload_mb * 1024 * 1024
+        cap = limit_mb or self._settings.max_upload_mb
+        max_bytes = cap * 1024 * 1024
         if len(data) > max_bytes:
             raise UnsupportedFormatError(
-                f"File is larger than the {self._settings.max_upload_mb} MB upload limit.")
+                f"File is larger than the {cap} MB upload limit.")
 
         asset_id = uuid.uuid4().hex[:12]
         folder = self._settings.assets_dir / asset_id
