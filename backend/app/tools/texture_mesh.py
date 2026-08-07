@@ -739,18 +739,25 @@ def retexture(mesh: trimesh.Trimesh, views: list[View], tile: int,
 
     # A reconstruction can FRACTURE — seen live when an invented lower
     # body did not fuse to the torso: the figure shipped severed at the
-    # hips with a floating leg fragment. A clearly-minor disconnected
-    # piece is dropped (and reported); two comparable halves are kept,
-    # because deleting half a person is worse than a visible seam.
+    # hips with a floating leg fragment. Only a CHUNK-sized disconnected
+    # piece is dropped (big enough to read as a body part, smaller than
+    # half the figure). Micro-debris is deliberately KEPT: the surface-net
+    # mesher tiles parts of the shell with thousands of tiny disconnected
+    # patches, and removing them punched a pinhole of backdrop through
+    # the figure at every one — measured live as a spray of pale specks
+    # across the whole render.
     components_dropped = 0
     parts = mesh.split(only_watertight=False)
     if len(parts) > 1:
+        total = sum(len(p.faces) for p in parts)
         biggest = max(len(p.faces) for p in parts)
-        keep = [p for p in parts if len(p.faces) >= 0.4 * biggest]
+        keep = [p for p in parts
+                if len(p.faces) >= 0.4 * biggest
+                or len(p.faces) < 0.01 * total]
         components_dropped = len(parts) - len(keep)
         if components_dropped:
             print(f"note: dropped {components_dropped} disconnected "
-                  "fragment(s) of the reconstruction", file=sys.stderr)
+                  "chunk(s) of the reconstruction", file=sys.stderr)
             mesh = (keep[0] if len(keep) == 1
                     else trimesh.util.concatenate(keep))
 
