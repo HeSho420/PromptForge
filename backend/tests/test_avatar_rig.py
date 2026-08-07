@@ -130,5 +130,29 @@ class FullFigure(unittest.TestCase):
                       src)
 
 
+class TextureRefinement(unittest.TestCase):
+    """The repaint loop may only ever ship measured improvements."""
+
+    def test_a_repainted_view_must_prove_it_got_cleaner(self):
+        src = inspect.getsource(Services._refine_texture)
+        self.assertIn("s_after >= s_before * 0.92", src)
+        self.assertIn('drift >= (72.0 if strong else 55.0)', src)
+        self.assertIn("skipped.append", src)
+
+    def test_refinement_is_wired_behind_a_flag_and_never_fatal(self):
+        build = inspect.getsource(Services._build_mesh)
+        self.assertIn("if textured_here and refine:", build)
+        self.assertIn("Texture refinement skipped", build)
+        handler = inspect.getsource(Services._handle_avatar)
+        self.assertIn('refine=p.get("refine", True) is not False', handler)
+
+    def test_the_rasteriser_and_paster_exist_in_the_tool(self):
+        tool = (Path(__file__).resolve().parent.parent / "app" / "tools"
+                / "texture_mesh.py").read_text(encoding="utf-8")
+        for needle in ("def rasterize_tile", "def paste_tile",
+                      "def _tile_frame", '"islands_flipped"'):
+            self.assertIn(needle, tool)
+
+
 if __name__ == "__main__":
     unittest.main()

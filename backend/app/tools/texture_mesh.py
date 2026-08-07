@@ -815,6 +815,25 @@ def retexture(mesh: trimesh.Trimesh, views: list[View], tile: int,
         face_view[~face_seen] = (
             mesh.face_normals[~face_seen] @ forwards).argmax(axis=1)
 
+    # A face whose view NO neighbour shares samples its tile alone — at
+    # atlas resolution that is a one-face colour speck, and specks are what
+    # "noise" on the rendered figure mostly is. Flip such islands to the
+    # neighbours' view when that view actually sees the face.
+    adjacency: list[list[int]] = [[] for _ in range(len(faces))]
+    for a, b in mesh.face_adjacency:
+        adjacency[a].append(int(b))
+        adjacency[b].append(int(a))
+    islands_flipped = 0
+    for f, nbs in enumerate(adjacency):
+        if not nbs or any(face_view[nb] == face_view[f] for nb in nbs):
+            continue
+        cands = [int(face_view[nb]) for nb in nbs
+                 if face_score[f, face_view[nb]] > 0]
+        if cands:
+            vals, counts = np.unique(cands, return_counts=True)
+            face_view[f] = int(vals[counts.argmax()])
+            islands_flipped += 1
+
     # --- split only the vertices whose faces disagree about which view to use
     pairs = np.stack([faces.ravel(), np.repeat(face_view, 3)], axis=1)
     uniq, inverse = np.unique(pairs, axis=0, return_inverse=True)
@@ -861,7 +880,10 @@ def retexture(mesh: trimesh.Trimesh, views: list[View], tile: int,
             "views_used": [v.azimuth for v in views],
             "synthetic_views": sorted(a for a in synth_azimuths
                                       if any(v.azimuth == a for v in views)),
-            "tile_crops": [[round(c, 3) for c in r] for r in rects],
+            "tile_crops": [[round(c, 6) for c in r] for r in rects],
+            "view_bbox": [[round(c, 6) for c in v.bbox] for v in views],
+            "tile": tile, "cols": cols, "rows": rows,
+            "islands_flipped": islands_flipped,
             "photometric": photometric,
             "mappings": [{k: round(float(v), 5) for k, v in m.items()}
                          for m in mappings],
@@ -870,8 +892,119 @@ def retexture(mesh: trimesh.Trimesh, views: list[View], tile: int,
 
 
 # --------------------------------------------------------------------------
+# refinement I/O: rasterize a view in its own tile frame, and paste a
+# refined image back into that tile.
+#
+# The atlas tiles ARE per-view camera frames, which makes the classic
+# render -> diffusion-refine -> reproject loop exact here: rasterizing
+# through the inverse of the very affine that placed the tile gives an
+# image in pixel-registration with the tile, so re-projection is a paste —
+# no solving, no drift, no resampling error beyond bilinear.
+# --------------------------------------------------------------------------
+def _tile_frame(report: dict, verts: np.ndarray, index: int,
+                size: int | None = None):
+    """(u_w, v_w) world-line coefficients for each raster pixel column/row.
+
+    The frame is the TILE's frame whatever the raster resolution — a
+    smaller grid samples the same affine more coarsely, it never shifts."""
+    deg = report["orientation"]["azimuths"][index]
+    m = report["mappings"][index]
+    bx0, by0, bx1, by1 = report["view_bbox"][index]
+    r0, r1, r2, r3 = report["tile_crops"][index]
+    tile = int(size or report["tile"])
+    right, _up, forward = camera_basis(deg)
+    u_all = verts @ right
+    u_min, du = float(u_all.min()), float(np.ptp(u_all)) or 1.0
+    v_max, dv = float(verts[:, 1].max()), float(np.ptp(verts[:, 1])) or 1.0
+    px = np.arange(tile) / (tile - 1)
+    uu = r0 + px * (r2 - r0)
+    uu0 = m["cx"] + (uu - m["dx"] - m["cx"]) / m["sx"]
+    u_w = u_min + (uu0 - bx0) / max(bx1 - bx0, 1e-9) * du
+    vv = r1 + px * (r3 - r1)
+    vv0 = m["cy"] + (vv - m["dy"] - m["cy"]) / m["sy"]
+    v_w = v_max - (vv0 - by0) / max(by1 - by0, 1e-9) * dv
+    return u_w, v_w, right, forward, tile
+
+
+def rasterize_tile(glb: Path, report: dict, index: int,
+                   out_rgb: Path, out_alpha: Path,
+                   size: int | None = None) -> dict:
+    mesh = trimesh.load(str(glb), force="mesh")
+    verts = np.asarray(mesh.vertices, float)
+    uv = np.asarray(mesh.visual.uv, float)
+    atlas = np.asarray(
+        mesh.visual.material.baseColorTexture.convert("RGB"), float)
+    u_w, v_w, right, forward, tile = _tile_frame(report, verts, index, size)
+    span = float(np.linalg.norm(verts.max(0) - verts.min(0))) or 1.0
+    gu, gv = np.meshgrid(u_w, v_w)                     # (tile, tile)
+    origins = (gu.ravel()[:, None] * right
+               + gv.ravel()[:, None] * np.array([0.0, 1.0, 0.0])
+               + forward * span * 2.0)
+    dirs = np.tile(-forward, (origins.shape[0], 1))
+    from trimesh.ray.ray_pyembree import RayMeshIntersector
+    locs, ray_idx, tri_idx = RayMeshIntersector(mesh).intersects_location(
+        origins, dirs, multiple_hits=False)
+    img = np.full((tile * tile, 3), 128.0)
+    alpha = np.zeros(tile * tile, np.uint8)
+    if len(ray_idx):
+        bary = trimesh.triangles.points_to_barycentric(
+            verts[mesh.faces[tri_idx]], locs)
+        uv_hit = np.einsum("ijk,ij->ik", uv[mesh.faces[tri_idx]], bary)
+        h, w = atlas.shape[:2]
+        sample_uv = np.stack([uv_hit[:, 0], 1.0 - uv_hit[:, 1]], axis=1)
+        img[ray_idx] = sample(atlas, sample_uv)
+        alpha[ray_idx] = 255
+    Image.fromarray(
+        img.reshape(tile, tile, 3).astype(np.uint8)).save(out_rgb)
+    Image.fromarray(alpha.reshape(tile, tile)).save(out_alpha)
+    return {"hits": int(len(ray_idx)), "tile": tile}
+
+
+def paste_tile(glb: Path, report: dict, index: int, refined: Path,
+               alpha_path: Path, out: Path) -> dict:
+    from scipy import ndimage
+    mesh = trimesh.load(str(glb), force="mesh")
+    tile = report["tile"]
+    cols = report["cols"]
+    pic = np.asarray(Image.open(refined).convert("RGB").resize(
+        (tile, tile), Image.LANCZOS), float)
+    mask = np.asarray(Image.open(alpha_path).convert("L").resize(
+        (tile, tile), Image.NEAREST)) > 127
+    # Same flood the original tiles got: texels just outside the subject
+    # must read as subject, or bilinear taps at the silhouette go grey.
+    if mask.any() and not mask.all():
+        _, idx = ndimage.distance_transform_edt(
+            ~mask, return_distances=True, return_indices=True)
+        pic = pic[idx[0], idx[1]]
+    atlas = mesh.visual.material.baseColorTexture.convert("RGB")
+    atlas.paste(Image.fromarray(pic.astype(np.uint8)),
+                ((index % cols) * tile, (index // cols) * tile))
+    mesh.visual.material.baseColorTexture = atlas
+    mesh.export(str(out))
+    return {"pasted": index, "bytes": out.stat().st_size}
+
+
 def main() -> int:
     argv = sys.argv[1:]
+    if argv and argv[0] in ("rasterize", "paste"):
+        cmd = argv[0]
+        try:
+            if cmd == "rasterize":
+                glb, rep, idx, rgb, alpha = argv[1:6]
+                size = int(argv[6]) if len(argv) > 6 else None
+                report = json.loads(Path(rep).read_text())
+                out = rasterize_tile(Path(glb), report, int(idx),
+                                     Path(rgb), Path(alpha), size)
+            else:
+                glb, rep, idx, refined, alpha, dst = argv[1:7]
+                report = json.loads(Path(rep).read_text())
+                out = paste_tile(Path(glb), report, int(idx), Path(refined),
+                                 Path(alpha), Path(dst))
+        except (IndexError, ValueError, OSError, KeyError) as exc:
+            print(json.dumps({"error": f"{type(exc).__name__}: {exc}"}))
+            return 2
+        print(json.dumps(out))
+        return 0
     views: list[tuple[float, Path]] = []
     positional: list[str] = []
     synth: set[float] = set()
@@ -938,6 +1071,10 @@ def main() -> int:
         "synthetic_views": result["synthetic_views"],
         "smoothing": result["smoothing"],
         "tile_crops": result["tile_crops"],
+        "view_bbox": result["view_bbox"],
+        "tile": result["tile"], "cols": result["cols"],
+        "rows": result["rows"],
+        "islands_flipped": result["islands_flipped"],
         "photometric": result["photometric"],
         "mappings": result["mappings"],
         "winding_repaired": bool(result["repaired"]),

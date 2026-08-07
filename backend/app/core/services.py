@@ -6973,6 +6973,23 @@ class Services:
             "refine_foreground": False, "background": "Alpha",
             "background_color": "#222222"})
 
+    @staticmethod
+    def _plain_backdrop(image: Image.Image) -> bool:
+        """Is this image already a staged subject on a plain background?
+
+        Judged on the border ring, which is backdrop by construction. Used
+        as the escape hatch when no matte can be computed: a photo that is
+        already subject-on-plain stages safely uncut, and anything else
+        must not — a 3D reconstruction handed a photo WITH its background
+        models the photograph itself as a flat slab."""
+        import numpy as np
+        arr = np.asarray(image.convert("RGB").resize((256, 256)), float)
+        ring = np.concatenate([arr[:6].reshape(-1, 3),
+                               arr[-6:].reshape(-1, 3),
+                               arr[:, :6].reshape(-1, 3),
+                               arr[:, -6:].reshape(-1, 3)])
+        return float(ring.std(axis=0).max()) < 14.0
+
     def _cut_edges(self, image: Image.Image) -> dict[str, float]:
         """Which frame edges the subject runs off, and by how much."""
         matte = self._subject_matte(image)
@@ -7457,6 +7474,172 @@ class Services:
                             "bone support")
             return dst.read_bytes(), report
 
+    # The instruction Kontext follows to repaint one rendered view clean.
+    # Identity-preserving by model design; the acceptance test below is the
+    # deterministic guarantee that it actually cleaned rather than redrew.
+    _REFINE_PROMPT = (
+        "enhance this into a sharp, clean, photorealistic photograph: "
+        "remove all speckles, noise, stray patches and artifacts, make "
+        "skin, hair and fabric look real and continuous, keep the person's "
+        "identity, pose, clothing, colors and framing exactly the same, "
+        "plain grey background")
+
+    @staticmethod
+    def _speckle_and_drift(before: Image.Image, after: Image.Image,
+                           alpha: Image.Image) -> tuple[float, float, float]:
+        """(speckle_before, speckle_after, drift), all on the subject only.
+
+        Speckle is high-frequency energy: how far each pixel sits from its
+        own 3x3 median — single-face colour specks light this metric up and
+        clean fabric or skin does not. Drift is the mean colour change, the
+        guard that the model cleaned the image rather than replaced it."""
+        import numpy as np
+        size = (512, 512)
+        mask = np.asarray(alpha.convert("L").resize(size,
+                                                    Image.NEAREST)) > 127
+        if not mask.any():
+            return 0.0, 0.0, 255.0
+        out: list[float] = []
+        arrs: list[Any] = []
+        for img in (before, after):
+            small = img.convert("RGB").resize(size, Image.LANCZOS)
+            grey = small.convert("L")
+            med = grey.filter(ImageFilter.MedianFilter(3))
+            g = np.asarray(grey, float)
+            m = np.asarray(med, float)
+            out.append(float(np.abs(g - m)[mask].mean()))
+            arrs.append(np.asarray(small, float))
+        drift = float(np.abs(arrs[0] - arrs[1]).max(axis=2)[mask].mean())
+        return out[0], out[1], drift
+
+    def _refine_texture(self, job: Job, glb: bytes,
+                        report: dict) -> tuple[bytes, dict]:
+        """Repaint each view of the textured mesh clean, in place.
+
+        Winner-take-all projection from views that partly disagree has a
+        quality ceiling: even perfectly aligned, it can only choose pixels,
+        never repaint a coherent surface — and rendered honestly the result
+        carries specks and patchwork that read as noise. This is the
+        standard render -> diffusion-refine -> reproject loop (TEXTure,
+        Paint3D), with one structural advantage: the atlas tiles ARE
+        per-view camera frames, so the rasteriser renders each view in
+        pixel-registration with its own tile and re-projection is a paste —
+        no alignment step exists to go wrong.
+
+        Every view must PROVE the refinement helped: the speckle metric
+        (distance from the 3x3 median) has to fall while the mean colour
+        drift stays bounded, or that view keeps its projected tile."""
+        needed = ("mappings", "tile", "cols", "views_used", "view_bbox",
+                  "tile_crops")
+        if not all(report.get(k) is not None for k in needed):
+            return glb, {}
+        ok, _why = self.kontext_ready()
+        if not ok:
+            return glb, {}
+        base = Path(self.settings.comfyui_dir) if self.settings.comfyui_dir \
+            else None
+        if base is None or not base.exists():
+            return glb, {}
+        tool = Path(__file__).resolve().parent.parent / "tools" / \
+            "texture_mesh.py"
+        try:
+            python = self._comfy_python(base)
+        except Exception:  # noqa: BLE001 — refinement is a bonus
+            return glb, {}
+        n = len(report["views_used"])
+        job.log("info", f"[stage] texture — repainting {n} view(s) of the "
+                        "textured mesh into clean photographs (each view "
+                        "ships only if its measured noise actually fell)")
+        refined: list[float] = []
+        skipped: list[dict] = []
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            current = work / "current.glb"
+            current.write_bytes(glb)
+            (work / "report.json").write_text(json.dumps(report))
+            template = self.workflows.load("kontext")
+            # Free once, then let the SAME model serve every view: a
+            # measured first run that dropped the cache per iteration spent
+            # 67 minutes mostly reloading Kontext, against ~2 minutes of
+            # actual repainting.
+            self._free_vram(job)
+            for i in range(n):
+                raster = work / f"raster_{i}.png"
+                alpha = work / f"alpha_{i}.png"
+                proc = subprocess.run(
+                    [python, str(tool), "rasterize", str(current),
+                     str(work / "report.json"), str(i), str(raster),
+                     str(alpha), "1536"],
+                    capture_output=True, text=True, timeout=420)
+                if proc.returncode != 0 or not raster.exists():
+                    skipped.append({"view": i, "why": "rasterize failed"})
+                    continue
+                try:
+                    before = Image.open(raster).convert("RGB")
+                    small = before.copy()
+                    small.thumbnail((1024, 1024), Image.LANCZOS)
+                    graph = build_workflow(template, {
+                        "prompt": self._REFINE_PROMPT,
+                        "image": self.comfy.upload_image(
+                            small, f"refine_{i}"),
+                        "seed": int.from_bytes(os.urandom(4),
+                                               "big") & 0x7FFFFFFF,
+                    })
+                    self._prepare_graph(job, graph)
+                    out, _pid = self.comfy.run_graph(graph)
+                    # Plain resampling to tile size on purpose: routing
+                    # through the upscale model evicted Kontext every
+                    # single view and the reload dwarfed the repaint.
+                    out = out.convert("RGB").resize(
+                        (report["tile"], report["tile"]), Image.LANCZOS)
+                except Exception as exc:  # noqa: BLE001
+                    skipped.append({"view": i, "why": str(exc)[:80]})
+                    continue
+                s_before, s_after, drift = self._speckle_and_drift(
+                    before, out, Image.open(alpha))
+                # A repaint must clean (speckle down ≥8%) without redrawing
+                # (drift bounded) — but a DRAMATIC clean may move more
+                # pixels, because repainting patchwork into one coherent
+                # surface IS movement. Both thresholds measured on a live
+                # set: a 38%-cleaner view was rejected at drift 57 while a
+                # near-no-op was rightly rejected at 68.
+                strong = s_after < s_before * 0.75
+                if (s_after >= s_before * 0.92
+                        or drift >= (72.0 if strong else 55.0)):
+                    skipped.append({"view": i,
+                                    "why": f"speckle {s_before:.1f}->"
+                                           f"{s_after:.1f}, drift "
+                                           f"{drift:.0f}"})
+                    job.log("info", f"View {int(report['views_used'][i])}° "
+                                    "kept its projected texture (the "
+                                    "repaint measured no clear improvement)")
+                    continue
+                refined_png = work / f"refined_{i}.png"
+                out.save(refined_png)
+                nxt = work / f"step_{i}.glb"
+                proc = subprocess.run(
+                    [python, str(tool), "paste", str(current),
+                     str(work / "report.json"), str(i), str(refined_png),
+                     str(alpha), str(nxt)],
+                    capture_output=True, text=True, timeout=300)
+                if proc.returncode == 0 and nxt.exists():
+                    current = nxt
+                    refined.append(report["views_used"][i])
+                    job.log("info", f"View {int(report['views_used'][i])}° "
+                                    f"repainted clean (noise "
+                                    f"{s_before:.1f} -> {s_after:.1f})")
+                else:
+                    skipped.append({"view": i, "why": "paste failed"})
+            if refined:
+                job.log("info", f"{len(refined)} of {n} view(s) repainted; "
+                                "the rest measured no improvement and kept "
+                                "their projected texture")
+                return current.read_bytes(), {"refined": refined,
+                                              "skipped": skipped}
+        job.log("info", "No view measured cleaner after repainting — the "
+                        "projected texture ships unchanged")
+        return glb, {"refined": [], "skipped": skipped}
+
     def _texture_mesh(self, job: Job, glb: bytes,
                       photos: list[tuple[float, Image.Image]],
                       synth_azimuths: list[float] | None = None
@@ -7676,8 +7859,8 @@ class Services:
             return out.read_bytes()
 
     def _build_mesh(self, job: Job, frame_ids: list[str], fallback_id: str,
-                    texture: bool = True,
-                    rig: bool = True) -> dict[str, Any] | None:
+                    texture: bool = True, rig: bool = True,
+                    refine: bool = True) -> dict[str, Any] | None:
         """Turn the orbit into a real 3D mesh, saved as a .glb asset.
 
         Hardware sets the octree resolution — the surface detail — and the
@@ -7739,8 +7922,18 @@ class Services:
                 best = (real_views.get("front")
                         or self._views_for_mesh(frame_ids).get("front")
                         or fallback_id)
+                shape_src = self.open_asset_image(best)
+                # The reconstruction models whatever rectangle it is
+                # handed. Orbit frames arrive staged; the raw-photo
+                # fallback does not — matte it, or the photo itself comes
+                # back as a textured slab (seen live as a literal box).
+                if not self._plain_backdrop(shape_src):
+                    try:
+                        shape_src = self._matte_on_grey(job, shape_src)
+                    except Exception:  # noqa: BLE001 — keep the original
+                        pass
                 params["image"] = self.comfy.upload_image(
-                    self.open_asset_image(best), "mesh_front")
+                    shape_src, "mesh_front")
             # Pin the checkpoint to the model actually ensured. The templates
             # carry a default filename, and picking the wrong one downloaded
             # 4.6 GB that was then never used.
@@ -7831,6 +8024,17 @@ class Services:
                                             "arcs")
             except Exception as exc:  # noqa: BLE001
                 job.log("info", f"Mesh colouring skipped ({exc})")
+        # Projection can only CHOOSE pixels; repainting each view of the
+        # painted mesh is what removes the specks and patchwork choosing
+        # leaves behind. Guarded and self-verifying: a view ships repainted
+        # only when its measured noise fell.
+        if textured_here and refine:
+            try:
+                data, refined = self._refine_texture(job, data, report)
+                if refined.get("refined"):
+                    report["texture_refined"] = refined["refined"]
+            except Exception as exc:  # noqa: BLE001 — refinement is a bonus
+                job.log("info", f"Texture refinement skipped ({exc})")
         # The texturing step has to solve where the cameras are, and how well
         # it can is a free measurement of whether the reconstruction actually
         # agrees with the photographs. Measured: 0.85 for a mesh built from a
@@ -7859,6 +8063,7 @@ class Services:
                   "rig_full_body": rig_report.get("full_body"),
                   "back_synthesized": bool(report.get("back_synthesized")),
                   "views_synthesized": report.get("synthesized_views"),
+                  "texture_refined": report.get("texture_refined"),
                   "tier": tier.name, "octree": tier.octree,
                   "textured": textured_here,
                   "colour": "photo-projected" if textured_here else "none",
@@ -8068,8 +8273,25 @@ class Services:
                 # wall" views came from.
                 extended = source_image is not original
                 orbit_mask = masks.get(source_id)
-                if extended:
+                if extended or orbit_mask is None:
                     orbit_mask = self._subject_matte(source_image)
+                    if orbit_mask is None:
+                        # One retry behind a revive: seen live, ComfyUI was
+                        # briefly unreachable, the matte silently failed,
+                        # and the uncut photo reconstructed as a textured
+                        # BOX — the picture modelled as an object.
+                        try:
+                            self._require_comfy(job)
+                            orbit_mask = self._subject_matte(source_image)
+                        except Exception:  # noqa: BLE001
+                            orbit_mask = None
+                if orbit_mask is None and \
+                        not self._plain_backdrop(source_image):
+                    raise RuntimeError(
+                        "the subject could not be isolated from the "
+                        "background (segmentation unavailable) — orbiting "
+                        "the whole photograph would model the picture "
+                        "itself as a flat slab")
                 files = self._orbit_from_photo(
                     job, source_image, orbit_mask, prefix="avatar_src")
                 used_real: set[str] = set()
@@ -8143,7 +8365,8 @@ class Services:
         # avatar with orbit frames and no mesh is still a working avatar.
         mesh = (self._build_mesh(job, frame_ids, face_asset_hint,
                                  texture=p.get("texture", True) is not False,
-                                 rig=p.get("rig", True) is not False)
+                                 rig=p.get("rig", True) is not False,
+                                 refine=p.get("refine", True) is not False)
                 if frame_ids or asset_ids else None)
 
         job.log("info", "[stage] save — saving the avatar profile")
