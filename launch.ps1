@@ -95,6 +95,53 @@ function Get-TorchPipLines([string]$pipPath, [string]$logPath) {
     return ("& '$pipPath' install --retries 10 --timeout 180 torch torchvision *> '$logPath'; ")
 }
 
+function Get-PyVersion([string]$py) {
+    # "3.12" / "3.13" of a venv's python, or "" - EAP relaxed around the
+    # native call (the usual PS 5.1 stderr landmine).
+    if (-not (Test-Path $py)) { return "" }
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    $v = ""
+    try {
+        $v = (& $py -c "import sys;print(f'{sys.version_info[0]}.{sys.version_info[1]}')" 2>$null | Out-String).Trim()
+    } catch {}
+    $ErrorActionPreference = $prev
+    return $v
+}
+
+function Get-Python312 {
+    # AMD's ROCm-on-Windows torch wheels exist for Python 3.12 ONLY, so on
+    # AMD machines every venv must be 3.12. Returns @("py","-3.12") when
+    # available (installing it via winget when not), else $null.
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    $have = ""
+    try { $have = (& py -3.12 -c "print(1)" 2>$null | Out-String).Trim() } catch {}
+    $ErrorActionPreference = $prev
+    if ($have -eq "1") { return @("py", "-3.12") }
+    if (Get-Command winget -ErrorAction SilentlyContinue) {
+        Write-Host "  Installing Python 3.12 (required for AMD GPU rendering)..." -ForegroundColor Yellow
+        winget install Python.Python.3.12 --source winget --accept-package-agreements `
+            --accept-source-agreements --disable-interactivity | Out-Null
+        $env:Path = [Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' +
+                    [Environment]::GetEnvironmentVariable('Path', 'User') + ';' + $env:Path
+        $prev = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
+        try { $have = (& py -3.12 -c "print(1)" 2>$null | Out-String).Trim() } catch {}
+        $ErrorActionPreference = $prev
+        if ($have -eq "1") { return @("py", "-3.12") }
+    }
+    return $null
+}
+
+function Get-AmdGpuName {
+    try {
+        return (Get-CimInstance Win32_VideoController -ErrorAction Stop |
+                Where-Object { $_.Name -match "Radeon|AMD" } |
+                Select-Object -First 1 -ExpandProperty Name)
+    } catch { return $null }
+}
+
 function Test-PyImport([string]$py, [string]$mods) {
     # PS 5.1 landmine: a native command writing to a REDIRECTED stderr while
     # $ErrorActionPreference is "Stop" becomes a terminating
@@ -148,26 +195,49 @@ if (($env:PROMPTFORGE_AUTO_UPDATE -ne "0") -and
 
 # --- 1. Python backend environment -------------------------------------------
 $python = Join-Path $root "backend\.venv\Scripts\python.exe"
+# AMD machines: the GPU torch wheels are Python-3.12-only, so a venv built
+# with any other version can NEVER install them — measured as a machine
+# that quietly ran the mock renderer. Rebuild wrong-version venvs.
+$gpuModeEarly = Get-GpuMode
+if ($gpuModeEarly -eq "rocm" -and (Test-Path $python)) {
+    $backendVer = Get-PyVersion $python
+    if ($backendVer -and $backendVer -ne "3.12") {
+        Write-Host "  This AMD machine needs Python 3.12 for GPU work (environment is $backendVer) - rebuilding..." -ForegroundColor Yellow
+        Remove-Item -Recurse -Force (Join-Path $root "backend\.venv")
+    }
+}
 if (-not (Test-Path $python)) {
     Write-Host "  First run: creating the Python environment..."
-    if (-not (Get-Command py -ErrorAction SilentlyContinue) -and
-        -not (Get-Command python -ErrorAction SilentlyContinue)) {
-        # A fresh clone on a fresh machine: install Python silently rather
-        # than sending the user to a website.
-        if (Get-Command winget -ErrorAction SilentlyContinue) {
-            Write-Host "  Installing Python 3.12 (one time)..." -ForegroundColor Yellow
-            winget install Python.Python.3.12 --source winget --accept-package-agreements `
-                --accept-source-agreements --disable-interactivity | Out-Null
-            $env:Path = [Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' +
-                        [Environment]::GetEnvironmentVariable('Path', 'User') + ';' + $env:Path
+    $made = $false
+    if ($gpuModeEarly -eq "rocm") {
+        $pl = Get-Python312
+        if ($pl) {
+            & $pl[0] $pl[1] -m venv (Join-Path $root "backend\.venv")
+            $made = $true
+        } else {
+            Write-Host "  [--] Python 3.12 unavailable - AMD GPU stack cannot install; continuing on CPU." -ForegroundColor Yellow
         }
     }
-    if (Get-Command py -ErrorAction SilentlyContinue) {
-        py -3 -m venv (Join-Path $root "backend\.venv")
-    } elseif (Get-Command python -ErrorAction SilentlyContinue) {
-        python -m venv (Join-Path $root "backend\.venv")
-    } else {
-        throw "Python 3.12+ not found and winget could not install it. Install from python.org and re-run."
+    if (-not $made) {
+        if (-not (Get-Command py -ErrorAction SilentlyContinue) -and
+            -not (Get-Command python -ErrorAction SilentlyContinue)) {
+            # A fresh clone on a fresh machine: install Python silently
+            # rather than sending the user to a website.
+            if (Get-Command winget -ErrorAction SilentlyContinue) {
+                Write-Host "  Installing Python 3.12 (one time)..." -ForegroundColor Yellow
+                winget install Python.Python.3.12 --source winget --accept-package-agreements `
+                    --accept-source-agreements --disable-interactivity | Out-Null
+                $env:Path = [Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' +
+                            [Environment]::GetEnvironmentVariable('Path', 'User') + ';' + $env:Path
+            }
+        }
+        if (Get-Command py -ErrorAction SilentlyContinue) {
+            py -3 -m venv (Join-Path $root "backend\.venv")
+        } elseif (Get-Command python -ErrorAction SilentlyContinue) {
+            python -m venv (Join-Path $root "backend\.venv")
+        } else {
+            throw "Python 3.12+ not found and winget could not install it. Install from python.org and re-run."
+        }
     }
 }
 # Self-repair: make sure backend deps import (cheap check, fixes broken installs).
@@ -306,13 +376,37 @@ function Find-ComfyUI {
 function Repair-ComfyVenv($dir) {
     # Repo layout only: create/fix the venv so ComfyUI can actually start.
     $venvPy = Join-Path $dir ".venv\Scripts\python.exe"
+    $mode = Get-GpuMode
+    # AMD: the ROCm torch wheels are cp312-only. A venv on any other
+    # Python version can never install them — the exact quiet failure
+    # that left a 64 GB AMD machine on the mock renderer. Verify the
+    # interpreter FIRST and rebuild when it is wrong.
+    if ($mode -eq "rocm" -and (Test-Path $venvPy)) {
+        $comfyVer = Get-PyVersion $venvPy
+        if ($comfyVer -and $comfyVer -ne "3.12") {
+            Write-Host "  ComfyUI's environment is Python $comfyVer, but AMD GPU wheels need 3.12 - rebuilding..." -ForegroundColor Yellow
+            Remove-Item -Recurse -Force (Join-Path $dir ".venv")
+        }
+    }
     if (-not (Test-Path $venvPy)) {
         Write-Host "  ComfyUI has no Python environment - creating one..." -ForegroundColor Yellow
-        if (Get-Command py -ErrorAction SilentlyContinue) {
-            py -3 -m venv (Join-Path $dir ".venv")
-        } elseif (Get-Command python -ErrorAction SilentlyContinue) {
-            python -m venv (Join-Path $dir ".venv")
-        } else { return $false }
+        $made = $false
+        if ($mode -eq "rocm") {
+            $pl = Get-Python312
+            if ($pl) {
+                & $pl[0] $pl[1] -m venv (Join-Path $dir ".venv")
+                $made = $true
+            } else {
+                Write-Host "  [--] Python 3.12 unavailable - the AMD GPU stack cannot install; ComfyUI will use CPU." -ForegroundColor Yellow
+            }
+        }
+        if (-not $made) {
+            if (Get-Command py -ErrorAction SilentlyContinue) {
+                py -3 -m venv (Join-Path $dir ".venv")
+            } elseif (Get-Command python -ErrorAction SilentlyContinue) {
+                python -m venv (Join-Path $dir ".venv")
+            } else { return $false }
+        }
     }
     if (-not (Test-PyImport $venvPy "torch, yaml, aiohttp, requests")) {
         $repairLog = Join-Path $logDir "comfyui-repair.log"
@@ -342,6 +436,27 @@ function Repair-ComfyVenv($dir) {
             return $false
         }
         Write-Host "  ComfyUI environment repaired." -ForegroundColor Green
+    }
+    # VERIFY the GPU stack rather than assume it: torch importing is not
+    # torch seeing the GPU. Reported per brand, honestly.
+    if ($mode -eq "rocm") {
+        $prevV = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
+        $hip = (& $venvPy -c "import torch; print(int(torch.cuda.is_available()))" 2>$null | Out-String).Trim()
+        $ErrorActionPreference = $prevV
+        if ($hip -eq "1") {
+            Write-Host "  [ok] AMD GPU visible to torch (ROCm) - GPU rendering enabled" -ForegroundColor Green
+        } else {
+            Write-Host "  [!] ROCm torch installed but the AMD GPU is not visible -" -ForegroundColor Yellow
+            Write-Host "      renders will use the CPU. Update the AMD driver (Adrenalin) and relaunch." -ForegroundColor Yellow
+        }
+    } elseif ($mode -eq "cpu") {
+        $amd = Get-AmdGpuName
+        if ($amd) {
+            Write-Host "  [!] $amd is not in AMD's ROCm-on-Windows support list" -ForegroundColor Yellow
+            Write-Host "      (RX 7700/7800/7900, RX 9000 series and select laptop chips are)." -ForegroundColor Yellow
+            Write-Host "      ComfyUI will render on the CPU - slow, but real renders, not the mock." -ForegroundColor Yellow
+        }
     }
     return $true
 }

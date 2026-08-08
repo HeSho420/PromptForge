@@ -1067,7 +1067,9 @@ class Services:
         Network view on the other machine polls, and nvidia-smi is not
         free)."""
         cached = self._stats_cache
-        if cached is not None and time.time() - cached[0] < 3.0:
+        # 10s: the WMI fallback for non-NVIDIA GPU names costs ~a second,
+        # and dashboard freshness does not need more.
+        if cached is not None and time.time() - cached[0] < 10.0:
             return cached[1]
         stats: dict[str, Any] = {}
         try:
@@ -1082,6 +1084,20 @@ class Services:
                          vram_total_mb=int(out[2]), gpu_name=out[3])
         except Exception:  # noqa: BLE001 — no NVIDIA GPU is not an error
             pass
+        if "gpu_name" not in stats:
+            # AMD/Intel machines have no nvidia-smi; at least NAME the GPU
+            # so the other machine's Network view is not blank about it.
+            try:
+                out = subprocess.run(
+                    ["powershell", "-NoProfile", "-Command",
+                     "(Get-CimInstance Win32_VideoController | "
+                     "Select-Object -First 1 -ExpandProperty Name)"],
+                    capture_output=True, text=True, timeout=6)
+                name = (out.stdout or "").strip()
+                if name:
+                    stats["gpu_name"] = name
+            except Exception:  # noqa: BLE001
+                pass
         ram = hw_ram_stats()
         if ram is not None:
             stats.update(ram_used_gb=ram[0], ram_total_gb=ram[1])
