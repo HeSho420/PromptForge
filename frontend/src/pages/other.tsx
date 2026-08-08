@@ -1239,6 +1239,120 @@ function SafetyRules() {
   );
 }
 
+/* -------- Network: peers on the LAN (model transfer + delegation) -------- */
+
+function NetworkPanel() {
+  const [data, setData] = useState<Awaited<
+    ReturnType<typeof api.peers>
+  > | null>(null);
+  const [host, setHost] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState<string | null>(null);
+
+  const refresh = async () => {
+    try {
+      setData(await api.peers());
+    } catch {
+      /* the panel simply stays as it was */
+    }
+  };
+
+  useEffect(() => {
+    void refresh();
+    const t = window.setInterval(() => void refresh(), 10_000);
+    return () => window.clearInterval(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const connect = async () => {
+    const target = host.trim();
+    if (!target) return;
+    setBusy(true);
+    setNote(null);
+    try {
+      const [h, p] = target.split(":");
+      const r = await api.probePeer(h, p ? Number(p) : undefined);
+      setNote(`Connected to '${r.name}' — models now copy between the two
+        machines, and renders delegate when one is busy and the other idle.`);
+      setHost("");
+      await refresh();
+    } catch (e) {
+      setNote((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const peers = data?.peers ?? [];
+  return (
+    <div className="panel stack" style={{ marginTop: 18 }}>
+      <h2 style={{ margin: 0 }}>Network</h2>
+      <p className="dim" style={{ margin: 0, fontSize: 12.5, maxWidth: "64ch" }}>
+        PromptForge machines on your network help each other automatically:
+        model downloads copy from a peer that already has the file
+        (checksum-verified), and when this machine&apos;s queue is busy a
+        whole render job runs on an idle peer&apos;s GPU. Only the model
+        library is ever shared — never photos or projects.
+      </p>
+      {data && (
+        <div className="dim" style={{ fontSize: 12.5 }}>
+          This machine: sharing {data.share ? "on" : "off"}, accepting
+          renders {data.render ? "on" : "off"}, listening on port {data.port}.
+        </div>
+      )}
+      {peers.length > 0 ? (
+        <ul style={{ margin: 0, paddingLeft: 18, fontSize: 13 }}>
+          {peers.map((p) => (
+            <li key={`${p.host}:${p.port}`}>
+              <strong>{p.name}</strong> — {p.host}:{p.port}{" "}
+              {p.reachable === false
+                ? "(not answering)"
+                : p.idle
+                  ? "(idle — can take renders)"
+                  : "(busy)"}
+              {p.static ? " · pinned" : ""}
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <div className="notice info" style={{ fontSize: 12.5 }}>
+          No other PromptForge found yet. On BOTH machines: run{" "}
+          <code>allow-lan.ps1</code> (in the PromptForge folder) once as
+          administrator — Windows blocks the discovery ports until then —
+          and make sure the network profile is <em>Private</em>, the other
+          machine has pulled the latest version, and its app is running.
+          You can also connect directly by address below.
+        </div>
+      )}
+      <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
+        <input
+          type="text"
+          placeholder="Other PC's IP, e.g. 192.168.1.50"
+          value={host}
+          onChange={(e) => setHost(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") void connect();
+          }}
+          style={{ minWidth: 220 }}
+        />
+        <button
+          type="button"
+          className="btn"
+          disabled={busy || !host.trim()}
+          onClick={() => void connect()}
+        >
+          {busy ? "Connecting…" : "Connect to address"}
+        </button>
+      </div>
+      {note && (
+        <div className="dim" role="status" aria-live="polite" style={{ fontSize: 12.5 }}>
+          {note}
+        </div>
+      )}
+    </div>
+  );
+}
+
 /* -------- Updates: pull what was pushed through git -------- */
 
 function UpdatePanel() {
@@ -1569,6 +1683,7 @@ export function Settings() {
           )}
         </div>
       )}
+      <NetworkPanel />
       <UpdatePanel />
       <CivitaiToken />
       <PrivacyHistory />

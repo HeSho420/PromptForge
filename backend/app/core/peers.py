@@ -46,11 +46,13 @@ HTTP_TIMEOUT_S = 10.0
 
 
 class Peer:
-    def __init__(self, token: str, name: str, host: str, port: int):
+    def __init__(self, token: str, name: str, host: str, port: int,
+                 static: bool = False):
         self.token = token
         self.name = name
         self.host = host
         self.port = port
+        self.static = static      # added by hand/env: never pruned
         self.last_seen = time.time()
 
     @property
@@ -59,6 +61,7 @@ class Peer:
 
     def to_dict(self) -> dict[str, Any]:
         return {"name": self.name, "host": self.host, "port": self.port,
+                "static": self.static,
                 "seen_ago_s": round(time.time() - self.last_seen, 1)}
 
 
@@ -70,7 +73,8 @@ class PeerService:
                  http_port: int = 8765, udp_port: int = 8766,
                  name: str | None = None,
                  busy_check: Callable[[], bool] | None = None,
-                 loopback_only: bool = False):
+                 loopback_only: bool = False,
+                 static_hosts: list[str] | None = None):
         self.registry = registry
         self.comfy_url = comfy_url.rstrip("/")
         self.share = share
@@ -84,6 +88,7 @@ class PeerService:
         self.loopback_only = loopback_only
         self.token = f"{self.name}-{time.time_ns()}"
         self.peers: dict[str, Peer] = {}
+        self.static_hosts = list(static_hosts or [])
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._threads: list[threading.Thread] = []
@@ -101,6 +106,15 @@ class PeerService:
                                  name=f"pf-peer-{target.__name__}")
             t.start()
             self._threads.append(t)
+        # Hand-configured peers (PROMPTFORGE_PEER_HOSTS): probed over plain
+        # HTTP, so they work even where UDP broadcasts never arrive.
+        for entry in self.static_hosts:
+            host, _, port = entry.strip().partition(":")
+            if host:
+                threading.Thread(
+                    target=self.add_peer,
+                    args=(host, int(port) if port.isdigit() else 8765),
+                    daemon=True, name="pf-peer-static").start()
         log.info("peer service up: http :%s, beacon :%s (share=%s render=%s)",
                  self.http_port, self.udp_port, self.share, self.render)
 
@@ -321,24 +335,70 @@ class PeerService:
     # is sent to the whole range.
     UDP_RANGE = 4
 
+    @staticmethod
+    def _local_ipv4s() -> list[str]:
+        ips: set[str] = set()
+        try:
+            for info in socket.getaddrinfo(socket.gethostname(), None,
+                                           socket.AF_INET):
+                ips.add(info[4][0])
+        except OSError:
+            pass
+        try:
+            probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            probe.connect(("8.8.8.8", 80))   # no packet is sent
+            ips.add(probe.getsockname()[0])
+            probe.close()
+        except OSError:
+            pass
+        return [ip for ip in ips if not ip.startswith("127.")]
+
     def _beacon_tx(self) -> None:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        """Announce on every interface, not just the default one.
+
+        A machine with Hyper-V/WSL virtual switches routes the plain
+        255.255.255.255 broadcast out ONE interface — often the virtual
+        one, where no peer will ever hear it. So each local IPv4 gets its
+        own sending socket (binding the source address steers the egress
+        interface) and its subnet's directed broadcast is targeted too.
+        Hand-configured peers additionally get direct unicast beacons."""
         while not self._stop.is_set():
             payload = json.dumps({
                 "pf": 1, "token": self.token, "name": self.name,
                 "http": self.http_port}).encode()
-            targets = (["127.0.0.1"] if self.loopback_only
-                       else ["255.255.255.255", "127.0.0.1"])
-            for host in targets:
-                for port in range(self.udp_port,
-                                  self.udp_port + self.UDP_RANGE):
+            if self.loopback_only:
+                socks = []
+                targets = ["127.0.0.1"]
+            else:
+                locals_ = self._local_ipv4s()
+                socks = []
+                for ip in locals_:
                     try:
-                        sock.sendto(payload, (host, port))
+                        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                        s.setsockopt(socket.SOL_SOCKET,
+                                     socket.SO_BROADCAST, 1)
+                        s.bind((ip, 0))
+                        socks.append(s)
                     except OSError:
                         pass
+                targets = ["255.255.255.255", "127.0.0.1"]
+                targets += [ip.rsplit(".", 1)[0] + ".255" for ip in locals_]
+                targets += [p.host for p in self.peers_list() if p.static]
+                targets += [e.strip().partition(":")[0]
+                            for e in self.static_hosts if e.strip()]
+            base = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            base.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+            for sock in [base, *socks]:
+                for host in dict.fromkeys(targets):
+                    for port in range(self.udp_port,
+                                      self.udp_port + self.UDP_RANGE):
+                        try:
+                            sock.sendto(payload, (host, port))
+                        except OSError:
+                            pass
+            for sock in [base, *socks]:
+                sock.close()
             self._stop.wait(BEACON_INTERVAL_S)
-        sock.close()
 
     def _beacon_rx(self) -> None:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -387,7 +447,8 @@ class PeerService:
         now = time.time()
         with self._lock:
             for token in [t for t, p in self.peers.items()
-                          if now - p.last_seen > PEER_STALE_S]:
+                          if not p.static
+                          and now - p.last_seen > PEER_STALE_S]:
                 del self.peers[token]
 
     # ---------------------------------------------------------------- client
@@ -395,6 +456,40 @@ class PeerService:
         self._prune()
         with self._lock:
             return list(self.peers.values())
+
+    def add_peer(self, host: str, port: int = 8765,
+                 timeout: float = 5.0) -> dict[str, Any] | None:
+        """Connect to a peer by address — the escape hatch for networks
+        where UDP broadcasts never arrive (firewalls, AP isolation).
+
+        Probes /pf-peer/info over plain HTTP; a machine added this way is
+        pinned (never pruned) and also receives direct unicast beacons."""
+        try:
+            with urllib.request.urlopen(
+                    f"http://{host}:{int(port)}/pf-peer/info",
+                    timeout=timeout) as resp:
+                info = json.loads(resp.read().decode())
+        except Exception as exc:  # noqa: BLE001
+            log.info("peer probe %s:%s failed: %s", host, port, exc)
+            return None
+        if info.get("app") != "promptforge":
+            return None
+        if info.get("token") == self.token:
+            return {"self": True, **info}
+        with self._lock:
+            peer = self.peers.get(info["token"])
+            if peer is None:
+                self.peers[info["token"]] = Peer(
+                    info["token"], str(info.get("name") or host),
+                    host, int(port), static=True)
+            else:
+                peer.static = True
+                peer.host = host
+                peer.port = int(port)
+                peer.last_seen = time.time()
+        log.info("peer '%s' connected by address %s:%s",
+                 info.get("name"), host, port)
+        return info
 
     def _peer_json(self, peer: Peer, path: str) -> Any:
         with urllib.request.urlopen(peer.base + path,

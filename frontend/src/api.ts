@@ -123,6 +123,31 @@ export const api = {
       incoming?: { sha: string; subject: string }[];
     }>(`/api/update?fetch=${fetchRemote ? 1 : 0}`),
   applyUpdate: () => request<Job>("/api/update/apply", { method: "POST" }),
+  peers: () =>
+    request<{
+      share: boolean;
+      render: boolean;
+      port: number | null;
+      peers: {
+        name: string;
+        host: string;
+        port: number;
+        static: boolean;
+        reachable?: boolean;
+        idle?: boolean | null;
+        seen_ago_s: number;
+      }[];
+    }>("/api/peers"),
+  probePeer: (host: string, port?: number) =>
+    request<{
+      connected: boolean;
+      name?: string;
+      idle?: boolean;
+    }>("/api/peers/probe", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ host, port }),
+    }),
   cancelJob: (id: string) =>
     request<Job>(`/api/jobs/${id}/cancel`, { method: "POST" }),
   retryJob: (id: string) =>

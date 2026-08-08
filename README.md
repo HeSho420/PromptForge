@@ -83,9 +83,19 @@ on):
   idle, whole render jobs run on the peer's GPU through a proxy the peer
   controls; the peer refuses while it is doing its own work, and any
   failure falls back to rendering locally (`PROMPTFORGE_LAN_RENDER=0` to
-  disable). Peers find each other automatically (UDP beacon on ports
-  8766-8769, transfers on 8765) — allow PromptForge through the Windows
-  firewall prompt on first run for this to work.
+  disable).
+
+**One-time setup on each machine:** run `allow-lan.ps1` (in the
+PromptForge folder) as administrator — Windows blocks the discovery and
+transfer ports until then (TCP 8765, UDP 8766-8769; Private networks
+only, the main app stays on 127.0.0.1) — and make sure the network
+profile is *Private*. **Settings → Network** then lists the discovered
+machines, shows whether each is idle, and has a "Connect to address"
+field for networks where UDP broadcasts don't travel (you can also set
+`PROMPTFORGE_PEER_HOSTS=192.168.x.x` to pin a peer permanently).
+Transfers appear in the model download progress ("Copying from another
+PromptForge on your network…"); delegation appears in the job log
+("[peer] … its GPU renders this job").
 
 Expect roughly 2–10 GB of downloads for the starter set depending on your
 GPU tier, and more as features are first used (the full library is ~100 GB

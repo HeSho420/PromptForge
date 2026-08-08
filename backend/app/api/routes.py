@@ -232,11 +232,49 @@ def create_app(services: Services | None = None) -> Flask:
     @api.get("/peers")
     def peers():
         """Other PromptForge machines discovered on the local network."""
+        entries = []
+        for p in services.peers.peers_list():
+            entry = p.to_dict()
+            try:
+                info = services.peers.add_peer(p.host, p.port,
+                                               timeout=2.0) or {}
+                entry["idle"] = info.get("idle")
+                entry["reachable"] = bool(info)
+            except Exception:  # noqa: BLE001
+                entry["reachable"] = False
+            entries.append(entry)
         return jsonify({
             "share": services.settings.lan_share,
             "render": services.settings.lan_render,
             "port": getattr(services.peers, "http_port", None),
-            "peers": [p.to_dict() for p in services.peers.peers_list()]})
+            "peers": entries})
+
+    @api.post("/peers/probe")
+    def peers_probe():
+        """Connect to a peer by address — for networks where the UDP
+        discovery broadcasts never arrive (firewalls, AP isolation)."""
+        body = request.get_json(silent=True) or {}
+        host = str(body.get("host") or "").strip()
+        if not host:
+            return _error(400, "missing_field", "host is required.")
+        try:
+            port = int(body.get("port") or 8765)
+        except (TypeError, ValueError):
+            return _error(400, "bad_field", "port must be a number.")
+        info = services.peers.add_peer(host, port)
+        if info is None:
+            return _error(
+                404, "no_peer",
+                f"No PromptForge answered at {host}:{port}. Check that it "
+                "is running, that both machines allowed PromptForge "
+                "through the Windows firewall (run allow-lan.ps1 as "
+                "administrator), and that the network is set to Private.")
+        if info.get("self"):
+            return _error(400, "self", "That address is this machine.")
+        return jsonify({"connected": True, "name": info.get("name"),
+                        "share": info.get("share"),
+                        "render": info.get("render"),
+                        "idle": info.get("idle")})
 
     @api.get("/system")
     def system_stats():

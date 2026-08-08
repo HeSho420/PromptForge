@@ -217,6 +217,26 @@ class TwoMachines(unittest.TestCase):
         self.assertTrue(info["idle"])
         self.assertEqual(info["app"], "promptforge")
 
+    def test_connect_by_address_pins_the_peer(self):
+        """The escape hatch for blocked UDP: plain HTTP, and the peer is
+        never pruned however long its beacons stay silent."""
+        info = self.b.add_peer("127.0.0.1", self.a.http_port)
+        self.assertEqual(info["name"], "machine-a")
+        peer = next(p for p in self.b.peers_list()
+                    if p.name == "machine-a")
+        self.assertTrue(peer.static)
+        peer.last_seen = 0
+        self.b._prune()
+        self.assertTrue(any(p.name == "machine-a"
+                            for p in self.b.peers_list()))
+
+    def test_connecting_to_yourself_is_flagged(self):
+        info = self.a.add_peer("127.0.0.1", self.a.http_port)
+        self.assertTrue(info.get("self"))
+
+    def test_connecting_to_a_dead_address_returns_none(self):
+        self.assertIsNone(self.b.add_peer("127.0.0.1", 9, timeout=1.0))
+
 
 class QueueBusyAndDelegationWiring(unittest.TestCase):
 

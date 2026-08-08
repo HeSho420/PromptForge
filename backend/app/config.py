@@ -84,6 +84,11 @@ class Settings:
         default_factory=lambda: os.environ.get(
             "PROMPTFORGE_LAN_RENDER", "1") not in ("0", "false", "no")
     )
+    # Peers connected by address ("host" or "host:port", comma-separated) —
+    # for networks where UDP discovery broadcasts never arrive.
+    lan_peers: str = field(
+        default_factory=lambda: os.environ.get("PROMPTFORGE_PEER_HOSTS", "")
+    )
     # How many times a failing workflow may be sent back to the LLM for repair.
     workflow_max_repairs: int = field(
         default_factory=lambda: int(os.environ.get("PROMPTFORGE_WORKFLOW_REPAIRS", "2"))

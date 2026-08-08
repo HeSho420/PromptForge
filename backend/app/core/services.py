@@ -902,7 +902,9 @@ class Services:
         self.peers = PeerService(
             self.registry, comfy_url=self.settings.comfyui_url,
             share=self.settings.lan_share, render=self.settings.lan_render,
-            busy_check=self.queue.busy)
+            busy_check=self.queue.busy,
+            static_hosts=[h for h in self.settings.lan_peers.split(",")
+                          if h.strip()])
         # Sockets only open for real rendering setups: the mock backend is
         # what every test fixture uses, and hundreds of tests each opening
         # LAN listeners would fight over the ports for nothing.
