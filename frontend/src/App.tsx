@@ -99,11 +99,18 @@ function PeerChip() {
                 </span>
               </div>
               <div className="mono" style={{ fontSize: 10, paddingLeft: 14, opacity: 0.8 }}>
-                {up
-                  ? [vram, ram, p.idle ? "idle" : "busy"]
-                      .filter(Boolean)
-                      .join(" · ") || (p.idle ? "idle" : "busy")
-                  : "not answering"}
+                {!up
+                  ? "not answering"
+                  : p.comfy && !p.comfy.up
+                    ? "⚠ no ComfyUI — cannot render"
+                    : [
+                        vram,
+                        ram,
+                        p.comfy?.device === "cpu" ? "⚠ CPU render" : "",
+                        p.idle ? "idle" : "busy",
+                      ]
+                        .filter(Boolean)
+                        .join(" · ") || (p.idle ? "idle" : "busy")}
               </div>
             </div>
           );

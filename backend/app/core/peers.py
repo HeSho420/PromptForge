@@ -205,6 +205,29 @@ class PeerService:
         self._threads.append(t)
 
     # ---- server-side request handling (runs on http threads)
+    def _comfy_status(self) -> dict[str, Any]:
+        """Can this machine actually render? Answered by its own ComfyUI.
+
+        A peer whose PromptForge answers but whose ComfyUI is down or
+        CPU-bound must never be picked for delegation, and the other
+        machine's UI should SAY so — measured live: a gaming PC ran the
+        app for a day on the mock renderer and nothing surfaced it."""
+        cached = getattr(self, "_comfy_cache", None)
+        if cached is not None and time.time() - cached[0] < 5.0:
+            return cached[1]
+        out: dict[str, Any] = {"up": False, "device": None, "gpu": None}
+        try:
+            with urllib.request.urlopen(self.comfy_url + "/system_stats",
+                                        timeout=2) as resp:
+                data = json.loads(resp.read().decode())
+            dev = (data.get("devices") or [{}])[0]
+            out = {"up": True, "device": str(dev.get("type") or ""),
+                   "gpu": dev.get("name")}
+        except Exception:  # noqa: BLE001 — down is an answer, not an error
+            pass
+        self._comfy_cache = (time.time(), out)
+        return out
+
     def _handle_get(self, req: BaseHTTPRequestHandler) -> None:
         path = req.path.split("?", 1)[0]
         if path == "/pf-peer/info":
@@ -218,6 +241,7 @@ class PeerService:
                             "token": self.token, "share": self.share,
                             "render": self.render,
                             "idle": not self.busy_check(),
+                            "comfy": self._comfy_status(),
                             "stats": stats})
             return
         if path == "/pf-peer/models":
@@ -632,15 +656,27 @@ class PeerService:
         return None
 
     def best_idle_peer(self) -> Peer | None:
-        """A peer whose PromptForge queue is empty right now, or None."""
+        """An idle peer that can actually RENDER, or None.
+
+        A peer with no ComfyUI cannot help however idle it is, and one
+        rendering on CPU is a last resort only — delegating a GPU job to
+        it would take longer than waiting for this machine."""
+        cpu_fallback: Peer | None = None
         for peer in self.peers_list():
             try:
                 info = self._peer_json(peer, "/pf-peer/info")
-                if info.get("render") and info.get("idle"):
-                    return peer
             except Exception:  # noqa: BLE001
                 continue
-        return None
+            if not (info.get("render") and info.get("idle")):
+                continue
+            comfy = info.get("comfy") or {}
+            if not comfy.get("up"):
+                continue
+            if str(comfy.get("device") or "").lower() == "cpu":
+                cpu_fallback = cpu_fallback or peer
+                continue
+            return peer
+        return cpu_fallback
 
     def find_peer(self, target: str) -> Peer | None:
         """A known peer matched by host or name (the device picker sends

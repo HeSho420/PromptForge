@@ -361,6 +361,7 @@ function Start-ComfyUI($dir) {
     $repoMain = Join-Path $dir "main.py"
     if (Test-Path $repoMain) {
         if (-not (Repair-ComfyVenv $dir)) { return $null }
+        Repair-CudaTorch $dir
         Optimize-ComfyPerf $dir
         $venvPy = Join-Path $dir ".venv\Scripts\python.exe"
         if (-not (Test-Path $venvPy)) { $venvPy = Join-Path $dir "venv\Scripts\python.exe" }
@@ -412,6 +413,71 @@ function Install-ComfyUI {
     } finally {
         Remove-Item $zip -ErrorAction SilentlyContinue
         Remove-Item -Recurse -Force $stage -ErrorAction SilentlyContinue
+    }
+}
+
+function Repair-CudaTorch($dir) {
+    # The commonest broken install: an NVIDIA machine whose ComfyUI venv
+    # ended up with CPU-only torch (partial download, wrong index). It
+    # imports fine, so the ordinary self-repair never fires - but every
+    # render would crawl or fail. Detect it and put the GPU build back.
+    if ((Get-GpuMode) -ne "cuda") { return }
+    $venvPy = Join-Path $dir ".venv\Scripts\python.exe"
+    if (-not (Test-Path $venvPy)) { return }
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    $cudaOk = (& $venvPy -c "import torch; print(int(torch.cuda.is_available()))" 2>$null | Out-String).Trim()
+    $ErrorActionPreference = $prev
+    if ($cudaOk -eq "1") { return }
+    Write-Host "  [!] NVIDIA GPU present but ComfyUI's torch cannot use it -" -ForegroundColor Yellow
+    Write-Host "      reinstalling the GPU build (one time, ~2.5 GB)..." -ForegroundColor Yellow
+    $pip = Join-Path $dir ".venv\Scripts\pip.exe"
+    $log = Join-Path $logDir "torch-cuda-repair.log"
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    & $pip install --force-reinstall --retries 10 --timeout 300 torch torchvision torchaudio `
+        --index-url https://download.pytorch.org/whl/cu126 *> $log
+    $cudaOk = (& $venvPy -c "import torch; print(int(torch.cuda.is_available()))" 2>$null | Out-String).Trim()
+    $ErrorActionPreference = $prev
+    if ($cudaOk -eq "1") {
+        Write-Host "  [ok] GPU torch restored" -ForegroundColor Green
+    } else {
+        Write-Host "  [--] torch still cannot see the GPU - check the NVIDIA driver ($log)" -ForegroundColor Yellow
+    }
+}
+
+function Test-ComfyRender($baseUrl) {
+    # Answering HTTP is not working: prove ComfyUI can RENDER by pushing a
+    # tiny model-free graph (EmptyImage -> SaveImage) through the real API
+    # and waiting for an output. Returns @($ok, $whyNot).
+    try {
+        $graph = @{ prompt = @{
+            "1" = @{ class_type = "EmptyImage"
+                     inputs = @{ width = 64; height = 64; batch_size = 1; color = 8355711 } }
+            "2" = @{ class_type = "SaveImage"
+                     inputs = @{ filename_prefix = "pf_verify"; images = @("1", 0) } }
+        } } | ConvertTo-Json -Depth 6
+        $resp = Invoke-RestMethod -Uri "$baseUrl/prompt" -Method Post `
+            -ContentType "application/json" -Body $graph -TimeoutSec 15
+        $promptId = $resp.prompt_id
+        if (-not $promptId) { return @($false, "the queue refused the test graph") }
+        for ($i = 0; $i -lt 40; $i++) {
+            Start-Sleep -Milliseconds 700
+            try { $hist = Invoke-RestMethod -Uri "$baseUrl/history/$promptId" -TimeoutSec 5 }
+            catch { continue }
+            $entry = $hist.$promptId
+            if ($entry) {
+                if ($entry.status -and $entry.status.status_str -eq "error") {
+                    $detail = ($entry.status | ConvertTo-Json -Compress -Depth 5)
+                    if ($detail.Length -gt 220) { $detail = $detail.Substring(0, 220) }
+                    return @($false, "the test render errored: $detail")
+                }
+                if ($entry.outputs) { return @($true, "") }
+            }
+        }
+        return @($false, "the test render never finished (28s)")
+    } catch {
+        return @($false, $_.Exception.Message)
     }
 }
 
@@ -480,11 +546,34 @@ if ($comfyDir) {
     $env:PROMPTFORGE_COMFYUI_DIR = $comfyDir
 }
 if ($comfyUp) {
-    $env:PROMPTFORGE_INPAINT_BACKEND = "comfyui"
-    Write-Host "  [ok] ComfyUI running - real rendering enabled" -ForegroundColor Green
+    # Verify, not assume: a running ComfyUI that cannot render is exactly
+    # as useless as a stopped one, and far quieter about it.
+    $verify = Test-ComfyRender "http://127.0.0.1:8188"
+    if ($verify[0]) {
+        $devLine = ""
+        try {
+            $st = Invoke-RestMethod -Uri "http://127.0.0.1:8188/system_stats" -TimeoutSec 5
+            $dev = $st.devices[0]
+            $devLine = " on $($dev.type) ($($dev.name))"
+            if ($dev.type -eq "cpu" -and (Get-GpuMode) -eq "cuda") {
+                Write-Host "  [!] ComfyUI is rendering on the CPU although an NVIDIA GPU exists -" -ForegroundColor Yellow
+                Write-Host "      renders will be very slow. Close PromptForge and relaunch to auto-repair." -ForegroundColor Yellow
+            }
+        } catch {}
+        $env:PROMPTFORGE_INPAINT_BACKEND = "comfyui"
+        Write-Host "  [ok] ComfyUI VERIFIED - test image rendered$devLine" -ForegroundColor Green
+    } else {
+        Write-Host "  [!!] ComfyUI answers but CANNOT RENDER: $($verify[1])" -ForegroundColor Red
+        Write-Host "       Renders fall back to the clearly-labeled mock. Logs: $logDir\comfyui-err.log" -ForegroundColor Yellow
+    }
 } else {
     Write-Host "  [--] ComfyUI not available - edits use the clearly-labeled mock renderer." -ForegroundColor Yellow
-    Write-Host "       (Logs: $logDir\comfyui*.log - or set PROMPTFORGE_COMFYUI_PATH.)" -ForegroundColor DarkGray
+    Write-Host "       Why, in order of likelihood:" -ForegroundColor DarkGray
+    Write-Host "         1. Its Python packages failed to install: $logDir\comfyui-repair.log" -ForegroundColor DarkGray
+    Write-Host "         2. It crashed on start: $logDir\comfyui-err.log" -ForegroundColor DarkGray
+    Write-Host "         3. No supported GPU stack (AMD cards need a ROCm-supported model + Python 3.12)" -ForegroundColor DarkGray
+    Get-Content (Join-Path $logDir "comfyui-err.log") -Tail 5 -ErrorAction SilentlyContinue |
+        ForEach-Object { Write-Host "       | $_" -ForegroundColor DarkGray }
 }
 
 # --- Performance summary ---------------------------------------------------------

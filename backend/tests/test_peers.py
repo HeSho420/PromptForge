@@ -92,10 +92,15 @@ class TwoMachines(unittest.TestCase):
             sha256=cls.sha, status="not_downloaded",
             meta={"folder": "checkpoints", "file": "tiny.safetensors"})
 
+        # A dead ComfyUI port on purpose: this suite must not change
+        # behaviour depending on whether the DEV machine's real ComfyUI
+        # happens to be running.
         cls.a = PeerService(cls.reg_a, share=True, render=True,
+                            comfy_url="http://127.0.0.1:9",
                             http_port=BASE_HTTP, udp_port=BASE_UDP,
                             name="machine-a", loopback_only=True)
         cls.b = PeerService(cls.reg_b, share=True, render=True,
+                            comfy_url="http://127.0.0.1:9",
                             http_port=BASE_HTTP + 1, udp_port=BASE_UDP,
                             name="machine-b", loopback_only=True)
         cls.a.start()
@@ -262,6 +267,19 @@ class TwoMachines(unittest.TestCase):
         self.assertIn(("127.0.0.1", self.a.http_port),
                       self.b.known_hosts)
         self.assertIsInstance(peer.static, bool)
+
+    def test_a_peer_without_comfyui_is_never_delegated_to(self):
+        """HerlockGame ran the app for a day with its ComfyUI down and
+        nothing surfaced it: info now carries comfy status, and the
+        delegation chooser refuses peers that cannot render."""
+        info = self.b.add_peer("127.0.0.1", self.a.http_port)
+        self.assertFalse(info["comfy"]["up"])   # no ComfyUI in this test
+        self.assertIsNone(self.b.best_idle_peer())
+
+    def test_a_cpu_rendering_peer_is_a_last_resort_only(self):
+        src = inspect.getsource(PeerService.best_idle_peer)
+        self.assertIn('== "cpu"', src)
+        self.assertIn("cpu_fallback = cpu_fallback or peer", src)
 
     def test_the_scanner_sweeps_arp_and_local_subnets(self):
         src = inspect.getsource(PeerService._scan_candidates)

@@ -1310,9 +1310,14 @@ function NetworkPanel() {
               <strong>{p.name}</strong> — {p.host}:{p.port}{" "}
               {p.reachable === false
                 ? "(not answering)"
-                : p.idle
-                  ? "(idle — can take renders)"
-                  : "(busy)"}
+                : p.comfy && !p.comfy.up
+                  ? "(⚠ its ComfyUI is not running — it cannot render; relaunch PromptForge there and watch for the ComfyUI VERIFIED line)"
+                  : p.idle
+                    ? "(idle — can take renders)"
+                    : "(busy)"}
+              {p.comfy?.up && p.comfy.device === "cpu"
+                ? " ⚠ CPU-only rendering"
+                : ""}
               {p.static ? " · pinned" : ""}
               {p.stats?.vram_total_mb ? (
                 <span className="dim">

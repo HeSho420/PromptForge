@@ -241,6 +241,7 @@ def create_app(services: Services | None = None) -> Flask:
                                                pin=False) or {}
                 entry["idle"] = info.get("idle")
                 entry["stats"] = info.get("stats")
+                entry["comfy"] = info.get("comfy")
                 entry["reachable"] = bool(info)
             except Exception:  # noqa: BLE001
                 entry["reachable"] = False

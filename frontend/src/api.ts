@@ -155,6 +155,11 @@ export const api = {
           ram_used_gb?: number;
           ram_total_gb?: number;
         } | null;
+        comfy?: {
+          up: boolean;
+          device?: string | null;
+          gpu?: string | null;
+        } | null;
         seen_ago_s: number;
       }[];
     }>("/api/peers"),
