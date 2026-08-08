@@ -89,6 +89,9 @@ class PeerService:
         self.token = f"{self.name}-{time.time_ns()}"
         self.peers: dict[str, Peer] = {}
         self.static_hosts = list(static_hosts or [])
+        # Injected by Services: accepts a pushed model manifest and queues
+        # the downloads on THIS machine (they arrive over the LAN path).
+        self.on_pull: Callable[[list[dict]], dict] | None = None
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._threads: list[threading.Thread] = []
@@ -215,10 +218,32 @@ class PeerService:
         req._json(404, {"error": "unknown path"})
 
     def _handle_post(self, req: BaseHTTPRequestHandler) -> None:
-        if req.path.split("?", 1)[0].startswith("/pf-peer/comfy/"):
+        path = req.path.split("?", 1)[0]
+        if path.startswith("/pf-peer/comfy/"):
             length = int(req.headers.get("Content-Length") or 0)
             body = req.rfile.read(length) if length else b""
             self._proxy(req, body=body)
+            return
+        if path == "/pf-peer/pull":
+            # A peer offers its model manifest; THIS machine decides what
+            # to queue. Only sha-pinned entries are ever accepted, and the
+            # downloads themselves run through the normal registry path
+            # (LAN first, checksum-verified) as visible jobs.
+            if not self.share:
+                req._json(403, {"error": "model sharing is off"})
+                return
+            if self.on_pull is None:
+                req._json(501, {"error": "no pull handler on this build"})
+                return
+            length = int(req.headers.get("Content-Length") or 0)
+            try:
+                body = json.loads(req.rfile.read(length).decode()
+                                  if length else "{}")
+                entries = list(body.get("models") or [])[:300]
+            except (ValueError, UnicodeDecodeError):
+                req._json(400, {"error": "bad manifest"})
+                return
+            req._json(200, self.on_pull(entries))
             return
         req._json(404, {"error": "unknown path"})
 
@@ -531,3 +556,21 @@ class PeerService:
             except Exception:  # noqa: BLE001
                 continue
         return None
+
+    def find_peer(self, target: str) -> Peer | None:
+        """A known peer matched by host or name (the device picker sends
+        whichever it has)."""
+        for peer in self.peers_list():
+            if target in (peer.host, peer.name):
+                return peer
+        return None
+
+    def post_pull(self, peer: Peer, manifest: list[dict]) -> dict[str, Any]:
+        """Offer this machine's model manifest to a peer; it queues what
+        it is missing and answers with what it did."""
+        body = json.dumps({"models": manifest}).encode()
+        req = urllib.request.Request(
+            peer.base + "/pf-peer/pull", data=body,
+            headers={"Content-Type": "application/json"}, method="POST")
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return json.loads(resp.read().decode())

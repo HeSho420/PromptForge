@@ -342,6 +342,12 @@ class JobQueue:
         return True
 
     # -- worker --------------------------------------------------------------
+    @staticmethod
+    def _forced_peer(job: Job) -> str | None:
+        """The device the user picked by hand, when it is another machine."""
+        device = (job.payload or {}).get("device")
+        return device if device and device not in ("auto", "local") else None
+
     def _run(self) -> None:
         while True:
             with self._cv:
@@ -349,36 +355,70 @@ class JobQueue:
                     self._cv.wait(timeout=0.5)
                 if self._stop.is_set():
                     return
-                job_id = self._pending.popleft()
+                job_id = self._pick_main()
+                if job_id is None:
+                    # Only hand-targeted jobs are waiting; the peer worker
+                    # owns those while it is alive.
+                    self._cv.wait(timeout=1.0)
+                    continue
             job = self.get(job_id)
             if job is None or job.state is JobState.CANCELLED:
                 continue
             self._execute(job)
 
+    def _pick_main(self) -> str | None:
+        """The next job for the MAIN worker: everything except jobs the
+        user pinned to another machine (those belong to the peer worker,
+        which also handles their fall-back-to-local when the peer is
+        gone). If the peer worker is not running, the main worker takes
+        them anyway rather than let them starve."""
+        helper_alive = self._helper is not None and self._helper.is_alive()
+        for jid in list(self._pending):
+            job = self._jobs.get(jid)
+            if job is None:
+                self._pending.remove(jid)
+                continue
+            if helper_alive and self._forced_peer(job):
+                continue
+            self._pending.remove(jid)
+            return jid
+        return None
+
     def _run_helper(self) -> None:
         while not self._stop.is_set():
             candidate: str | None = None
+            forced = False
             with self._lock:
                 running = any(j.state is JobState.RUNNING
                               for j in self._jobs.values())
-                if running and not self._paused:
-                    for jid in self._pending:
-                        j = self._jobs.get(jid)
-                        if j is not None and j.type in self._helper_types:
-                            candidate = jid
-                            break
+                for jid in self._pending:
+                    j = self._jobs.get(jid)
+                    if j is None or j.type not in self._helper_types:
+                        continue
+                    if (j.payload or {}).get("device") == "local":
+                        continue      # pinned to this machine by hand
+                    if self._forced_peer(j):
+                        candidate, forced = jid, True
+                        break
+                    if running and not self._paused:
+                        candidate = jid
+                        break
             if candidate is None:
                 self._stop.wait(1.5)
                 continue
-            # The network probe runs OUTSIDE every lock: it can take seconds
+            # Hand-targeted jobs go straight to the wrap — it resolves the
+            # chosen machine itself and falls back to local when it is
+            # gone. Automatic delegation still asks the gate first. The
+            # network probe runs OUTSIDE every lock: it can take seconds
             # and the main worker must never wait on it.
-            try:
-                ready = self._helper_gate()
-            except Exception:  # noqa: BLE001 — a broken probe means "no"
-                ready = False
-            if not ready:
-                self._stop.wait(4.0)
-                continue
+            if not forced:
+                try:
+                    ready = self._helper_gate()
+                except Exception:  # noqa: BLE001 — a broken probe means "no"
+                    ready = False
+                if not ready:
+                    self._stop.wait(4.0)
+                    continue
             with self._cv:
                 try:
                     self._pending.remove(candidate)

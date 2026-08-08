@@ -9,6 +9,7 @@ import hashlib
 import inspect
 import json
 import tempfile
+import threading
 import time
 import unittest
 import urllib.error
@@ -236,6 +237,116 @@ class TwoMachines(unittest.TestCase):
 
     def test_connecting_to_a_dead_address_returns_none(self):
         self.assertIsNone(self.b.add_peer("127.0.0.1", 9, timeout=1.0))
+
+
+class ModelPush(unittest.TestCase):
+    """'Send all models to the other device', end to end over loopback."""
+
+    def test_a_manifest_is_offered_and_the_receiver_decides(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            reg = FakeRegistry(Path(tmp) / "m")
+            svc = PeerService(reg, share=True, render=False,
+                              http_port=BASE_HTTP + 30,
+                              udp_port=BASE_UDP + 30, name="rx",
+                              loopback_only=True)
+            got: list[list[dict]] = []
+            svc.on_pull = lambda entries: (
+                got.append(entries) or {"queued": [e["name"]
+                                                   for e in entries]})
+            svc.start()
+            try:
+                from app.core.peers import Peer
+                peer = Peer("tok-rx", "rx", "127.0.0.1", svc.http_port)
+                out = svc.post_pull(peer, [
+                    {"name": "m1", "sha256": "aa"},
+                    {"name": "m2", "sha256": "bb"}])
+                self.assertEqual(out["queued"], ["m1", "m2"])
+                self.assertEqual(len(got[0]), 2)
+            finally:
+                svc.stop()
+
+    def test_sharing_off_refuses_the_offer(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            reg = FakeRegistry(Path(tmp) / "m")
+            svc = PeerService(reg, share=False, render=True,
+                              http_port=BASE_HTTP + 40,
+                              udp_port=BASE_UDP + 40, name="rx2",
+                              loopback_only=True)
+            svc.on_pull = lambda entries: {"queued": []}
+            svc.start()
+            try:
+                from app.core.peers import Peer
+                peer = Peer("tok", "rx2", "127.0.0.1", svc.http_port)
+                with self.assertRaises(urllib.error.HTTPError) as ctx:
+                    svc.post_pull(peer, [{"name": "m", "sha256": "aa"}])
+                self.assertEqual(ctx.exception.code, 403)
+            finally:
+                svc.stop()
+
+    def test_accepted_entries_need_a_checksum_and_become_visible_jobs(self):
+        import inspect as _inspect
+        src = _inspect.getsource(Services._accept_model_push)
+        self.assertIn("if not name or not sha:", src)
+        self.assertIn('self.queue.enqueue("model_download"', src)
+        self.assertIn("self.registry.register", src)
+
+
+class DeviceRouting(unittest.TestCase):
+    """The picker's contract: forced jobs go through the peer wrap even
+    when the gate says no; 'local' jobs never leave this machine."""
+
+    class _Db:
+        def query(self, *_a):
+            return []
+
+        def execute(self, *_a):
+            return None
+
+    def test_a_hand_picked_device_reaches_the_wrap(self):
+        q = JobQueue(self._Db())
+        done = threading.Event()
+        seen: dict = {}
+
+        def handler(_job):
+            return {"ok": True}
+
+        def wrap(execute, job):
+            seen["device"] = (job.payload or {}).get("device")
+            execute(job)
+            done.set()
+
+        q.register("t", handler)
+        q.start()
+        q.start_helper(gate=lambda: False, wrap=wrap, types={"t"})
+        try:
+            q.enqueue("t", {"device": "192.168.1.99"})
+            self.assertTrue(done.wait(timeout=10),
+                            "the peer worker never took the forced job")
+            self.assertEqual(seen["device"], "192.168.1.99")
+        finally:
+            q.stop()
+
+    def test_without_the_peer_worker_forced_jobs_still_run(self):
+        q = JobQueue(self._Db())
+        q.register("t", lambda _j: {"ok": True})
+        q.start()
+        try:
+            job = q.enqueue("t", {"device": "192.168.1.99"})
+            deadline = time.time() + 10
+            while time.time() < deadline and job.state.value != "completed":
+                time.sleep(0.1)
+            self.assertEqual(job.state.value, "completed")
+        finally:
+            q.stop()
+
+    def test_jobs_pinned_local_are_invisible_to_the_helper(self):
+        src = inspect.getsource(JobQueue._run_helper)
+        self.assertIn('(j.payload or {}).get("device") == "local"', src)
+
+    def test_the_wrap_honours_the_hand_picked_peer(self):
+        src = inspect.getsource(Services._delegate_wrap)
+        self.assertIn("chosen by hand", src)
+        self.assertIn("is not reachable", src)
 
 
 class QueueBusyAndDelegationWiring(unittest.TestCase):

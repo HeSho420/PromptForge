@@ -35,6 +35,18 @@ const json = (data: unknown): RequestInit => ({
   body: JSON.stringify(data),
 });
 
+/* The render device picked in the rail: "auto" (default), "local", or a
+   peer's host. Injected into every job-launching request body, so one
+   picker governs Studio, Forge, video, motion and avatars alike. */
+let renderDevice = localStorage.getItem("pf-device") || "auto";
+export const setRenderDevice = (d: string) => {
+  renderDevice = d;
+  localStorage.setItem("pf-device", d);
+};
+export const getRenderDevice = () => renderDevice;
+const jsonJob = (data: Record<string, unknown>): RequestInit =>
+  json(renderDevice === "auto" ? data : { ...data, device: renderDevice });
+
 export const api = {
   health: () => request<Health>("/api/health"),
 
@@ -77,7 +89,7 @@ export const api = {
   ) =>
     request<Job>(
       "/api/edits",
-      json({
+      jsonJob({
         asset_id: assetId,
         prompt,
         mask_b64: maskB64,
@@ -99,7 +111,7 @@ export const api = {
   }) =>
     request<Job>(
       "/api/motion_transfer",
-      json({
+      jsonJob({
         reference_asset_id: opts.referenceAssetId,
         driving_asset_id: opts.drivingAssetId,
         prompt: opts.prompt ?? "",
@@ -143,11 +155,14 @@ export const api = {
       connected: boolean;
       name?: string;
       idle?: boolean;
-    }>("/api/peers/probe", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ host, port }),
-    }),
+    }>("/api/peers/probe", json({ host, port })),
+  pushModels: (host: string, port?: number) =>
+    request<{
+      offered: number;
+      queued: string[];
+      already: string[];
+      skipped_no_checksum: string[];
+    }>("/api/peers/push-models", json({ host, port })),
   cancelJob: (id: string) =>
     request<Job>(`/api/jobs/${id}/cancel`, { method: "POST" }),
   retryJob: (id: string) =>
@@ -213,9 +228,9 @@ export const api = {
       "/api/workflows/approve", json({ id, live_test: liveTest })),
   runWorkflow: (task: string, prompt: string, assetId?: string) =>
     request<Job>("/api/workflows/run",
-      json({ task, prompt, asset_id: assetId })),
+      jsonJob({ task, prompt, asset_id: assetId })),
   createVideo: (assetId: string, prompt: string, length?: number) =>
-    request<Job>("/api/video", json({ asset_id: assetId, prompt, length })),
+    request<Job>("/api/video", jsonJob({ asset_id: assetId, prompt, length })),
 
   maskPoint: (assetId: string, x: number, y: number) =>
     request<MaskPreview>("/api/masks/point", json({ asset_id: assetId, x, y })),
@@ -227,7 +242,7 @@ export const api = {
   ) =>
     request<Job>(
       "/api/avatar",
-      json({
+      jsonJob({
         asset_ids: assetIds,
         consent,
         name,
@@ -247,7 +262,7 @@ export const api = {
   ) =>
     request<Job>(
       `/api/avatars/${avatarId}/render`,
-      json({ prompt, video, length }),
+      jsonJob({ prompt, video, length }),
     ),
   system: () =>
     request<{ gpu: { name: string; util_pct: number; vram_used_mb: number;

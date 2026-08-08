@@ -1303,14 +1303,52 @@ function NetworkPanel() {
       {peers.length > 0 ? (
         <ul style={{ margin: 0, paddingLeft: 18, fontSize: 13 }}>
           {peers.map((p) => (
-            <li key={`${p.host}:${p.port}`}>
+            <li
+              key={`${p.host}:${p.port}`}
+              style={{ marginBottom: 6 }}
+            >
               <strong>{p.name}</strong> — {p.host}:{p.port}{" "}
               {p.reachable === false
                 ? "(not answering)"
                 : p.idle
                   ? "(idle — can take renders)"
                   : "(busy)"}
-              {p.static ? " · pinned" : ""}
+              {p.static ? " · pinned" : ""}{" "}
+              <button
+                type="button"
+                className="btn"
+                style={{ fontSize: 11, padding: "2px 8px" }}
+                disabled={busy || p.reachable === false}
+                onClick={() =>
+                  void (async () => {
+                    if (
+                      !window.confirm(
+                        `Send every model on this machine to '${p.name}'? ` +
+                          "It downloads what it is missing over your " +
+                          "network (checksum-verified) — that can be many " +
+                          "gigabytes of disk on the other machine.",
+                      )
+                    )
+                      return;
+                    setBusy(true);
+                    setNote(null);
+                    try {
+                      const r = await api.pushModels(p.host, p.port);
+                      setNote(
+                        `Offered ${r.offered} model(s) to ${p.name}: it queued ` +
+                          `${r.queued.length} download(s) (watch its Queue ` +
+                          `page) and already had ${r.already.length}.`,
+                      );
+                    } catch (e) {
+                      setNote((e as Error).message);
+                    } finally {
+                      setBusy(false);
+                    }
+                  })()
+                }
+              >
+                Send all models
+              </button>
             </li>
           ))}
         </ul>

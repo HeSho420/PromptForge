@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
-import { api, usePolling } from "./api";
+import { api, getRenderDevice, setRenderDevice, usePolling } from "./api";
 import { Behind } from "./pages/Behind";
 import { Gallery, Models, Queue, Settings } from "./pages/other";
 import { Workspace } from "./pages/Workspace";
@@ -29,6 +29,69 @@ function GpuMeter() {
           {(gpu.vram_used_mb / 1024).toFixed(1)}G
         </span>
       </div>
+    </div>
+  );
+}
+
+/**
+ * Live LAN status + the render-device picker, always visible in the rail.
+ *
+ * The dot is the "are my PCs connected?" answer at a glance: green when a
+ * peer answers, grey while it is silent. The select pins where renders run
+ * — Auto (busy machine hands work to an idle one), This PC, or a specific
+ * peer by name — and applies to every render started from any page.
+ */
+function PeerChip() {
+  const { data } = usePolling(api.peers, 8000);
+  const [device, setDevice] = useState(getRenderDevice());
+  const peers = data?.peers ?? [];
+  const connected = peers.filter((p) => p.reachable !== false);
+  useEffect(() => {
+    // The picked machine vanished from the network: fall back to Auto
+    // rather than silently queueing jobs against a ghost.
+    if (
+      device !== "auto" &&
+      device !== "local" &&
+      data &&
+      !connected.some((p) => p.host === device)
+    ) {
+      setDevice("auto");
+      setRenderDevice("auto");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [data]);
+  if (!peers.length) return null;
+  const label =
+    connected.length === 0
+      ? "peers silent"
+      : connected.map((p) => p.name).join(", ");
+  return (
+    <div className="rail-status" style={{ flexDirection: "column", alignItems: "stretch", gap: 4 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 6 }}
+           title={peers.map((p) => `${p.name} (${p.host})`).join("\n")}>
+        <span className={`dot ${connected.length ? "good" : ""}`} aria-hidden />
+        <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>
+          {label}
+        </span>
+      </div>
+      <select
+        aria-label="Render device"
+        value={device}
+        onChange={(e) => {
+          setDevice(e.target.value);
+          setRenderDevice(e.target.value);
+        }}
+        style={{ width: "100%", fontSize: 11 }}
+      >
+        <option value="auto">Render: auto</option>
+        <option value="local">Render: this PC</option>
+        {connected.map((p) => (
+          <option key={p.host} value={p.host}>
+            Render: {p.name}
+            {p.idle === false ? " (busy)" : ""}
+          </option>
+        ))}
+      </select>
     </div>
   );
 }
@@ -106,6 +169,7 @@ export default function App() {
         ))}
         <div className="spacer" />
         <StaleBuild />
+        <PeerChip />
         <GpuMeter />
         <div className="rail-status" title={healthError ?? "Backend healthy"}>
           <span

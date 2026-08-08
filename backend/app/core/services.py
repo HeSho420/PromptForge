@@ -914,6 +914,7 @@ class Services:
             except Exception as exc:  # noqa: BLE001 — LAN help is optional
                 self.registry.notes["_peers"] = f"peer service off: {exc}"
         self.downloader.peer_source = self._peer_model_url
+        self.peers.on_pull = self._accept_model_push
         self.queue.register("image_edit", self._handle_image_edit)
         self.queue.register("model_download", self._handle_model_download)
         self.queue.register("model_research", self._handle_model_research)
@@ -1062,17 +1063,106 @@ class Services:
         return self.peers.find_model_url(name,
                                          model.sha256 if model else None)
 
+    def _accept_model_push(self, entries: list[dict]) -> dict[str, Any]:
+        """A peer offered its model library; queue what this machine lacks.
+
+        Every accepted entry must carry a sha256 — the peer is untrusted,
+        the pin is what later accepts the bytes — and each download runs
+        as a normal, visible model_download job whose fetch tries the LAN
+        first. Entries this machine never heard of are registered with the
+        ORIGINAL internet URL from the manifest, so provenance survives
+        even though the bytes arrive from next door."""
+        queued: list[str] = []
+        already: list[str] = []
+        skipped: list[str] = []
+        for entry in entries:
+            name = str(entry.get("name") or "").strip()
+            sha = str(entry.get("sha256") or "").strip()
+            if not name or not sha:
+                if name:
+                    skipped.append(name)
+                continue
+            if self.registry.is_ready(name):
+                already.append(name)
+                continue
+            if self.registry.get(name) is None:
+                self.registry.register(ModelInfo(
+                    name=name,
+                    purpose=str(entry.get("purpose") or "shared by a "
+                                "PromptForge on your network"),
+                    license=str(entry.get("license") or "unknown"),
+                    url=str(entry.get("url") or "") or None,
+                    sha256=sha,
+                    meta=dict(entry.get("meta") or {})))
+            self.queue.enqueue("model_download", {"model": name})
+            queued.append(name)
+        if queued:
+            self.events.log("info", f"A network peer offered its model "
+                                    f"library — downloading {len(queued)} "
+                                    "model(s) over the LAN (visible in the "
+                                    "Queue)")
+        return {"queued": queued, "already": already,
+                "skipped_no_checksum": skipped}
+
+    def push_models_to(self, host: str, port: int = 8765) -> dict[str, Any]:
+        """Offer every ready, sha-pinned model to a peer, which queues the
+        ones it is missing and fetches them over the LAN."""
+        info = self.peers.add_peer(host, port)
+        if info is None or info.get("self"):
+            raise PermanentError(
+                f"No other PromptForge answered at {host}:{port}.")
+        peer = self.peers.find_peer(host) or self.peers.find_peer(
+            str(info.get("name") or ""))
+        if peer is None:
+            raise PermanentError(f"Peer at {host} vanished mid-request.")
+        manifest = []
+        for m in self.registry.list():
+            if m.status == "ready" and m.sha256 and m.path \
+                    and Path(m.path).exists():
+                manifest.append({
+                    "name": m.name, "purpose": m.purpose,
+                    "license": m.license, "url": m.url,
+                    "sha256": m.sha256, "meta": m.meta or {}})
+        result = self.peers.post_pull(peer, manifest)
+        self.events.log("info", f"Offered {len(manifest)} model(s) to "
+                                f"'{peer.name}' — it queued "
+                                f"{len(result.get('queued') or [])} and "
+                                f"already had "
+                                f"{len(result.get('already') or [])}")
+        return {"offered": len(manifest), **result}
+
     def _peer_gate(self) -> bool:
         return self.peers.best_idle_peer() is not None
 
     def _delegate_wrap(self, execute, job) -> None:
-        """Run one job with its ComfyUI traffic bound to an idle peer."""
-        peer = self.peers.best_idle_peer()
+        """Run one job with its ComfyUI traffic bound to another machine.
+
+        Two ways in: the user picked a device by hand (payload.device
+        carries its host or name — honoured even when this machine is
+        free), or automatic delegation found an idle peer while this
+        machine was busy. Either way, an unreachable peer means the job
+        simply renders here, and says so."""
+        target = (job.payload or {}).get("device")
+        peer = None
+        if target and target not in ("auto", "local"):
+            found = self.peers.find_peer(target)
+            if found is not None and self.peers.add_peer(
+                    found.host, found.port, timeout=3.0):
+                peer = found
+                job.log("info", f"[peer] rendering on '{peer.name}' "
+                                f"({peer.host}) — chosen by hand")
+            else:
+                job.log("info", f"[peer] '{target}' is not reachable — "
+                                "rendering on this machine instead")
+        elif target != "local":
+            peer = self.peers.best_idle_peer()
+            if peer is not None:
+                job.log("info", f"[peer] this machine is busy and "
+                                f"'{peer.name}' ({peer.host}) is idle — "
+                                "its GPU renders this job")
         if peer is None:
             execute(job)
             return
-        job.log("info", f"[peer] this machine is busy and '{peer.name}' "
-                        f"({peer.host}) is idle — its GPU renders this job")
         self._comfy_tls.client = ComfyUIClient(
             f"{peer.base}/pf-peer/comfy")
         try:
