@@ -69,6 +69,7 @@ from .hardware import (
     probe,
     render_budget,
 )
+from .hardware import ram_stats as hw_ram_stats
 from .jobs import Job, JobQueue, PermanentError, TransientError
 from .llm import (
     ClaudeLLM,
@@ -904,7 +905,8 @@ class Services:
             share=self.settings.lan_share, render=self.settings.lan_render,
             busy_check=self.queue.busy,
             static_hosts=[h for h in self.settings.lan_peers.split(",")
-                          if h.strip()])
+                          if h.strip()],
+            stats_provider=self._machine_stats)
         # Sockets only open for real rendering setups: the mock backend is
         # what every test fixture uses, and hundreds of tests each opening
         # LAN listeners would fight over the ports for nothing.
@@ -1057,6 +1059,34 @@ class Services:
             return self.updates.apply(job)
         except UpdateError as exc:
             raise PermanentError(str(exc)) from exc
+
+    _stats_cache: tuple[float, dict] | None = None
+
+    def _machine_stats(self) -> dict[str, Any]:
+        """Live GPU/RAM numbers, shared with LAN peers (3s cache: the
+        Network view on the other machine polls, and nvidia-smi is not
+        free)."""
+        cached = self._stats_cache
+        if cached is not None and time.time() - cached[0] < 3.0:
+            return cached[1]
+        stats: dict[str, Any] = {}
+        try:
+            out = subprocess.run(
+                ["nvidia-smi",
+                 "--query-gpu=utilization.gpu,memory.used,memory.total,name",
+                 "--format=csv,noheader,nounits"],
+                capture_output=True, text=True, timeout=4, check=True,
+            ).stdout.strip().splitlines()[0].split(", ")
+            stats.update(gpu_util_pct=int(out[0]),
+                         vram_used_mb=int(out[1]),
+                         vram_total_mb=int(out[2]), gpu_name=out[3])
+        except Exception:  # noqa: BLE001 — no NVIDIA GPU is not an error
+            pass
+        ram = hw_ram_stats()
+        if ram is not None:
+            stats.update(ram_used_gb=ram[0], ram_total_gb=ram[1])
+        self._stats_cache = (time.time(), stats)
+        return stats
 
     def _peer_model_url(self, name: str) -> str | None:
         model = self.registry.get(name)

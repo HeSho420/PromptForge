@@ -237,8 +237,10 @@ def create_app(services: Services | None = None) -> Flask:
             entry = p.to_dict()
             try:
                 info = services.peers.add_peer(p.host, p.port,
-                                               timeout=2.0) or {}
+                                               timeout=2.0,
+                                               pin=False) or {}
                 entry["idle"] = info.get("idle")
+                entry["stats"] = info.get("stats")
                 entry["reachable"] = bool(info)
             except Exception:  # noqa: BLE001
                 entry["reachable"] = False

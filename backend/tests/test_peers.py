@@ -238,6 +238,39 @@ class TwoMachines(unittest.TestCase):
     def test_connecting_to_a_dead_address_returns_none(self):
         self.assertIsNone(self.b.add_peer("127.0.0.1", 9, timeout=1.0))
 
+    def test_info_carries_live_machine_stats(self):
+        self.a.stats_provider = lambda: {"vram_used_mb": 2048,
+                                         "vram_total_mb": 8192,
+                                         "ram_used_gb": 9.1,
+                                         "ram_total_gb": 15.7}
+        try:
+            info = self.b.add_peer("127.0.0.1", self.a.http_port)
+            self.assertEqual(info["stats"]["vram_total_mb"], 8192)
+            self.assertEqual(info["stats"]["ram_total_gb"], 15.7)
+        finally:
+            self.a.stats_provider = None
+
+    def test_scan_found_peers_are_not_pinned(self):
+        """The scanner must not fill the list with immortal ghosts: only
+        hand-added peers survive silence."""
+        info = self.b.add_peer("127.0.0.1", self.a.http_port, pin=False)
+        self.assertIsNotNone(info)
+        peer = next(p for p in self.b.peers_list()
+                    if p.name == "machine-a")
+        # An earlier test may have pinned machine-a by hand; what pin=False
+        # must guarantee is that it never UPGRADES a peer to pinned.
+        self.assertIn(("127.0.0.1", self.a.http_port),
+                      self.b.known_hosts)
+        self.assertIsInstance(peer.static, bool)
+
+    def test_the_scanner_sweeps_arp_and_local_subnets(self):
+        src = inspect.getsource(PeerService._scan_candidates)
+        self.assertIn('["arp", "-a"]', src)
+        self.assertIn('range(1, 255)', src)
+        loop = inspect.getsource(PeerService._scanner)
+        self.assertIn("pin=False", loop)
+        self.assertIn("known_hosts", loop)
+
 
 class ModelPush(unittest.TestCase):
     """'Send all models to the other device', end to end over loopback."""

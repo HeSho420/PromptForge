@@ -1313,7 +1313,20 @@ function NetworkPanel() {
                 : p.idle
                   ? "(idle — can take renders)"
                   : "(busy)"}
-              {p.static ? " · pinned" : ""}{" "}
+              {p.static ? " · pinned" : ""}
+              {p.stats?.vram_total_mb ? (
+                <span className="dim">
+                  {" "}
+                  · {p.stats.gpu_name ?? "GPU"}:{" "}
+                  {((p.stats.vram_used_mb ?? 0) / 1024).toFixed(1)}/
+                  {Math.round(p.stats.vram_total_mb / 1024)} GB VRAM
+                  {p.stats.ram_total_gb
+                    ? `, ${Math.round(p.stats.ram_used_gb ?? 0)}/${Math.round(
+                        p.stats.ram_total_gb,
+                      )} GB RAM`
+                    : ""}
+                </span>
+              ) : null}{" "}
               <button
                 type="button"
                 className="btn"

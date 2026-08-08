@@ -60,20 +60,55 @@ function PeerChip() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [data]);
-  if (!peers.length) return null;
-  const label =
-    connected.length === 0
-      ? "peers silent"
-      : connected.map((p) => p.name).join(", ");
+  const lanOn = data ? data.share || data.render : false;
+  if (!lanOn && !peers.length) return null;
   return (
-    <div className="rail-status" style={{ flexDirection: "column", alignItems: "stretch", gap: 4 }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 6 }}
-           title={peers.map((p) => `${p.name} (${p.host})`).join("\n")}>
-        <span className={`dot ${connected.length ? "good" : ""}`} aria-hidden />
-        <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>
-          {label}
-        </span>
-      </div>
+    <div
+      className="rail-status"
+      style={{ flexDirection: "column", alignItems: "stretch", gap: 4 }}
+    >
+      {peers.length === 0 ? (
+        <div style={{ display: "flex", alignItems: "center", gap: 6 }}
+             title="Looking for other PromptForge machines on your network">
+          <span className="dot" aria-hidden />
+          <span>scanning network…</span>
+        </div>
+      ) : (
+        peers.map((p) => {
+          const up = p.reachable !== false;
+          const s = p.stats;
+          const vram =
+            s?.vram_used_mb != null && s?.vram_total_mb
+              ? `V ${(s.vram_used_mb / 1024).toFixed(1)}/${Math.round(
+                  s.vram_total_mb / 1024,
+                )}G`
+              : "";
+          const ram =
+            s?.ram_used_gb != null && s?.ram_total_gb
+              ? `R ${Math.round(s.ram_used_gb)}/${Math.round(s.ram_total_gb)}G`
+              : "";
+          return (
+            <div
+              key={`${p.host}:${p.port}`}
+              title={`${p.name} (${p.host})${s?.gpu_name ? ` — ${s.gpu_name}` : ""}`}
+            >
+              <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                <span className={`dot ${up ? "good" : ""}`} aria-hidden />
+                <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>
+                  {p.name}
+                </span>
+              </div>
+              <div className="mono" style={{ fontSize: 10, paddingLeft: 14, opacity: 0.8 }}>
+                {up
+                  ? [vram, ram, p.idle ? "idle" : "busy"]
+                      .filter(Boolean)
+                      .join(" · ") || (p.idle ? "idle" : "busy")
+                  : "not answering"}
+              </div>
+            </div>
+          );
+        })
+      )}
       <select
         aria-label="Render device"
         value={device}
@@ -171,7 +206,13 @@ export default function App() {
         <StaleBuild />
         <PeerChip />
         <GpuMeter />
-        <div className="rail-status" title={healthError ?? "Backend healthy"}>
+        <div
+          className="rail-status"
+          title={
+            healthError ??
+            (health ? `Rendering: ${health.inpaint_adapter}` : "Starting…")
+          }
+        >
           <span
             className={`dot ${healthError ? "bad" : health ? "good" : ""}`}
             aria-hidden
@@ -179,7 +220,9 @@ export default function App() {
           {healthError
             ? "backend offline"
             : health
-              ? `${health.inpaint_adapter}${health.inpaint_is_mock ? " · mock" : ""}`
+              ? health.inpaint_is_mock
+                ? "mock renderer (no ComfyUI)"
+                : "ready"
               : "connecting…"}
         </div>
       </nav>

@@ -147,6 +147,14 @@ export const api = {
         static: boolean;
         reachable?: boolean;
         idle?: boolean | null;
+        stats?: {
+          gpu_name?: string;
+          gpu_util_pct?: number;
+          vram_used_mb?: number;
+          vram_total_mb?: number;
+          ram_used_gb?: number;
+          ram_total_gb?: number;
+        } | null;
         seen_ago_s: number;
       }[];
     }>("/api/peers"),

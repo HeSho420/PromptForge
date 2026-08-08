@@ -85,6 +85,18 @@ def _probe_ram_gb() -> float:
         return 8.0
 
 
+def ram_stats() -> tuple[float, float] | None:
+    """(used_gb, total_gb) right now, or None off-Windows/on failure.
+
+    Shared with LAN peers so the Network view can show what each machine
+    has left before handing it a render."""
+    status = _win_mem_status()
+    if status is None:
+        return None
+    total = status.ullTotalPhys / 1024**3
+    return round(total - status.ullAvailPhys / 1024**3, 1), round(total, 1)
+
+
 def available_commit_gb() -> float | None:
     """Windows: commit charge still available (free RAM + paging-file
     headroom), in GB. Model loads draw from this budget — when it runs out

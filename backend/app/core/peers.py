@@ -27,7 +27,9 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import socket
+import subprocess
 import threading
 import time
 import urllib.error
@@ -74,7 +76,8 @@ class PeerService:
                  name: str | None = None,
                  busy_check: Callable[[], bool] | None = None,
                  loopback_only: bool = False,
-                 static_hosts: list[str] | None = None):
+                 static_hosts: list[str] | None = None,
+                 stats_provider: Callable[[], dict] | None = None):
         self.registry = registry
         self.comfy_url = comfy_url.rstrip("/")
         self.share = share
@@ -92,6 +95,13 @@ class PeerService:
         # Injected by Services: accepts a pushed model manifest and queues
         # the downloads on THIS machine (they arrive over the LAN path).
         self.on_pull: Callable[[list[dict]], dict] | None = None
+        # Injected by Services: live GPU/RAM numbers, shown on the other
+        # machine's rail so "who has headroom?" is answered at a glance.
+        self.stats_provider = stats_provider
+        # Every address that ever answered as a PromptForge: the scanner
+        # keeps re-probing these, so a peer that reboots comes back on its
+        # own without waiting for a beacon to make it through.
+        self.known_hosts: set[tuple[str, int]] = set()
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._threads: list[threading.Thread] = []
@@ -104,7 +114,10 @@ class PeerService:
             return
         self._stop.clear()
         self._start_http()
-        for target in (self._beacon_tx, self._beacon_rx):
+        workers = [self._beacon_tx, self._beacon_rx]
+        if not self.loopback_only:
+            workers.append(self._scanner)
+        for target in workers:
             t = threading.Thread(target=target, daemon=True,
                                  name=f"pf-peer-{target.__name__}")
             t.start()
@@ -195,10 +208,17 @@ class PeerService:
     def _handle_get(self, req: BaseHTTPRequestHandler) -> None:
         path = req.path.split("?", 1)[0]
         if path == "/pf-peer/info":
+            stats = None
+            if self.stats_provider is not None:
+                try:
+                    stats = self.stats_provider()
+                except Exception:  # noqa: BLE001 — stats are decoration
+                    stats = None
             req._json(200, {"app": "promptforge", "name": self.name,
                             "token": self.token, "share": self.share,
                             "render": self.render,
-                            "idle": not self.busy_check()})
+                            "idle": not self.busy_check(),
+                            "stats": stats})
             return
         if path == "/pf-peer/models":
             if not self.share:
@@ -468,6 +488,67 @@ class PeerService:
                     peer.port = int(msg.get("http") or peer.port)
         sock.close()
 
+    # -------------------------------------------------------------- scanner
+    SCAN_HUNGRY_S = 20.0     # nothing connected yet: look often
+    SCAN_SETTLED_S = 120.0   # peers connected: keep an eye out for more
+
+    def _scan_candidates(self) -> list[str]:
+        """Addresses worth asking "are you a PromptForge?".
+
+        The ARP table lists machines that provably exist on this segment;
+        the full /24 of each local interface catches the ones ARP has not
+        met yet. A home LAN's 254 addresses at a 0.4s connect timeout in a
+        small thread pool is a few seconds of background work."""
+        hosts: set[str] = set()
+        try:
+            out = subprocess.run(["arp", "-a"], capture_output=True,
+                                 text=True, timeout=10).stdout
+            hosts.update(m.group(0) for m in re.finditer(
+                r"\b(?:10|172|192)\.\d{1,3}\.\d{1,3}\.\d{1,3}\b", out))
+        except Exception:  # noqa: BLE001 — ARP is a bonus source
+            pass
+        for ip in self._local_ipv4s():
+            base = ip.rsplit(".", 1)[0]
+            hosts.update(f"{base}.{n}" for n in range(1, 255))
+        locals_ = set(self._local_ipv4s())
+        return [h for h in hosts
+                if h not in locals_ and not h.endswith(".255")]
+
+    def _scanner(self) -> None:
+        """Actively find peers instead of waiting for beacons to arrive.
+
+        UDP broadcasts die to firewalls and access-point isolation far
+        more often than TCP does — measured live: two machines both
+        running PromptForge, neither hearing the other. A cheap TCP
+        connect sweep answers definitively. Known-good addresses are
+        re-probed first, so a rebooted peer reconnects by itself."""
+        while not self._stop.is_set():
+            try:
+                for host, port in list(self.known_hosts):
+                    self.add_peer(host, port, timeout=2.0, pin=False)
+                reachable = bool(self.peers_list())
+                if not reachable:
+                    candidates = self._scan_candidates()
+                    from concurrent.futures import ThreadPoolExecutor
+
+                    def knock(host: str) -> str | None:
+                        try:
+                            s = socket.create_connection(
+                                (host, 8765), timeout=0.4)
+                            s.close()
+                            return host
+                        except OSError:
+                            return None
+                    with ThreadPoolExecutor(max_workers=32) as pool:
+                        open_hosts = [h for h in pool.map(knock, candidates)
+                                      if h]
+                    for host in open_hosts:
+                        self.add_peer(host, 8765, timeout=3.0, pin=False)
+            except Exception:  # noqa: BLE001 — the scanner must survive
+                pass
+            self._stop.wait(self.SCAN_HUNGRY_S if not self.peers_list()
+                            else self.SCAN_SETTLED_S)
+
     def _prune(self) -> None:
         now = time.time()
         with self._lock:
@@ -483,12 +564,15 @@ class PeerService:
             return list(self.peers.values())
 
     def add_peer(self, host: str, port: int = 8765,
-                 timeout: float = 5.0) -> dict[str, Any] | None:
-        """Connect to a peer by address — the escape hatch for networks
-        where UDP broadcasts never arrive (firewalls, AP isolation).
+                 timeout: float = 5.0,
+                 pin: bool = True) -> dict[str, Any] | None:
+        """Connect to a peer by address.
 
-        Probes /pf-peer/info over plain HTTP; a machine added this way is
-        pinned (never pruned) and also receives direct unicast beacons."""
+        Probes /pf-peer/info over plain HTTP — the escape hatch for
+        networks where UDP broadcasts never arrive. A machine added BY
+        HAND (or from the environment) is pinned and never pruned; one the
+        scanner found is not, so it disappears when it really goes away
+        and reappears when the scanner sees it again."""
         try:
             with urllib.request.urlopen(
                     f"http://{host}:{int(port)}/pf-peer/info",
@@ -501,19 +585,20 @@ class PeerService:
             return None
         if info.get("token") == self.token:
             return {"self": True, **info}
+        self.known_hosts.add((host, int(port)))
         with self._lock:
             peer = self.peers.get(info["token"])
             if peer is None:
                 self.peers[info["token"]] = Peer(
                     info["token"], str(info.get("name") or host),
-                    host, int(port), static=True)
+                    host, int(port), static=pin)
+                log.info("peer '%s' connected at %s:%s",
+                         info.get("name"), host, port)
             else:
-                peer.static = True
+                peer.static = peer.static or pin
                 peer.host = host
                 peer.port = int(port)
                 peer.last_seen = time.time()
-        log.info("peer '%s' connected by address %s:%s",
-                 info.get("name"), host, port)
         return info
 
     def _peer_json(self, peer: Peer, path: str) -> Any:

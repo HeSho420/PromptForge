@@ -138,10 +138,23 @@ class MaskRefineTests(unittest.TestCase):
 
 class RepairKnowledgeTests(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
+        self.tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.store = ExperienceStore(Database(Path(self.tmp.name) / "t.sqlite3"))
 
     def tearDown(self):
+        # Windows releases a just-closed SQLite handle a beat late under
+        # full-suite load — measured erroring this teardown roughly one run
+        # in three (WinError 32) while every targeted run passed. Retry
+        # briefly; whatever the OS still holds is swallowed by the
+        # tempdir's ignore_cleanup_errors and vanishes with the OS temp.
+        import shutil
+        import time
+        for _ in range(10):
+            try:
+                shutil.rmtree(self.tmp.name)
+                return
+            except PermissionError:
+                time.sleep(0.1)
         self.tmp.cleanup()
 
     def test_repair_is_distilled_and_replayed(self):
