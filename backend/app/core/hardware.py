@@ -42,7 +42,47 @@ def _probe_gpu() -> tuple[str | None, float]:
         name, total = [p.strip() for p in out.split(",", 1)]
         return name, round(float(total) / 1024, 1)
     except Exception:  # noqa: BLE001 — no NVIDIA GPU / driver
+        return _probe_gpu_registry()
+
+
+def _probe_gpu_registry() -> tuple[str | None, float]:
+    """AMD/Intel VRAM from the display-class registry keys.
+
+    nvidia-smi answers for one brand only; an RX 6700 XT with 12 GB was
+    reporting 0 and every VRAM-gated tier treated a capable machine as
+    GPU-less. HardwareInformation.qwMemorySize is the value the driver
+    itself writes (the WMI AdapterRAM field is a 32-bit relic that caps
+    at 4 GB)."""
+    if sys.platform != "win32":
         return None, 0.0
+    try:
+        import winreg
+        best_name, best_bytes = None, 0
+        cls = (r"SYSTEM\CurrentControlSet\Control\Class"
+               r"\{4d36e968-e325-11ce-bfc1-08002be10318}")
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, cls) as root_key:
+            for i in range(64):
+                try:
+                    sub = winreg.EnumKey(root_key, i)
+                except OSError:
+                    break
+                if not sub.isdigit():
+                    continue
+                try:
+                    with winreg.OpenKey(root_key, sub) as dev:
+                        size, _ = winreg.QueryValueEx(
+                            dev, "HardwareInformation.qwMemorySize")
+                        name, _ = winreg.QueryValueEx(
+                            dev, "DriverDesc")
+                except OSError:
+                    continue
+                if isinstance(size, int) and size > best_bytes:
+                    best_bytes, best_name = size, str(name)
+        if best_bytes:
+            return best_name, round(best_bytes / 1024**3, 1)
+    except Exception:  # noqa: BLE001 — probing is advisory
+        pass
+    return None, 0.0
 
 
 def _win_mem_status():

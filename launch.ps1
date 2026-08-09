@@ -335,6 +335,9 @@ $llmModel = $env:PROMPTFORGE_LLM_MODEL
 if (-not $llmModel) {
     if ($vramGb -ge 16) { $llmModel = "qwen2.5:14b" }
     elseif ($vramGb -ge 6 -and $ramGb -ge 12) { $llmModel = "qwen2.5:7b" }
+    elseif ($ramGb -ge 32) { $llmModel = "qwen2.5:7b" }
+    # ^ AMD machines report 0 GB VRAM to nvidia-smi; a 64 GB box was
+    #   getting the 3B planner. Plenty of RAM runs the 7B on CPU fine.
     else { $llmModel = "qwen2.5:3b" }
     $env:PROMPTFORGE_LLM_MODEL = $llmModel   # backend inherits the choice
 }
@@ -374,6 +377,10 @@ if ($ollamaExe) {
 
 # --- 4. ComfyUI (real rendering), if an install can be found --------------------
 function Find-ComfyUI {
+    # Only a RUNNABLE layout counts: a folder that merely exists (models
+    # dump, nested clone, leftovers) made the starter bail silently and
+    # blocked the auto-download - measured live as an AMD machine whose
+    # repair and DirectML code never even ran.
     $candidates = @(
         $env:PROMPTFORGE_COMFYUI_PATH,
         (Join-Path $root "tools\ComfyUI"),
@@ -383,7 +390,13 @@ function Find-ComfyUI {
         "$env:USERPROFILE\Downloads\ComfyUI_windows_portable"
     )
     foreach ($c in $candidates) {
-        if ($c -and (Test-Path $c)) { return (Resolve-Path $c).Path }
+        if (-not ($c -and (Test-Path $c))) { continue }
+        $p = (Resolve-Path $c).Path
+        $portable = (Test-Path (Join-Path $p "python_embeded\python.exe")) -and
+                    (Test-Path (Join-Path $p "ComfyUI\main.py"))
+        $repo = Test-Path (Join-Path $p "main.py")
+        if ($portable -or $repo) { return $p }
+        Write-Host "  (skipping $p - a folder, but not a runnable ComfyUI)" -ForegroundColor DarkGray
     }
     return $null
 }
