@@ -181,6 +181,14 @@ export const api = {
       already: string[];
       skipped_no_checksum: string[];
     }>("/api/peers/push-models", json({ host, port })),
+  fetchModels: (host: string, port?: number) =>
+    request<{
+      peer: string;
+      offered: number;
+      queued: string[];
+      already: string[];
+      skipped_no_checksum: string[];
+    }>("/api/peers/fetch-models", json({ host, port })),
   cancelJob: (id: string) =>
     request<Job>(`/api/jobs/${id}/cancel`, { method: "POST" }),
   retryJob: (id: string) =>

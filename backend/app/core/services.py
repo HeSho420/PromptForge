@@ -17,6 +17,7 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.error
 import urllib.request
 import uuid
 import zipfile
@@ -1233,6 +1234,39 @@ class Services:
                                 f"already had "
                                 f"{len(result.get('already') or [])}")
         return {"offered": len(manifest), **result}
+
+    def pull_models_from(self, host: str, port: int = 8765) -> dict[str, Any]:
+        """Ask a peer for its model library and queue everything this
+        machine lacks — the inverse of push_models_to, run from the machine
+        that WANTS the models. Same trust model as a push: every entry
+        needs a sha256 pin, and the downloads are ordinary visible
+        model_download jobs whose fetch tries the LAN copy first."""
+        info = self.peers.add_peer(host, port)
+        if info is None or info.get("self"):
+            raise PermanentError(
+                f"No other PromptForge answered at {host}:{port}.")
+        peer_name = str(info.get("name") or host)
+        try:
+            entries = self.peers.fetch_manifest(host, port)
+        except urllib.error.HTTPError as exc:
+            if exc.code == 403:
+                raise PermanentError(
+                    f"'{peer_name}' is not sharing models — turn on "
+                    "sharing in its Settings → Network.") from exc
+            raise TransientError(
+                f"'{peer_name}' refused its model list: HTTP {exc.code}"
+            ) from exc
+        except (urllib.error.URLError, OSError, ValueError) as exc:
+            raise TransientError(
+                f"Could not read the model list from '{peer_name}': {exc}"
+            ) from exc
+        result = self._accept_model_push(entries)
+        self.events.log("info",
+                        f"Asked '{peer_name}' for its models — "
+                        f"{len(entries)} offered, "
+                        f"{len(result.get('queued') or [])} queued, "
+                        f"{len(result.get('already') or [])} already here")
+        return {"peer": peer_name, "offered": len(entries), **result}
 
     def _peer_gate(self) -> bool:
         return self.peers.best_idle_peer() is not None
@@ -4295,7 +4329,15 @@ class Services:
 
     def _live_object_info(self) -> dict | None:
         """The live /object_info schema, cached ~5 min. None when ComfyUI is
-        unreachable — the schema check is advisory, never a blocker."""
+        unreachable — the schema check is advisory, never a blocker.
+
+        Mock mode means OFFLINE: a ComfyUI answering on this box belongs to
+        some other setup (measured live: the dev machine's real instance
+        made every mocked test job spend seconds probing it, and slower
+        answers under load broke the whole test_api module — the long-
+        misdiagnosed 'load flakes')."""
+        if self.settings.inpaint_backend == "mock":
+            return None
         now = time.time()
         if self._object_info_cache and now - self._object_info_cache[0] < 300:
             return self._object_info_cache[1]

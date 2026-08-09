@@ -1379,6 +1379,42 @@ function NetworkPanel() {
                 }
               >
                 Send all models
+              </button>{" "}
+              <button
+                type="button"
+                className="btn"
+                style={{ fontSize: 11, padding: "2px 8px" }}
+                disabled={busy || p.reachable === false}
+                onClick={() =>
+                  void (async () => {
+                    if (
+                      !window.confirm(
+                        `Ask '${p.name}' for its models? THIS machine ` +
+                          "downloads every model it is missing over your " +
+                          "network (checksum-verified) — that can be many " +
+                          "gigabytes of disk here.",
+                      )
+                    )
+                      return;
+                    setBusy(true);
+                    setNote(null);
+                    try {
+                      const r = await api.fetchModels(p.host, p.port);
+                      setNote(
+                        `${p.name} offered ${r.offered} model(s): queued ` +
+                          `${r.queued.length} download(s) here (watch the ` +
+                          `Queue page); ${r.already.length} already on ` +
+                          `this machine.`,
+                      );
+                    } catch (e) {
+                      setNote((e as Error).message);
+                    } finally {
+                      setBusy(false);
+                    }
+                  })()
+                }
+              >
+                Ask for its models
               </button>
             </li>
           ))}

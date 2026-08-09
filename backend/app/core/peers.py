@@ -358,16 +358,24 @@ class PeerService:
             # to queue. Only sha-pinned entries are ever accepted, and the
             # downloads themselves run through the normal registry path
             # (LAN first, checksum-verified) as visible jobs.
+            #
+            # The body is drained BEFORE any refusal: answering 403 while
+            # the client is still writing races into a connection reset,
+            # so the client never sees the honest error (caught live by
+            # the suite under load). Capped — a manifest is tiny.
+            length = min(int(req.headers.get("Content-Length") or 0),
+                         8 * 1024 * 1024)
+            raw = req.rfile.read(length) if length else b""
             if not self.share:
                 req._json(403, {"error": "model sharing is off"})
                 return
             if self.on_pull is None:
                 req._json(501, {"error": "no pull handler on this build"})
                 return
-            length = int(req.headers.get("Content-Length") or 0)
             try:
-                body = json.loads(req.rfile.read(length).decode()
-                                  if length else "{}")
+                body = json.loads(raw.decode() if raw else "{}")
+                if not isinstance(body, dict):
+                    raise ValueError("manifest must be an object")
                 entries = list(body.get("models") or [])[:300]
             except (ValueError, UnicodeDecodeError):
                 req._json(400, {"error": "bad manifest"})
@@ -393,7 +401,14 @@ class PeerService:
             out.append({"name": m.name, "file": resolved.name,
                         "folder": (m.meta or {}).get("folder", ""),
                         "size": resolved.stat().st_size,
-                        "sha256": m.sha256 or ""})
+                        "sha256": m.sha256 or "",
+                        # Provenance travels with the entry so a machine
+                        # that ASKS for models can register them with the
+                        # original internet URL, not just the LAN copy.
+                        "url": m.url or "",
+                        "purpose": m.purpose or "",
+                        "license": m.license or "",
+                        "meta": dict(m.meta or {})})
         return out
 
     def _serve_model(self, req: BaseHTTPRequestHandler, name: str) -> None:
@@ -770,6 +785,34 @@ class PeerService:
             if target in (peer.host, peer.name):
                 return peer
         return None
+
+    def fetch_manifest(self, host: str, port: int = 8765,
+                       timeout: float = 10.0) -> list[dict]:
+        """A peer's shareable model list, normalized for acceptance: every
+        entry carries name/sha256 plus whatever provenance the peer knows.
+        Tolerates older peers that serve only the thin index (no url/meta)
+        by folding their folder/file fields into meta so downloads still
+        land in the right typed subfolder."""
+        with urllib.request.urlopen(
+                f"http://{host}:{port}/pf-peer/models",
+                timeout=timeout) as resp:
+            raw = json.loads(resp.read().decode())
+        entries: list[dict] = []
+        for e in raw if isinstance(raw, list) else []:
+            if not isinstance(e, dict):
+                continue
+            meta = dict(e.get("meta") or {})
+            if e.get("folder") and "folder" not in meta:
+                meta["folder"] = e["folder"]
+            if e.get("file") and "filename" not in meta:
+                meta["filename"] = e["file"]
+            entries.append({
+                "name": e.get("name"), "sha256": e.get("sha256"),
+                "url": e.get("url") or "",
+                "purpose": e.get("purpose") or "",
+                "license": e.get("license") or "",
+                "meta": meta})
+        return entries
 
     def post_pull(self, peer: Peer, manifest: list[dict]) -> dict[str, Any]:
         """Offer this machine's model manifest to a peer; it queues what

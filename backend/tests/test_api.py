@@ -20,9 +20,14 @@ def _png_bytes(size=(64, 48), color=(200, 150, 100)) -> bytes:
 class ApiIntegrationTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        # Tests run offline: explicitly select the mock backends.
+        # Tests run offline: explicitly select the mock backends. The LLM
+        # endpoint MUST be dead too — the default points at the machine's
+        # real Ollama, and whenever that happened to be running these jobs
+        # cold-loaded a 7B model per planning call and blew every timeout
+        # (the long-blamed "load flakes" were exactly this).
         settings = Settings(data_dir=Path(self.tmp.name),
                             inpaint_backend="mock", segment_backend="mock",
+                            llm_url="http://127.0.0.1:9/v1",
                             critic_model="", first_run_setup=False, comfyui_dir="")
         self.services = Services(settings)
         app = create_app(self.services)
@@ -39,7 +44,7 @@ class ApiIntegrationTests(unittest.TestCase):
         self.assertEqual(resp.status_code, 201)
         return resp.get_json()["id"]
 
-    def _wait_job(self, job_id: str, timeout=10.0) -> dict:
+    def _wait_job(self, job_id: str, timeout=30.0) -> dict:
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             job = self.client.get(f"/api/jobs/{job_id}").get_json()

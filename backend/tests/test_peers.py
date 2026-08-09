@@ -126,7 +126,11 @@ class TwoMachines(unittest.TestCase):
             index = json.loads(resp.read().decode())
         self.assertEqual(index, [{
             "name": "tiny-model", "file": "tiny.safetensors",
-            "folder": "checkpoints", "size": 40000, "sha256": self.sha}])
+            "folder": "checkpoints", "size": 40000, "sha256": self.sha,
+            "url": "https://example.invalid/x", "purpose": "test",
+            "license": "unknown",
+            "meta": {"folder": "checkpoints",
+                     "file": "tiny.safetensors"}}])
 
     def test_find_model_url_requires_the_matching_sha(self):
         self.assertIsNotNone(self.b.find_model_url("tiny-model", self.sha))
@@ -427,6 +431,108 @@ class ModelPush(unittest.TestCase):
         self.assertIn("if not name or not sha:", src)
         self.assertIn('self.queue.enqueue("model_download"', src)
         self.assertIn("self.registry.register", src)
+
+
+class AskForNearbyModels(unittest.TestCase):
+    """The pull direction: the machine that WANTS models asks a peer for
+    its manifest and queues what it lacks. Same trust model as a push —
+    sha pins, visible download jobs, LAN-first fetch."""
+
+    def test_fetch_manifest_carries_full_provenance(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "m"
+            (root / "checkpoints").mkdir(parents=True)
+            f = root / "checkpoints" / "tiny.safetensors"
+            f.write_bytes(b"x" * 32)
+            reg = FakeRegistry(root)
+            m = ModelInfo(name="tiny", purpose="test ckpt", license="mit",
+                          url="https://example.com/tiny.safetensors",
+                          sha256="ab" * 32, meta={"folder": "checkpoints"})
+            m.status = "ready"
+            m.path = str(f)
+            reg.models["tiny"] = m
+            svc = PeerService(reg, share=True, render=True,
+                              http_port=BASE_HTTP + 50,
+                              udp_port=BASE_UDP + 50, name="lender",
+                              loopback_only=True)
+            svc.start()
+            try:
+                got = svc.fetch_manifest("127.0.0.1", svc.http_port)
+                self.assertEqual(len(got), 1)
+                e = got[0]
+                self.assertEqual(e["name"], "tiny")
+                self.assertEqual(e["sha256"], "ab" * 32)
+                self.assertEqual(e["url"],
+                                 "https://example.com/tiny.safetensors")
+                self.assertEqual(e["purpose"], "test ckpt")
+                self.assertEqual(e["meta"]["folder"], "checkpoints")
+                self.assertEqual(e["meta"]["filename"], "tiny.safetensors")
+            finally:
+                svc.stop()
+
+    def test_fetch_manifest_tolerates_the_thin_index_of_older_peers(self):
+        """A peer still on the pre-provenance wire format serves only
+        name/file/folder/size/sha256 — its folder and file names must fold
+        into meta so downloads land in the right typed subfolder."""
+        import http.server
+        thin = [{"name": "old-vae", "file": "old.safetensors",
+                 "folder": "vae", "size": 5, "sha256": "cd" * 32}]
+
+        class ThinIndex(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                body = json.dumps(thin).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *_args):
+                pass
+
+        srv = http.server.HTTPServer(("127.0.0.1", 0), ThinIndex)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                reg = FakeRegistry(Path(tmp) / "m")
+                svc = PeerService(reg, share=True, render=True,
+                                  http_port=BASE_HTTP + 51,
+                                  udp_port=BASE_UDP + 51, name="asker",
+                                  loopback_only=True)
+                got = svc.fetch_manifest("127.0.0.1", srv.server_port)
+                self.assertEqual(len(got), 1)
+                self.assertEqual(got[0]["name"], "old-vae")
+                self.assertEqual(got[0]["meta"]["folder"], "vae")
+                self.assertEqual(got[0]["meta"]["filename"],
+                                 "old.safetensors")
+                self.assertEqual(got[0]["url"], "")
+        finally:
+            srv.shutdown()
+            srv.server_close()
+
+    def test_asking_a_peer_that_does_not_share_is_a_403(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            reg = FakeRegistry(Path(tmp) / "m")
+            svc = PeerService(reg, share=False, render=True,
+                              http_port=BASE_HTTP + 52,
+                              udp_port=BASE_UDP + 52, name="private",
+                              loopback_only=True)
+            svc.start()
+            try:
+                with self.assertRaises(urllib.error.HTTPError) as ctx:
+                    svc.fetch_manifest("127.0.0.1", svc.http_port)
+                self.assertEqual(ctx.exception.code, 403)
+            finally:
+                svc.stop()
+
+    def test_pull_models_from_uses_the_shared_acceptance_path(self):
+        """The ask flow must reuse _accept_model_push (sha requirement,
+        register-if-missing, visible jobs) and turn a 403 into the honest
+        sharing-is-off message rather than a stack trace."""
+        src = inspect.getsource(Services.pull_models_from)
+        self.assertIn("fetch_manifest", src)
+        self.assertIn("_accept_model_push", src)
+        self.assertIn("not sharing models", src)
 
 
 class DeviceRouting(unittest.TestCase):

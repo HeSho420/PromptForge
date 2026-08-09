@@ -276,8 +276,26 @@ def create_app(services: Services | None = None) -> Flask:
             return _error(400, "bad_field", "port must be a number.")
         try:
             return jsonify(services.push_models_to(host, port))
-        except Exception as exc:  # noqa: BLE001 â€” surfaced, not a 500
+        except Exception as exc:  # noqa: BLE001 — surfaced, not a 500
             return _error(502, "push_failed", str(exc)[:300])
+
+    @api.post("/peers/fetch-models")
+    def peers_fetch_models():
+        """Ask a peer for its model library: THIS machine queues every
+        model it lacks and copies it over the LAN, checksum-verified.
+        The downloads appear in this machine's own Queue."""
+        body = request.get_json(silent=True) or {}
+        host = str(body.get("host") or "").strip()
+        if not host:
+            return _error(400, "missing_field", "host is required.")
+        try:
+            port = int(body.get("port") or 8765)
+        except (TypeError, ValueError):
+            return _error(400, "bad_field", "port must be a number.")
+        try:
+            return jsonify(services.pull_models_from(host, port))
+        except Exception as exc:  # noqa: BLE001 — surfaced, not a 500
+            return _error(502, "fetch_failed", str(exc)[:300])
 
     @api.post("/peers/probe")
     def peers_probe():
