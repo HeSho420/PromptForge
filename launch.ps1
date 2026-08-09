@@ -381,6 +381,12 @@ if ($ollamaExe) {
 }
 
 # --- 4. ComfyUI (real rendering), if an install can be found --------------------
+# torch-directml is frozen at torch 2.4.1; newer ComfyUI releases pull a
+# comfy-kitchen whose neighborhood-attention custom op torch 2.4.1 cannot
+# even import (infer_schema crash, reproduced on a real 2.4.1 env).
+# Measured boundary: v0.30.2 PASSES on 2.4.1, v0.31.x FAILS.
+$comfyDmlTag = "v0.30.2"
+
 function Find-ComfyUI {
     # Only a RUNNABLE layout counts: a folder that merely exists (models
     # dump, nested clone, leftovers) made the starter bail silently and
@@ -407,6 +413,39 @@ function Find-ComfyUI {
                   (Test-Path (Join-Path $p "ComfyUI\main.py"))
         if ($portable -or $repo -or $nested) { return $p }
         Write-Host "  (skipping $p - a folder, but not a runnable ComfyUI)" -ForegroundColor DarkGray
+    }
+    return $null
+}
+
+function Test-NativeGpuVenv($venvPy) {
+    # TRUE when this venv's torch sees a GPU natively (CUDA, or a ROCm-SDK
+    # build reporting through the same API). Costs seconds on a cold torch,
+    # so callers gate it to AMD machines.
+    if (-not ($venvPy -and (Test-Path $venvPy))) { return $false }
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    $sees = (& $venvPy -c "import torch; print(int(torch.cuda.is_available()))" 2>$null | Out-String).Trim()
+    $ErrorActionPreference = $prev
+    return ($sees -eq "1")
+}
+
+function Get-NativeGpuComfyHome {
+    # DirectML machines only: a RUNNABLE install whose venv torch already
+    # sees the GPU natively outranks every other candidate. DirectML is
+    # frozen on torch 2.4.1, which current ComfyUI can no longer import
+    # (RegisterOperators schema crash, measured live on an RX 6700 XT),
+    # while a native ROCm-SDK stack runs master. Never let a stale tools
+    # install shadow a working native one.
+    foreach ($c in @($env:PROMPTFORGE_COMFYUI_PATH,
+                     "$env:USERPROFILE\ComfyUI",
+                     "$env:USERPROFILE\Documents\ComfyUI",
+                     (Join-Path $root "tools\ComfyUI"))) {
+        if (-not ($c -and (Test-Path $c))) { continue }
+        $p = (Resolve-Path $c).Path
+        $runnable = (Test-Path (Join-Path $p "main.py")) -or
+                    (Test-Path (Join-Path $p "ComfyUI\main.py"))
+        if (-not $runnable) { continue }
+        if (Test-NativeGpuVenv (Join-Path $p ".venv\Scripts\python.exe")) { return $p }
     }
     return $null
 }
@@ -612,7 +651,11 @@ function Get-VenvOnlyComfyHome {
     # environment but no ComfyUI code — a user who followed AMD's ROCm-SDK
     # guide as far as the venv (found live on a real machine). Installing
     # the code next to that venv reuses the native GPU stack, which beats
-    # building a fresh DirectML environment from nothing.
+    # building a fresh DirectML environment from nothing. Memoized — the
+    # torch probe costs seconds and two call sites need the answer.
+    if ($script:pfVenvOnlyChecked) { return $script:pfVenvOnlyHome }
+    $script:pfVenvOnlyChecked = $true
+    $script:pfVenvOnlyHome = $null
     foreach ($c in @($env:PROMPTFORGE_COMFYUI_PATH,
                      "$env:USERPROFILE\ComfyUI",
                      "$env:USERPROFILE\Documents\ComfyUI")) {
@@ -620,15 +663,52 @@ function Get-VenvOnlyComfyHome {
         $p = (Resolve-Path $c).Path
         if (Test-Path (Join-Path $p "main.py")) { continue }
         if (Test-Path (Join-Path $p "ComfyUI\main.py")) { continue }
-        $vp = Join-Path $p ".venv\Scripts\python.exe"
-        if (-not (Test-Path $vp)) { continue }
-        $prev = $ErrorActionPreference
-        $ErrorActionPreference = "Continue"
-        $sees = (& $vp -c "import torch; print(int(torch.cuda.is_available()))" 2>$null | Out-String).Trim()
-        $ErrorActionPreference = $prev
-        if ($sees -eq "1") { return $p }
+        if (Test-NativeGpuVenv (Join-Path $p ".venv\Scripts\python.exe")) {
+            $script:pfVenvOnlyHome = $p
+            return $p
+        }
     }
     return $null
+}
+
+function Repair-DirectmlComfyCode($dir) {
+    # ComfyUI code too new for torch 2.4.1 (RegisterOperators schema crash):
+    # replace the CODE with the pinned tag while keeping the environment and
+    # user content untouched. Handles root and nested layouts.
+    $src = $dir
+    if (-not (Test-Path (Join-Path $dir "main.py"))) { $src = Join-Path $dir "ComfyUI" }
+    if (-not (Test-Path (Join-Path $src "main.py"))) { return $false }
+    Write-Host "  This ComfyUI is too new for torch 2.4.1 (DirectML) - swapping its code to $comfyDmlTag..." -ForegroundColor Yellow
+    $stage = Join-Path $env:TEMP "pf-comfy-dml-code"
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
+        (& git -c http.sslBackend=schannel clone --depth 1 --branch $comfyDmlTag `
+            https://github.com/comfyanonymous/ComfyUI.git $stage 2>&1 | Out-String) |
+            Out-File (Join-Path $logDir "comfyui-install.log") -Append -Encoding utf8
+        if (-not (Test-Path (Join-Path $stage "main.py"))) { return $false }
+        $keep = @(".venv", "venv", "custom_nodes", "models", "user",
+                  "input", "output", "extra_model_paths.yaml")
+        Get-ChildItem $src -Force | Where-Object { $keep -notcontains $_.Name } |
+            ForEach-Object { Remove-Item -Recurse -Force $_.FullName -ErrorAction SilentlyContinue }
+        Get-ChildItem $stage -Force | Where-Object { $keep -notcontains $_.Name } |
+            ForEach-Object { Move-Item $_.FullName (Join-Path $src $_.Name) -Force }
+        if (-not (Test-Path (Join-Path $src "main.py"))) { return $false }
+        # The venv still holds the NEWER helper packages (comfy-kitchen is
+        # the module that actually crashes torch 2.4.1) — align them with
+        # the swapped code's own pins. torch stays: the requirement is
+        # unpinned and 2.4.1 satisfies it.
+        $venvPip = Join-Path $dir ".venv\Scripts\pip.exe"
+        if (Test-Path $venvPip) {
+            (& $venvPip install --retries 8 --timeout 300 -r (Join-Path $src "requirements.txt") 2>&1 |
+                Out-String) | Out-File (Join-Path $logDir "comfyui-install.log") -Append -Encoding utf8
+        }
+        return $true
+    } finally {
+        Remove-Item -Recurse -Force $stage -ErrorAction SilentlyContinue
+        $ErrorActionPreference = $prev
+    }
 }
 
 function Install-ComfyUI {
@@ -641,6 +721,8 @@ function Install-ComfyUI {
     $log = Join-Path $logDir "comfyui-install.log"
     "=== ComfyUI install $(Get-Date -Format s) ===" | Out-File $log -Encoding utf8
     $venvHome = Get-VenvOnlyComfyHome
+    $branchArgs = @()
+    $zipRef = "refs/heads/master"
     if ($venvHome) {
         $dest = Join-Path $venvHome "ComfyUI"
         $ret = $venvHome
@@ -651,6 +733,15 @@ function Install-ComfyUI {
         $ret = $dest
         if (Test-Path (Join-Path $dest "main.py")) { return $dest }
         Write-Host "  Installing ComfyUI (one time, the render engine)..." -ForegroundColor Yellow
+        if ((Get-GpuMode) -eq "directml") {
+            # torch-directml is frozen at torch 2.4.1 and current master
+            # cannot even import on that (RegisterOperators schema crash,
+            # measured live) - pin the newest release verified against a
+            # real torch 2.4.1 environment.
+            $branchArgs = @("--branch", $comfyDmlTag)
+            $zipRef = "refs/tags/$comfyDmlTag"
+            Write-Host "  DirectML machine: installing ComfyUI $comfyDmlTag (newest release that runs on torch 2.4.1)." -ForegroundColor Yellow
+        }
     }
     New-Item -ItemType Directory -Force (Split-Path $dest) | Out-Null
     # git/IWR write progress to stderr; under "Stop" + redirection PS 5.1
@@ -661,8 +752,8 @@ function Install-ComfyUI {
         if (Get-Command git -ErrorAction SilentlyContinue) {
             for ($i = 1; $i -le 2; $i++) {
                 if (Test-Path $dest) { Remove-Item -Recurse -Force $dest -ErrorAction SilentlyContinue }
-                "--- git clone attempt $i" | Out-File $log -Append -Encoding utf8
-                (& git -c http.sslBackend=schannel clone --depth 1 `
+                "--- git clone attempt $i ($zipRef)" | Out-File $log -Append -Encoding utf8
+                (& git -c http.sslBackend=schannel clone --depth 1 @branchArgs `
                     https://github.com/comfyanonymous/ComfyUI.git $dest 2>&1 |
                     Out-String) | Out-File $log -Append -Encoding utf8
                 if (Test-Path (Join-Path $dest "main.py")) {
@@ -681,7 +772,7 @@ function Install-ComfyUI {
                 "--- zip attempt $i" | Out-File $log -Append -Encoding utf8
                 Invoke-WebRequest -UseBasicParsing -TimeoutSec 300 `
                     -Headers @{ "User-Agent" = "PromptForge-installer" } `
-                    -Uri "https://github.com/comfyanonymous/ComfyUI/archive/refs/heads/master.zip" `
+                    -Uri "https://github.com/comfyanonymous/ComfyUI/archive/$zipRef.zip" `
                     -OutFile $zip
                 if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
                 Expand-Archive -Path $zip -DestinationPath $stage -Force
@@ -792,7 +883,21 @@ function Optimize-ComfyPerf($dir) {
     }
 }
 
-$comfyDir = Find-ComfyUI
+$comfyDir = $null
+if ((Get-GpuMode) -eq "directml") {
+    # On these machines a native ROCm-SDK stack (when one exists) beats
+    # DirectML outright: torch-directml is frozen at torch 2.4.1, which
+    # limits ComfyUI to older releases, while native torch runs current
+    # code on the GPU. Prefer a runnable native install; failing that,
+    # install ComfyUI's code next to a native venv that lacks it.
+    $comfyDir = Get-NativeGpuComfyHome
+    if ($comfyDir) {
+        Write-Host "  Using the native-GPU ComfyUI at $comfyDir (beats DirectML)." -ForegroundColor Green
+    } elseif (Get-VenvOnlyComfyHome) {
+        $comfyDir = Install-ComfyUI
+    }
+}
+if (-not $comfyDir) { $comfyDir = Find-ComfyUI }
 if (-not $comfyDir) { $comfyDir = Install-ComfyUI }
 $comfyUp = Test-Http "http://127.0.0.1:8188/system_stats"
 if (-not $comfyUp -and $comfyDir) {
@@ -830,7 +935,23 @@ promptforge:
             Write-Host "  ComfyUI crashed on start - last errors:" -ForegroundColor Yellow
             Get-Content (Join-Path $logDir "comfyui-err.log") -Tail 5 -ErrorAction SilentlyContinue |
                 ForEach-Object { Write-Host "    $_" -ForegroundColor DarkGray }
-            if ((Get-GpuMode) -in @("rocm", "directml")) {
+            # Code newer than the frozen DirectML torch can carry: swap the
+            # code to the pinned release and try the GPU again before giving
+            # up on it. (A native venv runs master - never downgrade those.)
+            $errTail = (Get-Content (Join-Path $logDir "comfyui-err.log") -Tail 40 -ErrorAction SilentlyContinue | Out-String)
+            if ((Get-GpuMode) -eq "directml" -and
+                $errTail -match "RegisterOperators|torch\.library|infer_schema" -and
+                -not (Test-NativeGpuVenv (Join-Path $comfyDir ".venv\Scripts\python.exe"))) {
+                if (Repair-DirectmlComfyCode $comfyDir) {
+                    Write-Host "  Retrying ComfyUI with the version-matched code..." -ForegroundColor Yellow
+                    $p = Start-ComfyUI $comfyDir
+                    if ($p) {
+                        $started += $p
+                        $comfyUp = Wait-Http "http://127.0.0.1:8188/system_stats" 90 $p
+                    }
+                }
+            }
+            if (-not $comfyUp -and (Get-GpuMode) -in @("rocm", "directml")) {
                 # The AMD stacks can crash on init even when installed;
                 # a CPU start still gives real renders on these machines.
                 Write-Host "  Retrying ComfyUI on the CPU (AMD GPU init failed - slow but real renders)..." -ForegroundColor Yellow
