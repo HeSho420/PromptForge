@@ -315,9 +315,10 @@ class PeerService:
     # walk: install/crash logs only, no jobs, no prompts-carrying app DBs.
     LOG_WHITELIST = frozenset({
         "comfyui.log", "comfyui-err.log", "comfyui-repair.log",
-        "directml-install.log", "torch-cuda-repair.log", "sage-install.log",
+        "comfyui-install.log", "directml-install.log",
+        "torch-cuda-repair.log", "sage-install.log",
         "sam-install.log", "backend-live.log", "backend-live-err.log",
-        "doctor-report.txt",
+        "doctor-report.txt", "launch.log",
     })
 
     def _serve_log(self, req: BaseHTTPRequestHandler, name: str) -> None:

@@ -21,6 +21,11 @@ $root = $PSScriptRoot
 $started = @()   # child processes we own and must clean up
 $logDir = Join-Path $root "data\logs"
 New-Item -ItemType Directory -Force $logDir | Out-Null
+# Everything the launcher prints is mirrored to data\logs\launch.log — the
+# peer log endpoint serves it, so a broken install on one machine can be
+# diagnosed from another without pasting console output around. Fresh file
+# per launch; stopped before the long-running server so it stays small.
+try { Start-Transcript -Path (Join-Path $logDir "launch.log") -Force | Out-Null } catch {}
 
 # Fresh installs (Node, Ollama) may not be on this session's PATH yet.
 $env:Path = [Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' +
@@ -462,6 +467,17 @@ function Repair-ComfyVenv($dir, $srcDir = $null) {
         } elseif ($mode -eq "rocm") {
             & $pip install --retries 10 --timeout 300 @($rocmSdkUrls) *> $repairLog
             & $pip install --retries 10 --timeout 300 @($rocmTorchUrls) *>> $repairLog
+        } elseif ($mode -eq "directml") {
+            # Never clobber a torch that already sees the GPU (ROCm-SDK
+            # build); otherwise install the pinned DirectML stack in ONE
+            # pass — latest-torch-then-swap was two multi-GB downloads.
+            $natR = (& $venvPy -c "import torch; print(int(torch.cuda.is_available()))" 2>$null | Out-String).Trim()
+            if ($natR -eq "1") {
+                "keeping existing native GPU torch (ROCm SDK build)" | Out-File $repairLog -Encoding utf8
+            } else {
+                & $pip install --retries 10 --timeout 300 torch==2.4.1 torchvision==0.19.1 torchaudio==2.4.1 *> $repairLog
+                & $pip install --retries 10 --timeout 300 torch-directml *>> $repairLog
+            }
         } else {
             & $pip install --retries 10 --timeout 180 torch torchvision torchaudio *> $repairLog
         }
@@ -591,33 +607,104 @@ function Start-ComfyUI($dir, $extraArgs = @()) {
     return $null
 }
 
+function Get-VenvOnlyComfyHome {
+    # A folder like Documents\ComfyUI that holds a WORKING GPU Python
+    # environment but no ComfyUI code — a user who followed AMD's ROCm-SDK
+    # guide as far as the venv (found live on a real machine). Installing
+    # the code next to that venv reuses the native GPU stack, which beats
+    # building a fresh DirectML environment from nothing.
+    foreach ($c in @($env:PROMPTFORGE_COMFYUI_PATH,
+                     "$env:USERPROFILE\ComfyUI",
+                     "$env:USERPROFILE\Documents\ComfyUI")) {
+        if (-not ($c -and (Test-Path $c))) { continue }
+        $p = (Resolve-Path $c).Path
+        if (Test-Path (Join-Path $p "main.py")) { continue }
+        if (Test-Path (Join-Path $p "ComfyUI\main.py")) { continue }
+        $vp = Join-Path $p ".venv\Scripts\python.exe"
+        if (-not (Test-Path $vp)) { continue }
+        $prev = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
+        $sees = (& $vp -c "import torch; print(int(torch.cuda.is_available()))" 2>$null | Out-String).Trim()
+        $ErrorActionPreference = $prev
+        if ($sees -eq "1") { return $p }
+    }
+    return $null
+}
+
 function Install-ComfyUI {
-    # A fresh clone has no ComfyUI. Fetch the repo layout into tools\ComfyUI;
-    # Repair-ComfyVenv then installs the right torch for this GPU.
-    $dest = Join-Path $root "tools\ComfyUI"
-    if (Test-Path (Join-Path $dest "main.py")) { return $dest }
-    Write-Host "  Installing ComfyUI (one time, the render engine)..." -ForegroundColor Yellow
-    $zip = Join-Path $env:TEMP "pf-comfyui.zip"
-    $stage = Join-Path $env:TEMP "pf-comfyui-unzip"
+    # A fresh clone has no ComfyUI. Prefer installing the code NEXT TO an
+    # existing venv that already sees the GPU (nested layout); otherwise
+    # fetch into tools\ComfyUI. git clone goes first — its schannel TLS uses
+    # the Windows certificate store, so it survives the AV certificate
+    # interception that breaks PowerShell downloads on machines here — then
+    # the zip, with retries; every attempt is logged for remote diagnosis.
+    $log = Join-Path $logDir "comfyui-install.log"
+    "=== ComfyUI install $(Get-Date -Format s) ===" | Out-File $log -Encoding utf8
+    $venvHome = Get-VenvOnlyComfyHome
+    if ($venvHome) {
+        $dest = Join-Path $venvHome "ComfyUI"
+        $ret = $venvHome
+        Write-Host "  Found a working GPU Python environment at $venvHome -" -ForegroundColor Yellow
+        Write-Host "  installing ComfyUI's code next to it (reuses the native GPU stack)." -ForegroundColor Yellow
+    } else {
+        $dest = Join-Path $root "tools\ComfyUI"
+        $ret = $dest
+        if (Test-Path (Join-Path $dest "main.py")) { return $dest }
+        Write-Host "  Installing ComfyUI (one time, the render engine)..." -ForegroundColor Yellow
+    }
+    New-Item -ItemType Directory -Force (Split-Path $dest) | Out-Null
+    # git/IWR write progress to stderr; under "Stop" + redirection PS 5.1
+    # would turn that into a terminating error mid-download.
+    $prevEap = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
     try {
-        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-        Invoke-WebRequest -UseBasicParsing -TimeoutSec 300 `
-            -Uri "https://github.com/comfyanonymous/ComfyUI/archive/refs/heads/master.zip" `
-            -OutFile $zip
-        if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
-        Expand-Archive -Path $zip -DestinationPath $stage -Force
-        $inner = Get-ChildItem $stage -Directory | Select-Object -First 1
-        New-Item -ItemType Directory -Force (Split-Path $dest) | Out-Null
-        if (Test-Path $dest) { Remove-Item -Recurse -Force $dest }
-        Move-Item $inner.FullName $dest
-        Write-Host "  ComfyUI files in place." -ForegroundColor Green
-        return $dest
-    } catch {
-        Write-Host "  [--] Could not download ComfyUI ($($_.Exception.Message)); renders fall back to the mock." -ForegroundColor Yellow
+        if (Get-Command git -ErrorAction SilentlyContinue) {
+            for ($i = 1; $i -le 2; $i++) {
+                if (Test-Path $dest) { Remove-Item -Recurse -Force $dest -ErrorAction SilentlyContinue }
+                "--- git clone attempt $i" | Out-File $log -Append -Encoding utf8
+                (& git -c http.sslBackend=schannel clone --depth 1 `
+                    https://github.com/comfyanonymous/ComfyUI.git $dest 2>&1 |
+                    Out-String) | Out-File $log -Append -Encoding utf8
+                if (Test-Path (Join-Path $dest "main.py")) {
+                    Write-Host "  ComfyUI files in place (git)." -ForegroundColor Green
+                    return $ret
+                }
+                Start-Sleep ([int][Math]::Pow(2, $i))
+            }
+        }
+        $zip = Join-Path $env:TEMP "pf-comfyui.zip"
+        $stage = Join-Path $env:TEMP "pf-comfyui-unzip"
+        [Net.ServicePointManager]::SecurityProtocol =
+            [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+        for ($i = 1; $i -le 3; $i++) {
+            try {
+                "--- zip attempt $i" | Out-File $log -Append -Encoding utf8
+                Invoke-WebRequest -UseBasicParsing -TimeoutSec 300 `
+                    -Headers @{ "User-Agent" = "PromptForge-installer" } `
+                    -Uri "https://github.com/comfyanonymous/ComfyUI/archive/refs/heads/master.zip" `
+                    -OutFile $zip
+                if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
+                Expand-Archive -Path $zip -DestinationPath $stage -Force
+                $inner = Get-ChildItem $stage -Directory | Select-Object -First 1
+                if (Test-Path $dest) { Remove-Item -Recurse -Force $dest }
+                Move-Item $inner.FullName $dest
+                Write-Host "  ComfyUI files in place (zip)." -ForegroundColor Green
+                return $ret
+            } catch {
+                "zip attempt $i failed: $($_.Exception.Message)" | Out-File $log -Append -Encoding utf8
+                Start-Sleep ([int][Math]::Pow(2, $i))
+            } finally {
+                Remove-Item $zip -ErrorAction SilentlyContinue
+                Remove-Item -Recurse -Force $stage -ErrorAction SilentlyContinue
+            }
+        }
+        Write-Host "  [--] Could not download ComfyUI (5 attempts) - renders fall back to the mock." -ForegroundColor Yellow
+        Write-Host "       The installer's own words ($log):" -ForegroundColor Yellow
+        Get-Content $log -Tail 6 -ErrorAction SilentlyContinue |
+            ForEach-Object { Write-Host "       | $_" -ForegroundColor DarkGray }
         return $null
     } finally {
-        Remove-Item $zip -ErrorAction SilentlyContinue
-        Remove-Item -Recurse -Force $stage -ErrorAction SilentlyContinue
+        $ErrorActionPreference = $prevEap
     }
 }
 
@@ -784,9 +871,10 @@ if ($comfyUp) {
 } else {
     Write-Host "  [--] ComfyUI not available - edits use the clearly-labeled mock renderer." -ForegroundColor Yellow
     Write-Host "       Why, in order of likelihood:" -ForegroundColor DarkGray
-    Write-Host "         1. Its Python packages failed to install: $logDir\comfyui-repair.log" -ForegroundColor DarkGray
-    Write-Host "         2. It crashed on start: $logDir\comfyui-err.log" -ForegroundColor DarkGray
-    Write-Host "         3. No supported GPU stack (AMD cards need a ROCm-supported model + Python 3.12)" -ForegroundColor DarkGray
+    Write-Host "         1. Its download failed: $logDir\comfyui-install.log" -ForegroundColor DarkGray
+    Write-Host "         2. Its Python packages failed to install: $logDir\comfyui-repair.log" -ForegroundColor DarkGray
+    Write-Host "         3. It crashed on start: $logDir\comfyui-err.log" -ForegroundColor DarkGray
+    Write-Host "         4. No supported GPU stack (AMD cards need a ROCm-supported model + Python 3.12)" -ForegroundColor DarkGray
     Get-Content (Join-Path $logDir "comfyui-err.log") -Tail 5 -ErrorAction SilentlyContinue |
         ForEach-Object { Write-Host "       | $_" -ForegroundColor DarkGray }
 }
@@ -829,6 +917,7 @@ Write-Host ""
 Write-Host "  Starting PromptForge at http://127.0.0.1:8000 ..." -ForegroundColor Cyan
 Write-Host "  (close this window or press Ctrl+C to stop everything)" -ForegroundColor DarkGray
 Write-Host ""
+try { Stop-Transcript | Out-Null } catch {}
 
 if (-not $NoBrowser) {
     Start-Job -ScriptBlock {
