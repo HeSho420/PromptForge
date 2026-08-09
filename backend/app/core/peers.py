@@ -209,6 +209,35 @@ class PeerService:
         self._threads.append(t)
 
     # ---- server-side request handling (runs on http threads)
+    def _background_cached(self, name: str, fn: Callable[[], Any],
+                           ttl: float) -> Any:
+        """The last known value NOW; a refresh in the background when it
+        is stale. /pf-peer/info must answer within the discovery probes'
+        couple of seconds, and a cold torch-import probe was measured
+        taking ~25s — long enough that the machine looked 'not answering'
+        on every other machine precisely while it had the most to say."""
+        store: dict[str, tuple[float, Any]] = getattr(
+            self, "_bg_cache", None) or {}
+        if not hasattr(self, "_bg_cache"):
+            self._bg_cache = store
+            self._bg_running: set[str] = set()
+        entry = store.get(name)
+        fresh = entry is not None and time.time() - entry[0] < ttl
+        if not fresh and name not in self._bg_running:
+            self._bg_running.add(name)
+
+            def refresh() -> None:
+                try:
+                    value = fn()
+                except Exception:  # noqa: BLE001
+                    value = entry[1] if entry else None
+                store[name] = (time.time(), value)
+                self._bg_running.discard(name)
+
+            threading.Thread(target=refresh, daemon=True,
+                             name=f"pf-peer-{name}").start()
+        return entry[1] if entry else None
+
     def _comfy_status(self) -> dict[str, Any]:
         """Can this machine actually render? Answered by its own ComfyUI.
 
@@ -235,23 +264,22 @@ class PeerService:
     def _handle_get(self, req: BaseHTTPRequestHandler) -> None:
         path = req.path.split("?", 1)[0]
         if path == "/pf-peer/info":
-            stats = None
-            if self.stats_provider is not None:
-                try:
-                    stats = self.stats_provider()
-                except Exception:  # noqa: BLE001 — stats are decoration
-                    stats = None
-            env = None
-            if self.env_provider is not None:
-                try:
-                    env = self.env_provider()
-                except Exception:  # noqa: BLE001
-                    env = None
+            # Every slow probe is served from cache and refreshed in the
+            # background: this endpoint must answer inside the discovery
+            # probes' short timeouts or the machine reads as offline.
+            stats = (self._background_cached("stats", self.stats_provider,
+                                             10.0)
+                     if self.stats_provider is not None else None)
+            env = (self._background_cached("env", self.env_provider, 60.0)
+                   if self.env_provider is not None else None)
+            comfy = self._background_cached("comfy", self._comfy_status,
+                                            5.0)
             req._json(200, {"app": "promptforge", "name": self.name,
                             "token": self.token, "share": self.share,
                             "render": self.render,
                             "idle": not self.busy_check(),
-                            "comfy": self._comfy_status(),
+                            "comfy": comfy or {"up": False, "device": None,
+                                               "gpu": None},
                             "comfy_env": env,
                             "stats": stats})
             return

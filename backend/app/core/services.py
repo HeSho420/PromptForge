@@ -1081,26 +1081,39 @@ class Services:
         if base is not None and base.exists():
             try:
                 py = self._comfy_python(base)
+                # One marker line, parsed from the END: importing a broken
+                # GPU torch SPRAYS warnings onto stdout (measured live:
+                # 'failed to run amdgpu-arch' landed where the version
+                # belonged), so positional line parsing lies.
                 code = ("import sys\n"
-                        "print(sys.version.split()[0])\n"
+                        "v = sys.version.split()[0]\n"
                         "try:\n"
                         "    import torch\n"
-                        "    print(torch.__version__)\n"
-                        "    print(int(torch.cuda.is_available()))\n"
+                        "    t = torch.__version__\n"
+                        "    try:\n"
+                        "        g = int(torch.cuda.is_available())\n"
+                        "    except Exception:\n"
+                        "        g = 0\n"
+                        "    try:\n"
+                        "        import torch_directml\n"
+                        "        g = g or int(torch_directml."
+                        "device_count() > 0)\n"
+                        "    except Exception:\n"
+                        "        pass\n"
                         "except Exception:\n"
-                        "    print('none')\n"
-                        "    print(0)\n")
+                        "    t, g = 'none', 0\n"
+                        "print(f'PFENV|{v}|{t}|{g}')\n")
                 probe = subprocess.run([py, "-c", code],
                                        capture_output=True, text=True,
                                        timeout=25)
-                lines = (probe.stdout or "").strip().splitlines()
-                if lines:
-                    out["python"] = lines[0].strip()
-                if len(lines) > 1:
-                    out["torch"] = (None if lines[1].strip() == "none"
-                                    else lines[1].strip())
-                if len(lines) > 2:
-                    out["gpu_visible"] = lines[2].strip() == "1"
+                for line in reversed(
+                        (probe.stdout or "").strip().splitlines()):
+                    if line.startswith("PFENV|"):
+                        _, ver, torch_v, gpu = (line.split("|") + [""])[:4]
+                        out["python"] = ver
+                        out["torch"] = None if torch_v == "none" else torch_v
+                        out["gpu_visible"] = gpu == "1"
+                        break
             except Exception:  # noqa: BLE001 — a blank report is honest
                 pass
         self._comfy_env_cache = (time.time(), out)

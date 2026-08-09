@@ -62,13 +62,16 @@ try {
         foreach ($n in $gpus) {
             if ($n -match "Radeon.+(RX\s?90\d0|RX\s?7900|RX\s?7800|RX\s?7700|8[89]0M|860M|80[456]0S)") { $gpuMode = "rocm" }
         }
+        if ($gpuMode -ne "rocm") {
+            foreach ($n in $gpus) { if ($n -match "Radeon|AMD") { $gpuMode = "directml" } }
+        }
     }
 } catch {}
 Say "OK" "GPU: $gpuName -> mode '$gpuMode'"
-if ($gpuMode -eq "cpu" -and $gpuName -match "Radeon|AMD") {
-    Say "FIX" "this AMD model is outside AMD's ROCm-on-Windows list - renders use CPU (slow but real)"
+if ($gpuMode -eq "directml") {
+    Say "OK" "this Radeon is outside AMD's ROCm-on-Windows list - it renders through DirectML instead"
 }
-$needPy = if ($gpuMode -eq "rocm") { "3.12" } else { "" }
+$needPy = if ($gpuMode -in @("rocm", "directml")) { "3.12" } else { "" }
 
 # --- backend environment ---------------------------------------------------------
 $bpy = Join-Path $root "backend\.venv\Scripts\python.exe"
@@ -106,7 +109,11 @@ if (-not $comfyDir) {
             Say "FIX" "ComfyUI env (Python $cver) has NO torch - run launch.ps1 (installs the right build)"
         } else {
             Say "OK" "ComfyUI env: Python $cver, torch $($torchLine[0])"
-            if ($gpuMode -ne "cpu") {
+            if ($gpuMode -eq "directml") {
+                $dml = (& $cpy -c "import torch_directml;print(1)" 2>$null | Out-String).Trim()
+                if ($dml -eq "1") { Say "OK" "DirectML installed - Radeon renders on the GPU" }
+                else { Say "FIX" "torch-directml missing - run launch.ps1 (it swaps the stack in)" }
+            } elseif ($gpuMode -ne "cpu") {
                 if ($torchLine.Count -gt 1 -and $torchLine[1] -eq "1") {
                     Say "OK" "torch sees the GPU"
                 } else {

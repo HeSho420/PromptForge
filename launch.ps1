@@ -47,8 +47,12 @@ function Wait-Http($url, $seconds, $proc) {
 }
 
 function Get-GpuMode {
-    # Mirrors the installer's decision (keep in sync with installer.ps1):
-    # working NVIDIA driver -> cuda; ROCm-capable Radeon -> rocm; else cpu.
+    # The full AMD ladder, learned on a real RX 6700 XT:
+    #   cuda      working NVIDIA driver
+    #   rocm      Radeon on AMD's ROCm-on-Windows support list (RDNA3/4)
+    #   directml  any OTHER Radeon - torch-directml gives real GPU
+    #             rendering on every DX12 AMD card (RDNA2 included)
+    #   cpu       nothing usable
     try {
         $smi = Get-Command nvidia-smi -ErrorAction SilentlyContinue
         if (-not $smi -and (Test-Path "$env:SystemRoot\System32\nvidia-smi.exe")) {
@@ -64,6 +68,9 @@ function Get-GpuMode {
         if ($n -match "Radeon.+(RX\s?90\d0|RX\s?7900|RX\s?7800|RX\s?7700|8[89]0M|860M|80[456]0S)") {
             return "rocm"
         }
+    }
+    foreach ($n in $gpus) {
+        if ($n -match "Radeon|AMD") { return "directml" }
     }
     return "cpu"
 }
@@ -91,6 +98,11 @@ function Get-TorchPipLines([string]$pipPath, [string]$logPath) {
         $trio = ($rocmTorchUrls | ForEach-Object { "'" + $_ + "'" }) -join " "
         return ("& '$pipPath' install --retries 10 --timeout 300 $sdk *> '$logPath'; " +
                 "& '$pipPath' install --retries 10 --timeout 300 $trio *>> '$logPath'; ")
+    }
+    if ($mode -eq "directml") {
+        # torch-directml pins its own compatible torch; the resolver then
+        # matches torchvision/torchaudio to it.
+        return ("& '$pipPath' install --retries 10 --timeout 180 torch-directml torchvision torchaudio *> '$logPath'; ")
     }
     return ("& '$pipPath' install --retries 10 --timeout 180 torch torchvision *> '$logPath'; ")
 }
@@ -377,11 +389,11 @@ function Repair-ComfyVenv($dir) {
     # Repo layout only: create/fix the venv so ComfyUI can actually start.
     $venvPy = Join-Path $dir ".venv\Scripts\python.exe"
     $mode = Get-GpuMode
-    # AMD: the ROCm torch wheels are cp312-only. A venv on any other
-    # Python version can never install them — the exact quiet failure
-    # that left a 64 GB AMD machine on the mock renderer. Verify the
-    # interpreter FIRST and rebuild when it is wrong.
-    if ($mode -eq "rocm" -and (Test-Path $venvPy)) {
+    # AMD: BOTH GPU stacks (ROCm wheels and torch-directml) top out at
+    # Python 3.12. A venv on any other version can never install them —
+    # the exact quiet failure that left a 64 GB AMD machine on the mock
+    # renderer. Verify the interpreter FIRST and rebuild when wrong.
+    if ($mode -in @("rocm", "directml") -and (Test-Path $venvPy)) {
         $comfyVer = Get-PyVersion $venvPy
         if ($comfyVer -and $comfyVer -ne "3.12") {
             Write-Host "  ComfyUI's environment is Python $comfyVer, but AMD GPU wheels need 3.12 - rebuilding..." -ForegroundColor Yellow
@@ -391,7 +403,7 @@ function Repair-ComfyVenv($dir) {
     if (-not (Test-Path $venvPy)) {
         Write-Host "  ComfyUI has no Python environment - creating one..." -ForegroundColor Yellow
         $made = $false
-        if ($mode -eq "rocm") {
+        if ($mode -in @("rocm", "directml")) {
             $pl = Get-Python312
             if ($pl) {
                 & $pl[0] $pl[1] -m venv (Join-Path $dir ".venv")
@@ -450,12 +462,26 @@ function Repair-ComfyVenv($dir) {
             Write-Host "  [!] ROCm torch installed but the AMD GPU is not visible -" -ForegroundColor Yellow
             Write-Host "      renders will use the CPU. Update the AMD driver (Adrenalin) and relaunch." -ForegroundColor Yellow
         }
-    } elseif ($mode -eq "cpu") {
+    } elseif ($mode -eq "directml") {
+        # This Radeon is outside AMD's ROCm-on-Windows list (measured live
+        # on an RX 6700 XT), so DirectML is its real GPU path. A leftover
+        # ROCm-flavoured torch poisons it — swap the stack cleanly.
         $amd = Get-AmdGpuName
-        if ($amd) {
-            Write-Host "  [!] $amd is not in AMD's ROCm-on-Windows support list" -ForegroundColor Yellow
-            Write-Host "      (RX 7700/7800/7900, RX 9000 series and select laptop chips are)." -ForegroundColor Yellow
-            Write-Host "      ComfyUI will render on the CPU - slow, but real renders, not the mock." -ForegroundColor Yellow
+        if (-not (Test-PyImport $venvPy "torch_directml")) {
+            Write-Host "  $amd renders through DirectML - installing that stack (one time)..." -ForegroundColor Yellow
+            $dmlLog = Join-Path $logDir "directml-install.log"
+            $pipD = Join-Path $dir ".venv\Scripts\pip.exe"
+            $prevV = $ErrorActionPreference
+            $ErrorActionPreference = "Continue"
+            & $pipD uninstall -y torch torchvision torchaudio torch-directml *> $dmlLog
+            & $pipD install --retries 10 --timeout 300 torch-directml torchvision torchaudio *>> $dmlLog
+            $ErrorActionPreference = $prevV
+        }
+        if (Test-PyImport $venvPy "torch_directml") {
+            Write-Host "  [ok] DirectML ready - $amd renders on the GPU" -ForegroundColor Green
+        } else {
+            Write-Host "  [!] DirectML did not install (see $logDir\directml-install.log) -" -ForegroundColor Yellow
+            Write-Host "      renders fall back to the CPU: slow, but real." -ForegroundColor Yellow
         }
     }
     return $true
@@ -492,6 +518,11 @@ function Start-ComfyUI($dir, $extraArgs = @()) {
             # gated on the same probe the backend's own spawner uses.
             if (Test-PyImport $venvPy "sageattention") {
                 $comfyArgs += "--use-sage-attention"
+            }
+            # Non-ROCm Radeons render through DirectML.
+            if ((Get-GpuMode) -eq "directml" -and
+                (Test-PyImport $venvPy "torch_directml")) {
+                $comfyArgs += "--directml"
             }
             return Start-Process -PassThru -WindowStyle Hidden -WorkingDirectory $dir `
                 -RedirectStandardOutput $out -RedirectStandardError $err `
@@ -653,8 +684,8 @@ promptforge:
             Write-Host "  ComfyUI crashed on start - last errors:" -ForegroundColor Yellow
             Get-Content (Join-Path $logDir "comfyui-err.log") -Tail 5 -ErrorAction SilentlyContinue |
                 ForEach-Object { Write-Host "    $_" -ForegroundColor DarkGray }
-            if ((Get-GpuMode) -eq "rocm") {
-                # The ROCm stack can crash on init even when installed;
+            if ((Get-GpuMode) -in @("rocm", "directml")) {
+                # The AMD stacks can crash on init even when installed;
                 # a CPU start still gives real renders on these machines.
                 Write-Host "  Retrying ComfyUI on the CPU (AMD GPU init failed - slow but real renders)..." -ForegroundColor Yellow
                 $p = Start-ComfyUI $comfyDir @("--cpu")

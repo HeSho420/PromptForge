@@ -244,12 +244,21 @@ class TwoMachines(unittest.TestCase):
         self.assertIsNone(self.b.add_peer("127.0.0.1", 9, timeout=1.0))
 
     def test_info_carries_live_machine_stats(self):
+        """Slow probes are served from a background-refreshed cache, so
+        the FIRST info call may answer before the value exists — a second
+        ask moments later must have it. (The blocking version made a
+        machine look offline for ~25s exactly when it was broken.)"""
         self.a.stats_provider = lambda: {"vram_used_mb": 2048,
                                          "vram_total_mb": 8192,
                                          "ram_used_gb": 9.1,
                                          "ram_total_gb": 15.7}
         try:
-            info = self.b.add_peer("127.0.0.1", self.a.http_port)
+            info = None
+            for _ in range(20):
+                info = self.b.add_peer("127.0.0.1", self.a.http_port)
+                if info and info.get("stats"):
+                    break
+                time.sleep(0.2)
             self.assertEqual(info["stats"]["vram_total_mb"], 8192)
             self.assertEqual(info["stats"]["ram_total_gb"], 15.7)
         finally:
@@ -295,7 +304,12 @@ class TwoMachines(unittest.TestCase):
         self.a.env_provider = lambda: {"python": "3.13", "torch": None,
                                        "gpu_visible": False}
         try:
-            info = self.b.add_peer("127.0.0.1", self.a.http_port)
+            info = None
+            for _ in range(20):
+                info = self.b.add_peer("127.0.0.1", self.a.http_port)
+                if info and info.get("comfy_env"):
+                    break
+                time.sleep(0.2)
             self.assertEqual(info["comfy_env"]["python"], "3.13")
             self.assertIsNone(info["comfy_env"]["torch"])
         finally:
