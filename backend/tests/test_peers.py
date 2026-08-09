@@ -298,6 +298,67 @@ class TwoMachines(unittest.TestCase):
         self.assertIn("pin=False", loop)
         self.assertIn("known_hosts", loop)
 
+    def test_operational_logs_are_readable_but_only_the_whitelist(self):
+        """Same-owner remote diagnosis: the machine that cannot render
+        must be debuggable from the healthy one. Fixed whitelist — no
+        directory walking, no app data."""
+        logs = self.reg_a.models_dir.parent / "logs"
+        logs.mkdir(parents=True, exist_ok=True)
+        (logs / "comfyui-err.log").write_text("boom: torch missing")
+        with urllib.request.urlopen(
+                f"http://127.0.0.1:{self.a.http_port}"
+                "/pf-peer/log/comfyui-err.log", timeout=5) as resp:
+            self.assertIn("torch missing", resp.read().decode())
+        (logs / "secrets.txt").write_text("nope")
+        try:
+            urllib.request.urlopen(
+                f"http://127.0.0.1:{self.a.http_port}"
+                "/pf-peer/log/secrets.txt", timeout=5)
+            code = 200
+        except urllib.error.HTTPError as exc:
+            code = exc.code
+        self.assertEqual(code, 404)
+
+    def test_concurrent_first_requests_still_fill_the_caches(self):
+        """The lazy cache had a first-call race + an empty-dict falsiness
+        trap: one machine's stats stayed null FOREVER because every
+        request got a fresh orphaned dict. Hammer a fresh service
+        concurrently and require the value to land."""
+        with tempfile.TemporaryDirectory() as tmp:
+            svc = PeerService(FakeRegistry(Path(tmp) / "m"), share=True,
+                              render=False, comfy_url="http://127.0.0.1:9",
+                              http_port=BASE_HTTP + 50,
+                              udp_port=BASE_UDP + 50, name="racy",
+                              loopback_only=True)
+            svc.stats_provider = lambda: {"ram_total_gb": 42.0}
+            svc.start()
+            try:
+                def hit() -> None:
+                    try:
+                        urllib.request.urlopen(
+                            f"http://127.0.0.1:{svc.http_port}"
+                            "/pf-peer/info", timeout=5).read()
+                    except Exception:  # noqa: BLE001
+                        pass
+                threads = [threading.Thread(target=hit) for _ in range(8)]
+                for t in threads:
+                    t.start()
+                for t in threads:
+                    t.join()
+                filled = False
+                for _ in range(25):
+                    with urllib.request.urlopen(
+                            f"http://127.0.0.1:{svc.http_port}"
+                            "/pf-peer/info", timeout=5) as resp:
+                        info = json.loads(resp.read().decode())
+                    if (info.get("stats") or {}).get("ram_total_gb") == 42.0:
+                        filled = True
+                        break
+                    time.sleep(0.2)
+                self.assertTrue(filled, "stats cache never filled")
+            finally:
+                svc.stop()
+
     def test_info_reports_the_comfy_environment(self):
         """A peer whose ComfyUI is down can still say WHY, remotely: its
         env facts are read from disk, not from the dead server."""

@@ -93,6 +93,11 @@ class PeerService:
         self.token = f"{self.name}-{time.time_ns()}"
         self.peers: dict[str, Peer] = {}
         self.static_hosts = list(static_hosts or [])
+        # Eagerly initialised: the lazy version had a first-call race and
+        # an empty-dict-is-falsy trap that left one machine's caches
+        # permanently unfilled (every request got a fresh orphaned dict).
+        self._bg_cache: dict[str, tuple[float, Any]] = {}
+        self._bg_running: set[str] = set()
         # Injected by Services: accepts a pushed model manifest and queues
         # the downloads on THIS machine (they arrive over the LAN path).
         self.on_pull: Callable[[list[dict]], dict] | None = None
@@ -215,27 +220,29 @@ class PeerService:
         is stale. /pf-peer/info must answer within the discovery probes'
         couple of seconds, and a cold torch-import probe was measured
         taking ~25s — long enough that the machine looked 'not answering'
-        on every other machine precisely while it had the most to say."""
-        store: dict[str, tuple[float, Any]] = getattr(
-            self, "_bg_cache", None) or {}
-        if not hasattr(self, "_bg_cache"):
-            self._bg_cache = store
-            self._bg_running: set[str] = set()
-        entry = store.get(name)
+        on every other machine precisely while it had the most to say.
+
+        The spawn decision is taken under the lock: concurrent first
+        requests must agree on ONE refresh writing into ONE cache."""
+        entry = self._bg_cache.get(name)
         fresh = entry is not None and time.time() - entry[0] < ttl
-        if not fresh and name not in self._bg_running:
-            self._bg_running.add(name)
+        if not fresh:
+            with self._lock:
+                spawn = name not in self._bg_running
+                if spawn:
+                    self._bg_running.add(name)
+            if spawn:
+                def refresh() -> None:
+                    try:
+                        value = fn()
+                    except Exception:  # noqa: BLE001
+                        value = entry[1] if entry else None
+                    self._bg_cache[name] = (time.time(), value)
+                    with self._lock:
+                        self._bg_running.discard(name)
 
-            def refresh() -> None:
-                try:
-                    value = fn()
-                except Exception:  # noqa: BLE001
-                    value = entry[1] if entry else None
-                store[name] = (time.time(), value)
-                self._bg_running.discard(name)
-
-            threading.Thread(target=refresh, daemon=True,
-                             name=f"pf-peer-{name}").start()
+                threading.Thread(target=refresh, daemon=True,
+                                 name=f"pf-peer-{name}").start()
         return entry[1] if entry else None
 
     def _comfy_status(self) -> dict[str, Any]:
@@ -298,7 +305,45 @@ class PeerService:
         if path.startswith("/pf-peer/comfy/"):
             self._proxy(req, body=None)
             return
+        if path.startswith("/pf-peer/log/"):
+            self._serve_log(req, unquote(path[len("/pf-peer/log/"):]))
+            return
         req._json(404, {"error": "unknown path"})
+
+    # Operational logs another machine of the SAME OWNER may read to
+    # diagnose this one remotely. A fixed whitelist, never a directory
+    # walk: install/crash logs only, no jobs, no prompts-carrying app DBs.
+    LOG_WHITELIST = frozenset({
+        "comfyui.log", "comfyui-err.log", "comfyui-repair.log",
+        "directml-install.log", "torch-cuda-repair.log", "sage-install.log",
+        "sam-install.log", "backend-live.log", "backend-live-err.log",
+        "doctor-report.txt",
+    })
+
+    def _serve_log(self, req: BaseHTTPRequestHandler, name: str) -> None:
+        if not self.share:
+            req._json(403, {"error": "sharing is off"})
+            return
+        if name not in self.LOG_WHITELIST:
+            req._json(404, {"error": "not a shareable log"})
+            return
+        path = self.registry.models_dir.parent / "logs" / name
+        try:
+            resolved = path.resolve()
+            resolved.relative_to(
+                (self.registry.models_dir.parent / "logs").resolve())
+        except (ValueError, OSError):
+            req._json(403, {"error": "outside the log folder"})
+            return
+        if not resolved.exists():
+            req._json(404, {"error": f"{name} does not exist here"})
+            return
+        data = resolved.read_bytes()[-32_768:]
+        req.send_response(200)
+        req.send_header("Content-Type", "text/plain; charset=utf-8")
+        req.send_header("Content-Length", str(len(data)))
+        req.end_headers()
+        req.wfile.write(data)
 
     def _handle_post(self, req: BaseHTTPRequestHandler) -> None:
         path = req.path.split("?", 1)[0]
