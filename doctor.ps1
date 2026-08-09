@@ -69,7 +69,7 @@ try {
 } catch {}
 Say "OK" "GPU: $gpuName -> mode '$gpuMode'"
 if ($gpuMode -eq "directml") {
-    Say "OK" "this Radeon is outside AMD's ROCm-on-Windows list - it renders through DirectML instead"
+    Say "OK" "this Radeon is outside AMD's classic ROCm wheel list - it renders through DirectML (or a ROCm-SDK torch when one is installed)"
 }
 $needPy = if ($gpuMode -in @("rocm", "directml")) { "3.12" } else { "" }
 
@@ -110,9 +110,13 @@ if (-not $comfyDir) {
         } else {
             Say "OK" "ComfyUI env: Python $cver, torch $($torchLine[0])"
             if ($gpuMode -eq "directml") {
-                $dml = (& $cpy -c "import torch_directml;d=torch_directml.device();print('dev-ok')" 2>$null | Out-String).Trim()
-                if ($dml -match "dev-ok") { Say "OK" "DirectML device opens - Radeon renders on the GPU" }
-                else { Say "FIX" "torch-directml missing or its device will not open - run launch.ps1 (it swaps the stack in); if it keeps failing, share data\logs\directml-install.log" }
+                if ($torchLine.Count -gt 1 -and $torchLine[1] -eq "1") {
+                    Say "OK" "torch sees the Radeon natively (ROCm SDK build) - DirectML not needed"
+                } else {
+                    $dml = (& $cpy -c "import torch_directml;d=torch_directml.device();print('dev-ok')" 2>$null | Out-String).Trim()
+                    if ($dml -match "dev-ok") { Say "OK" "DirectML device opens - Radeon renders on the GPU" }
+                    else { Say "FIX" "torch-directml missing or its device will not open - run launch.ps1 (it swaps the stack in); if it keeps failing, share data\logs\directml-install.log" }
+                }
             } elseif ($gpuMode -ne "cpu") {
                 if ($torchLine.Count -gt 1 -and $torchLine[1] -eq "1") {
                     Say "OK" "torch sees the GPU"

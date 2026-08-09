@@ -5503,17 +5503,30 @@ class Services:
         with self._comfy_revive_lock:
             if self.comfy.is_up():  # someone else already revived it
                 return True
-            venv_py = base / ".venv" / "Scripts" / "python.exe"
-            py = str(venv_py) if venv_py.exists() else sys.executable
+            try:
+                py = self._comfy_python(base)
+            except PermanentError:
+                py = sys.executable
             args = [py, str(main), "--listen", "127.0.0.1"]
             if self.hardware.ram_gb <= 20:
                 args.append("--disable-smart-memory")
+            # Flag decisions read the RESOLVED interpreter's site-packages —
+            # base/.venv is wrong for the nested and portable layouts.
+            pyp = Path(py)
+            env_root = (pyp.parent.parent
+                        if pyp.parent.name.lower() == "scripts" else pyp.parent)
+            site = env_root / "Lib" / "site-packages"
             # INT8 attention: measured here at 11% faster with the picture
             # unchanged (PSNR 54.8 dB, sharpness identical). Only offered when
             # the package is actually installed — the flag aborts startup
             # otherwise, which would take the renderer down with it.
-            if (base / ".venv" / "Lib" / "site-packages" / "sageattention").is_dir():
+            if (site / "sageattention").is_dir():
                 args.append("--use-sage-attention")
+            # torch-directml present means the launcher chose the DirectML
+            # swap for this Radeon (a natively-working ROCm-SDK stack is kept
+            # WITHOUT torch-directml, so this stays off there).
+            if (site / "torch_directml").is_dir():
+                args.append("--directml")
             # A fresh process holds no weights.
             self._comfy_heavy_cached = None
             log_dir = self.settings.data_dir / "logs"
@@ -5545,12 +5558,14 @@ class Services:
 
     def _comfy_python(self, base: Path) -> str:
         """ComfyUI's OWN interpreter — the one that must import a pack's
-        dependencies. Repo layout: base\\.venv; portable build:
-        <parent>\\python_embeded\\python.exe. Never falls back to the
+        dependencies. Repo layout: base\\.venv; nested layout (AMD's
+        ROCm-SDK guides): the venv one level ABOVE the code dir; portable
+        build: <parent>\\python_embeded\\python.exe. Never falls back to the
         backend venv (a different site-packages ComfyUI cannot see)."""
         candidates = [
             base / ".venv" / "Scripts" / "python.exe",
             base / "venv" / "Scripts" / "python.exe",
+            base.parent / ".venv" / "Scripts" / "python.exe",
             base.parent / "python_embeded" / "python.exe",
         ]
         for c in candidates:

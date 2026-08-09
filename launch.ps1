@@ -395,14 +395,22 @@ function Find-ComfyUI {
         $portable = (Test-Path (Join-Path $p "python_embeded\python.exe")) -and
                     (Test-Path (Join-Path $p "ComfyUI\main.py"))
         $repo = Test-Path (Join-Path $p "main.py")
-        if ($portable -or $repo) { return $p }
+        # Nested: a venv at the top and ComfyUI cloned into a subfolder —
+        # the layout AMD's own ROCm guides produce, found live holding a
+        # WORKING GPU torch that the old checks walked straight past.
+        $nested = (Test-Path (Join-Path $p ".venv\Scripts\python.exe")) -and
+                  (Test-Path (Join-Path $p "ComfyUI\main.py"))
+        if ($portable -or $repo -or $nested) { return $p }
         Write-Host "  (skipping $p - a folder, but not a runnable ComfyUI)" -ForegroundColor DarkGray
     }
     return $null
 }
 
-function Repair-ComfyVenv($dir) {
+function Repair-ComfyVenv($dir, $srcDir = $null) {
     # Repo layout only: create/fix the venv so ComfyUI can actually start.
+    # $srcDir = where ComfyUI's own files (requirements.txt) live — equal to
+    # $dir except in the nested layout, where the code sits in <dir>\ComfyUI.
+    if (-not $srcDir) { $srcDir = $dir }
     $venvPy = Join-Path $dir ".venv\Scripts\python.exe"
     $mode = Get-GpuMode
     # AMD: BOTH GPU stacks (ROCm wheels and torch-directml) top out at
@@ -457,7 +465,7 @@ function Repair-ComfyVenv($dir) {
         } else {
             & $pip install --retries 10 --timeout 180 torch torchvision torchaudio *> $repairLog
         }
-        & $pip install --retries 10 --timeout 180 -r (Join-Path $dir "requirements.txt") *>> $repairLog
+        & $pip install --retries 10 --timeout 180 -r (Join-Path $srcDir "requirements.txt") *>> $repairLog
         $ErrorActionPreference = $prevEap
         if (-not (Test-PyImport $venvPy "torch, yaml, aiohttp, requests")) {
             Write-Host "  [--] Repair failed - see $repairLog. Continuing without ComfyUI." -ForegroundColor Yellow
@@ -479,10 +487,20 @@ function Repair-ComfyVenv($dir) {
             Write-Host "      renders will use the CPU. Update the AMD driver (Adrenalin) and relaunch." -ForegroundColor Yellow
         }
     } elseif ($mode -eq "directml") {
-        # This Radeon is outside AMD's ROCm-on-Windows list (measured live
-        # on an RX 6700 XT), so DirectML is its real GPU path. A leftover
-        # ROCm-flavoured torch poisons it — swap the stack cleanly.
+        # This Radeon is outside AMD's classic ROCm-wheel list, so DirectML
+        # is the default GPU path here. BUT AMD's newer ROCm-SDK torch builds
+        # reach some of these cards (seen live: an RX 6700 XT running
+        # torch 2.9.0+rocmsdk with the GPU visible). A native stack that
+        # already sees the GPU beats DirectML — keep it, never bulldoze it.
         $amd = Get-AmdGpuName
+        $prevV = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
+        $nativeOk = (& $venvPy -c "import torch; print(int(torch.cuda.is_available()))" 2>$null | Out-String).Trim()
+        $ErrorActionPreference = $prevV
+        if ($nativeOk -eq "1") {
+            Write-Host "  [ok] $amd is already visible to torch (ROCm SDK build) - native GPU rendering enabled" -ForegroundColor Green
+            return $true
+        }
         if (-not (Test-PyImport $venvPy "torch_directml")) {
             Write-Host "  $amd renders through DirectML - installing that stack (one time)..." -ForegroundColor Yellow
             $dmlLog = Join-Path $logDir "directml-install.log"
@@ -521,10 +539,22 @@ function Start-ComfyUI($dir, $extraArgs = @()) {
             -RedirectStandardOutput $out -RedirectStandardError $err `
             $portablePy -ArgumentList "-s", $portableMain, "--listen", "127.0.0.1"
     }
-    # Repo layout: <dir>\main.py with a venv
+    # Repo layout: <dir>\main.py with a venv — or the nested variant with
+    # the venv at <dir>\.venv and the code at <dir>\ComfyUI\main.py (the
+    # layout AMD's ROCm-SDK setup guides produce).
     $repoMain = Join-Path $dir "main.py"
+    $workDir = $dir
+    $srcDir = $dir
+    if (-not (Test-Path $repoMain)) {
+        $nestedMain = Join-Path $dir "ComfyUI\main.py"
+        if ((Test-Path $nestedMain) -and (Test-Path (Join-Path $dir ".venv\Scripts\python.exe"))) {
+            $repoMain = $nestedMain
+            $workDir = Join-Path $dir "ComfyUI"
+            $srcDir = $workDir
+        }
+    }
     if (Test-Path $repoMain) {
-        if (-not (Repair-ComfyVenv $dir)) { return $null }
+        if (-not (Repair-ComfyVenv $dir $srcDir)) { return $null }
         Repair-CudaTorch $dir
         Optimize-ComfyPerf $dir
         $venvPy = Join-Path $dir ".venv\Scripts\python.exe"
@@ -542,12 +572,18 @@ function Start-ComfyUI($dir, $extraArgs = @()) {
             if (Test-PyImport $venvPy "sageattention") {
                 $comfyArgs += "--use-sage-attention"
             }
-            # Non-ROCm Radeons render through DirectML.
+            # Non-ROCm Radeons render through DirectML — unless this venv's
+            # torch already sees the GPU natively (ROCm SDK build), in which
+            # case the flag would force the slower path.
             if ((Get-GpuMode) -eq "directml" -and
                 (Test-PyImport $venvPy "torch_directml")) {
-                $comfyArgs += "--directml"
+                $prevN = $ErrorActionPreference
+                $ErrorActionPreference = "Continue"
+                $nativeSees = (& $venvPy -c "import torch; print(int(torch.cuda.is_available()))" 2>$null | Out-String).Trim()
+                $ErrorActionPreference = $prevN
+                if ($nativeSees -ne "1") { $comfyArgs += "--directml" }
             }
-            return Start-Process -PassThru -WindowStyle Hidden -WorkingDirectory $dir `
+            return Start-Process -PassThru -WindowStyle Hidden -WorkingDirectory $workDir `
                 -RedirectStandardOutput $out -RedirectStandardError $err `
                 $venvPy -ArgumentList $comfyArgs
         }
