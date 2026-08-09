@@ -171,7 +171,9 @@ function Test-PyImport([string]$py, [string]$mods) {
     if (-not (Test-Path $py)) { return $false }
     $prev = $ErrorActionPreference
     $ErrorActionPreference = "Continue"
-    try { & $py -c "import $mods" 2>$null | Out-Null } catch {}
+    # 2>&1 (not 2>$null): under 5.1 the first stderr line otherwise still
+    # surfaces as a NativeCommandError record on the console/transcript.
+    try { & $py -c "import $mods" 2>&1 | Out-Null } catch {}
     $ErrorActionPreference = $prev
     return ($LASTEXITCODE -eq 0)
 }
@@ -186,6 +188,7 @@ Write-Host ""
 # photos, database) is untracked so an update can never touch it. Runs
 # BEFORE the self-repair steps so new dependencies install in this same run.
 # Set PROMPTFORGE_AUTO_UPDATE=0 to keep a machine on its current version.
+$pfSelfUpdated = $false
 if (($env:PROMPTFORGE_AUTO_UPDATE -ne "0") -and
     (Test-Path (Join-Path $root ".git")) -and
     (Get-Command git -ErrorAction SilentlyContinue)) {
@@ -202,15 +205,32 @@ if (($env:PROMPTFORGE_AUTO_UPDATE -ne "0") -and
                 Write-Host "  [--] $behind update(s) pushed, but local file edits block them (see git status)." -ForegroundColor Yellow
             } else {
                 Write-Host "  Updating: $behind new commit(s) were pushed..." -ForegroundColor Cyan
+                $wasAt = (git rev-parse HEAD 2>$null | Out-String).Trim()
                 git pull --ff-only origin $branch 2>&1 | Out-Null
+                $nowAt = (git rev-parse HEAD 2>$null | Out-String).Trim()
                 $now = (git rev-parse --short HEAD 2>$null | Out-String).Trim()
                 Write-Host "  [ok] Now on $now" -ForegroundColor Green
+                if ($nowAt -and $wasAt -and $nowAt -ne $wasAt) { $pfSelfUpdated = $true }
             }
         }
     } catch {} finally {
         $ErrorActionPreference = $prevEap
         Pop-Location
     }
+}
+if ($pfSelfUpdated -and $env:PROMPTFORGE_RELAUNCHED -ne "1") {
+    # The files on disk are new, but THIS process still runs the parse it
+    # started with - launcher fixes were applying one launch LATE (bit us
+    # live: a crash-repair shipped and verified, yet the very next launch
+    # executed the previous version and hit the old crash). Hand over to
+    # the updated script immediately; the env flag prevents any loop.
+    Write-Host "  Restarting the launcher on the updated version..." -ForegroundColor Cyan
+    $env:PROMPTFORGE_RELAUNCHED = "1"
+    try { Stop-Transcript | Out-Null } catch {}
+    $argList = @()
+    if ($NoBrowser) { $argList += "-NoBrowser" }
+    & powershell.exe -ExecutionPolicy Bypass -File $PSCommandPath @argList
+    exit $LASTEXITCODE
 }
 
 # --- 1. Python backend environment -------------------------------------------
