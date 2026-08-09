@@ -110,9 +110,9 @@ if (-not $comfyDir) {
         } else {
             Say "OK" "ComfyUI env: Python $cver, torch $($torchLine[0])"
             if ($gpuMode -eq "directml") {
-                $dml = (& $cpy -c "import torch_directml;print(1)" 2>$null | Out-String).Trim()
-                if ($dml -eq "1") { Say "OK" "DirectML installed - Radeon renders on the GPU" }
-                else { Say "FIX" "torch-directml missing - run launch.ps1 (it swaps the stack in)" }
+                $dml = (& $cpy -c "import torch_directml;d=torch_directml.device();print('dev-ok')" 2>$null | Out-String).Trim()
+                if ($dml -match "dev-ok") { Say "OK" "DirectML device opens - Radeon renders on the GPU" }
+                else { Say "FIX" "torch-directml missing or its device will not open - run launch.ps1 (it swaps the stack in); if it keeps failing, share data\logs\directml-install.log" }
             } elseif ($gpuMode -ne "cpu") {
                 if ($torchLine.Count -gt 1 -and $torchLine[1] -eq "1") {
                     Say "OK" "torch sees the GPU"

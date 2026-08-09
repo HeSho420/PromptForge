@@ -100,9 +100,12 @@ function Get-TorchPipLines([string]$pipPath, [string]$logPath) {
                 "& '$pipPath' install --retries 10 --timeout 300 $trio *>> '$logPath'; ")
     }
     if ($mode -eq "directml") {
-        # torch-directml pins its own compatible torch; the resolver then
-        # matches torchvision/torchaudio to it.
-        return ("& '$pipPath' install --retries 10 --timeout 180 torch-directml torchvision torchaudio *> '$logPath'; ")
+        # PINNED on purpose: torch-directml hard-requires torch==2.4.1
+        # while an unpinned torchvision resolves to a build that demands a
+        # newer torch - pip then fails the whole install (measured live on
+        # the RX 6700 XT machine as "torch-directml missing").
+        return ("& '$pipPath' install --retries 10 --timeout 300 torch==2.4.1 torchvision==0.19.1 torchaudio==2.4.1 *> '$logPath'; " +
+                "& '$pipPath' install --retries 10 --timeout 300 torch-directml *>> '$logPath'; ")
     }
     return ("& '$pipPath' install --retries 10 --timeout 180 torch torchvision *> '$logPath'; ")
 }
@@ -474,14 +477,21 @@ function Repair-ComfyVenv($dir) {
             $prevV = $ErrorActionPreference
             $ErrorActionPreference = "Continue"
             & $pipD uninstall -y torch torchvision torchaudio torch-directml *> $dmlLog
-            & $pipD install --retries 10 --timeout 300 torch-directml torchvision torchaudio *>> $dmlLog
+            # PINNED: torch-directml requires torch==2.4.1 exactly; letting
+            # pip resolve torchvision freely ends in an impossible-
+            # resolution failure (measured live on this very card).
+            & $pipD install --retries 10 --timeout 300 torch==2.4.1 torchvision==0.19.1 torchaudio==2.4.1 *>> $dmlLog
+            & $pipD install --retries 10 --timeout 300 torch-directml *>> $dmlLog
             $ErrorActionPreference = $prevV
         }
         if (Test-PyImport $venvPy "torch_directml") {
             Write-Host "  [ok] DirectML ready - $amd renders on the GPU" -ForegroundColor Green
         } else {
-            Write-Host "  [!] DirectML did not install (see $logDir\directml-install.log) -" -ForegroundColor Yellow
-            Write-Host "      renders fall back to the CPU: slow, but real." -ForegroundColor Yellow
+            Write-Host "  [!] DirectML did not install - the installer's own words:" -ForegroundColor Yellow
+            Get-Content (Join-Path $logDir "directml-install.log") -Tail 8 -ErrorAction SilentlyContinue |
+                Where-Object { $_ -match "ERROR|error:|Could not|No matching|SSLError|CERTIFICATE" } |
+                Select-Object -First 4 | ForEach-Object { Write-Host "      | $_" -ForegroundColor DarkGray }
+            Write-Host "      Full log: $logDir\directml-install.log - renders fall back to the CPU (slow, but real)." -ForegroundColor Yellow
         }
     }
     return $true
