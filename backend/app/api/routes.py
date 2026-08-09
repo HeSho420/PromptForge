@@ -242,6 +242,7 @@ def create_app(services: Services | None = None) -> Flask:
                 entry["idle"] = info.get("idle")
                 entry["stats"] = info.get("stats")
                 entry["comfy"] = info.get("comfy")
+                entry["comfy_env"] = info.get("comfy_env")
                 entry["reachable"] = bool(info)
             except Exception:  # noqa: BLE001
                 entry["reachable"] = False

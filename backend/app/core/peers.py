@@ -77,7 +77,8 @@ class PeerService:
                  busy_check: Callable[[], bool] | None = None,
                  loopback_only: bool = False,
                  static_hosts: list[str] | None = None,
-                 stats_provider: Callable[[], dict] | None = None):
+                 stats_provider: Callable[[], dict] | None = None,
+                 env_provider: Callable[[], dict] | None = None):
         self.registry = registry
         self.comfy_url = comfy_url.rstrip("/")
         self.share = share
@@ -98,6 +99,9 @@ class PeerService:
         # Injected by Services: live GPU/RAM numbers, shown on the other
         # machine's rail so "who has headroom?" is answered at a glance.
         self.stats_provider = stats_provider
+        # Injected by Services: ComfyUI's venv facts (python/torch/GPU),
+        # readable even while ComfyUI is down — remote WHY, not just THAT.
+        self.env_provider = env_provider
         # Every address that ever answered as a PromptForge: the scanner
         # keeps re-probing these, so a peer that reboots comes back on its
         # own without waiting for a beacon to make it through.
@@ -237,11 +241,18 @@ class PeerService:
                     stats = self.stats_provider()
                 except Exception:  # noqa: BLE001 — stats are decoration
                     stats = None
+            env = None
+            if self.env_provider is not None:
+                try:
+                    env = self.env_provider()
+                except Exception:  # noqa: BLE001
+                    env = None
             req._json(200, {"app": "promptforge", "name": self.name,
                             "token": self.token, "share": self.share,
                             "render": self.render,
                             "idle": not self.busy_check(),
                             "comfy": self._comfy_status(),
+                            "comfy_env": env,
                             "stats": stats})
             return
         if path == "/pf-peer/models":

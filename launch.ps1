@@ -461,7 +461,7 @@ function Repair-ComfyVenv($dir) {
     return $true
 }
 
-function Start-ComfyUI($dir) {
+function Start-ComfyUI($dir, $extraArgs = @()) {
     $out = Join-Path $logDir "comfyui.log"
     $err = Join-Path $logDir "comfyui-err.log"
     # Portable build: <dir>\ComfyUI\main.py + <dir>\python_embeded\python.exe
@@ -484,7 +484,7 @@ function Start-ComfyUI($dir) {
             # <=20 GB RAM: don't let ComfyUI cache checkpoints in RAM between
             # renders — cached leftovers under the WAN video stack OOM-kill
             # the process on 16 GB machines.
-            $comfyArgs = @($repoMain, "--listen", "127.0.0.1")
+            $comfyArgs = @($repoMain, "--listen", "127.0.0.1") + $extraArgs
             if ((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1GB -le 20) {
                 $comfyArgs += "--disable-smart-memory"
             }
@@ -653,6 +653,16 @@ promptforge:
             Write-Host "  ComfyUI crashed on start - last errors:" -ForegroundColor Yellow
             Get-Content (Join-Path $logDir "comfyui-err.log") -Tail 5 -ErrorAction SilentlyContinue |
                 ForEach-Object { Write-Host "    $_" -ForegroundColor DarkGray }
+            if ((Get-GpuMode) -eq "rocm") {
+                # The ROCm stack can crash on init even when installed;
+                # a CPU start still gives real renders on these machines.
+                Write-Host "  Retrying ComfyUI on the CPU (AMD GPU init failed - slow but real renders)..." -ForegroundColor Yellow
+                $p = Start-ComfyUI $comfyDir @("--cpu")
+                if ($p) {
+                    $started += $p
+                    $comfyUp = Wait-Http "http://127.0.0.1:8188/system_stats" 90 $p
+                }
+            }
         }
     }
 }

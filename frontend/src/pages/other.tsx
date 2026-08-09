@@ -1311,10 +1311,23 @@ function NetworkPanel() {
               {p.reachable === false
                 ? "(not answering)"
                 : p.comfy && !p.comfy.up
-                  ? "(⚠ its ComfyUI is not running — it cannot render; relaunch PromptForge there and watch for the ComfyUI VERIFIED line)"
+                  ? "(⚠ its ComfyUI is not running — it cannot render; run doctor.ps1 there, or relaunch and watch for the ComfyUI VERIFIED line)"
                   : p.idle
                     ? "(idle — can take renders)"
                     : "(busy)"}
+              {p.comfy_env?.python ? (
+                <span className="dim">
+                  {" "}
+                  · its ComfyUI env: Python {p.comfy_env.python},{" "}
+                  {p.comfy_env.torch
+                    ? `torch ${p.comfy_env.torch}${
+                        p.comfy_env.gpu_visible === false
+                          ? " (GPU not visible!)"
+                          : ""
+                      }`
+                    : "no torch installed"}
+                </span>
+              ) : null}
               {p.comfy?.up && p.comfy.device === "cpu"
                 ? " ⚠ CPU-only rendering"
                 : ""}

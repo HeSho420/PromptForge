@@ -289,6 +289,18 @@ class TwoMachines(unittest.TestCase):
         self.assertIn("pin=False", loop)
         self.assertIn("known_hosts", loop)
 
+    def test_info_reports_the_comfy_environment(self):
+        """A peer whose ComfyUI is down can still say WHY, remotely: its
+        env facts are read from disk, not from the dead server."""
+        self.a.env_provider = lambda: {"python": "3.13", "torch": None,
+                                       "gpu_visible": False}
+        try:
+            info = self.b.add_peer("127.0.0.1", self.a.http_port)
+            self.assertEqual(info["comfy_env"]["python"], "3.13")
+            self.assertIsNone(info["comfy_env"]["torch"])
+        finally:
+            self.a.env_provider = None
+
 
 class ModelPush(unittest.TestCase):
     """'Send all models to the other device', end to end over loopback."""

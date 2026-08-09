@@ -130,6 +130,40 @@ class FullFigure(unittest.TestCase):
                       src)
 
 
+class KontextRefusal(unittest.TestCase):
+    """Kontext declines some content this app allows, and declines it
+    SILENTLY by returning the input unchanged. The pipeline must detect
+    that and switch engines instead of shipping a no-op."""
+
+    def test_the_noop_detector_separates_nothing_from_something(self):
+        from PIL import Image
+
+        from app.core import quality
+        base = Image.new("RGB", (200, 300), (120, 90, 80))
+        self.assertLess(quality.image_change(base, base.copy()), 0.001)
+        resized = base.resize((160, 240))     # a refusal at model size
+        self.assertLess(quality.image_change(base, resized), 0.015)
+        edited = base.copy()
+        edited.paste((200, 30, 30), (50, 50, 150, 250))
+        self.assertGreater(quality.image_change(base, edited), 0.05)
+
+    def test_a_declined_step_switches_to_the_inpaint_engine(self):
+        src = inspect.getsource(Services._render_kontext_step)
+        self.assertIn("quality.image_change(small, out)", src)
+        self.assertIn("_KONTEXT_NOOP", src)
+        self.assertIn("self._inpaint_fallback(job, image, instruction)", src)
+        self.assertIn("_kontext_declined", src)
+
+    def test_retries_never_pay_for_a_second_declined_render(self):
+        src = inspect.getsource(Services._render_kontext_step)
+        self.assertIn("if instruction in memo:", src)
+
+    def test_a_declined_synth_view_is_discarded_not_painted(self):
+        src = inspect.getsource(Services._synthesize_view)
+        self.assertIn("quality.image_change(front, out)", src)
+        self.assertIn("discarded", src)
+
+
 class TextureRefinement(unittest.TestCase):
     """The repaint loop may only ever ship measured improvements."""
 

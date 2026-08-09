@@ -1794,6 +1794,29 @@ def region_change(before: Image.Image, after: Image.Image,
     return (total / n) / 255.0
 
 
+def image_change(before: Image.Image, after: Image.Image) -> float:
+    """Mean absolute change across the WHOLE frame, 0..1.
+
+    The whole-image cousin of region_change, for engines that take no
+    mask. Its job is refusal detection: an instruction model that
+    declines a request (safety-tuned models decline quietly) hands back
+    the input nearly untouched, and ~0.015 cleanly separates 'nothing
+    happened' from the smallest real edit once both sides are resampled
+    to a common size."""
+    b = before.convert("RGB")
+    a = after.convert("RGB")
+    if max(b.size) > 384:
+        scale = 384 / max(b.size)
+        b = b.resize((max(1, int(b.width * scale)),
+                      max(1, int(b.height * scale))), Image.LANCZOS)
+    if a.size != b.size:
+        a = a.resize(b.size, Image.LANCZOS)
+    r1, g1, b1 = ImageChops.difference(a, b).split()
+    peak = ImageChops.lighter(ImageChops.lighter(r1, g1), b1)
+    total = sum(i * c for i, c in enumerate(peak.histogram()))
+    return (total / (b.width * b.height)) / 255.0
+
+
 # The colour word must END its clause: "to bright red" is a recolour, "to a
 # red leather jacket" is a replacement — red there modifies the jacket, and
 # running a garment swap at recolour denoise would leave the old garment.

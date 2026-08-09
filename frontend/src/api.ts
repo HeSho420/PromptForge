@@ -160,6 +160,11 @@ export const api = {
           device?: string | null;
           gpu?: string | null;
         } | null;
+        comfy_env?: {
+          python?: string;
+          torch?: string | null;
+          gpu_visible?: boolean;
+        } | null;
         seen_ago_s: number;
       }[];
     }>("/api/peers"),

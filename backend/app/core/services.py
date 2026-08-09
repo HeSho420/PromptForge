@@ -906,7 +906,8 @@ class Services:
             busy_check=self.queue.busy,
             static_hosts=[h for h in self.settings.lan_peers.split(",")
                           if h.strip()],
-            stats_provider=self._machine_stats)
+            stats_provider=self._machine_stats,
+            env_provider=self._comfy_env_report)
         # Sockets only open for real rendering setups: the mock backend is
         # what every test fixture uses, and hundreds of tests each opening
         # LAN listeners would fight over the ports for nothing.
@@ -1061,6 +1062,49 @@ class Services:
             raise PermanentError(str(exc)) from exc
 
     _stats_cache: tuple[float, dict] | None = None
+    _comfy_env_cache: tuple[float, dict] | None = None
+
+    def _comfy_env_report(self) -> dict[str, Any]:
+        """What ComfyUI's own environment holds — python, torch, GPU
+        visibility — read straight from its venv on disk.
+
+        Works while ComfyUI itself is DOWN, which is exactly when the
+        other machine needs to see why: a peer that shows 'no ComfyUI'
+        can now also show 'because its env is Python 3.13 with no torch',
+        remotely."""
+        cached = self._comfy_env_cache
+        if cached is not None and time.time() - cached[0] < 60.0:
+            return cached[1]
+        out: dict[str, Any] = {}
+        base = (Path(self.settings.comfyui_dir)
+                if self.settings.comfyui_dir else None)
+        if base is not None and base.exists():
+            try:
+                py = self._comfy_python(base)
+                code = ("import sys\n"
+                        "print(sys.version.split()[0])\n"
+                        "try:\n"
+                        "    import torch\n"
+                        "    print(torch.__version__)\n"
+                        "    print(int(torch.cuda.is_available()))\n"
+                        "except Exception:\n"
+                        "    print('none')\n"
+                        "    print(0)\n")
+                probe = subprocess.run([py, "-c", code],
+                                       capture_output=True, text=True,
+                                       timeout=25)
+                lines = (probe.stdout or "").strip().splitlines()
+                if lines:
+                    out["python"] = lines[0].strip()
+                if len(lines) > 1:
+                    out["torch"] = (None if lines[1].strip() == "none"
+                                    else lines[1].strip())
+                if len(lines) > 2:
+                    out["gpu_visible"] = lines[2].strip() == "1"
+            except Exception:  # noqa: BLE001 — a blank report is honest
+                pass
+        self._comfy_env_cache = (time.time(), out)
+        return out
 
     def _machine_stats(self) -> dict[str, Any]:
         """Live GPU/RAM numbers, shared with LAN peers (3s cache: the
@@ -4069,6 +4113,13 @@ class Services:
             return False, "the gguf node pack is not active"
         return ok, why
 
+    # Below this whole-frame change, an instruction model returned the
+    # picture untouched — it declined the request. Kontext is safety-tuned
+    # far beyond this app's own policy (it also refuses content the user
+    # has explicitly allowed here), and its refusals are SILENT: no error,
+    # just the input handed back.
+    _KONTEXT_NOOP = 0.015
+
     def _render_kontext_step(self, job: Job, image: Image.Image,
                              instruction: str) -> Image.Image:
         """One whole-image instruction edit through FLUX.1 Kontext.
@@ -4077,7 +4128,20 @@ class Services:
         changes what the sentence names, leaving the rest alone — which is
         why it answers the removal defect directly. A masked inpaint has to
         be TOLD where the hat is, and when the mask was wrong it painted a
-        fresh hat instead of removing the one that was there."""
+        fresh hat instead of removing the one that was there.
+
+        Kontext also declines some requests this app allows, and it
+        declines them silently by returning the input unchanged. That is
+        DETECTED here (whole-frame change below the no-op floor) and the
+        step automatically switches to the masked inpaint engine, which
+        has no such opinions. The verdict is remembered per job so
+        retries do not pay for another declined render."""
+        memo: set[str] = getattr(job, "_kontext_declined", set())
+        if instruction in memo:
+            job.log("info", "[route] Kontext already declined this "
+                            "instruction — going straight to the inpaint "
+                            "engine")
+            return self._inpaint_fallback(job, image, instruction)
         self._require_comfy(job)
         template = self.workflows.load("kontext")
         small = self._fit_megapixels(image, self._KONTEXT_MP)
@@ -4103,7 +4167,45 @@ class Services:
             raise PermanentError(
                 f"kontext render failed: "
                 f"{commit_exhausted_hint(str(exc)) or exc}") from exc
+        if quality.image_change(small, out) < self._KONTEXT_NOOP:
+            job.log("info", "[route] Kontext returned the picture "
+                            "unchanged — it silently declines some "
+                            "content, including things allowed here. "
+                            "Switching this step to the masked inpaint "
+                            "engine.")
+            memo.add(instruction)
+            job._kontext_declined = memo
+            return self._inpaint_fallback(job, image, instruction)
         return self._restore_resolution(job, out, image.size)
+
+    def _inpaint_fallback(self, job: Job, image: Image.Image,
+                          instruction: str) -> Image.Image:
+        """The masked route for a step an instruction model declined.
+
+        The same building blocks the planned inpaint path uses — the one
+        mask chooser, the LLM's model pick, the refined mask — in one
+        compact unit, so a declined Kontext step lands on a real
+        alternative instead of an error."""
+        choice = self.auto_mask(image, instruction, job=job)
+        if not choice.ok or choice.mask is None:
+            raise PermanentError(
+                "Kontext declined this edit and no region could be "
+                f"segmented for the inpaint fallback ({choice.reason}). "
+                "Paint the region by hand and run it again.")
+        mask = self._refine_mask(choice.mask)
+        variant, checkpoint = self._choose_inpaint(job, instruction)
+        enh = quality.enhance_prompt(self.llm, instruction,
+                                     log=lambda m: None)
+        try:
+            result = self.inpainting.inpaint(
+                image, mask, enh["positive"],
+                negative=enh["negative"],
+                checkpoint=checkpoint,
+                variant=variant or "modern")
+        except TypeError:
+            # Mock/simple adapters take the positional core only.
+            result = self.inpainting.inpaint(image, mask, enh["positive"])
+        return result.image
 
     def _restore_resolution(self, job: Job, image: Image.Image,
                             size: tuple[int, int]) -> Image.Image:
@@ -7635,6 +7737,15 @@ class Services:
             self._free_vram(job)
             self._prepare_graph(job, graph)
             out, _pid = self.comfy.run_graph(graph)
+            # A silent refusal hands back (a near-copy of) the front photo.
+            # Painting the FRONT onto the BACK is the one mistake worse
+            # than leaving the arc approximate — discard and say so.
+            if quality.image_change(front, out) < 0.03:
+                job.log("info", f"The generated {which} view came back as "
+                                "a copy of the front (the instruction "
+                                "model declines some content) — discarded; "
+                                "that arc keeps its neighbours' colour")
+                return None
             return self._matte_on_grey(job, out.convert("RGB"))
         except Exception as exc:  # noqa: BLE001 — the arc stays approximate
             job.log("info", f"Could not generate a {which} view ({exc}); "
