@@ -19,9 +19,11 @@ from tests.test_workflow_job import GRAPH, DeadLLM, FakeComfy, ScriptedLLM
 class ExperienceTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        self.store = ExperienceStore(Database(Path(self.tmp.name) / "t.sqlite3"))
+        self.db = Database(Path(self.tmp.name) / "t.sqlite3")
+        self.store = ExperienceStore(self.db)
 
     def tearDown(self):
+        self.db.close()
         self.tmp.cleanup()
 
     def test_best_example_prefers_high_realism_and_similar_prompt(self):
@@ -112,6 +114,7 @@ class GatedMirrorTests(unittest.TestCase):
             first_run_setup=False, comfyui_dir=""))
 
     def tearDown(self):
+        self.services.stop()
         self.tmp.cleanup()
 
     def test_gated_download_switches_to_verified_mirror(self):

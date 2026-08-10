@@ -102,6 +102,7 @@ class DiagnoseTests(unittest.TestCase):
         self.services = _services(self.tmp.name)
 
     def tearDown(self):
+        self.services.stop()
         self.tmp.cleanup()
 
     def test_diagnose_records_failure_to_experience(self):

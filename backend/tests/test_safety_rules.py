@@ -15,6 +15,7 @@ class SafetyRuleStoreTests(unittest.TestCase):
         self.store = SafetyRuleStore(self.db)
 
     def tearDown(self):
+        self.db.close()
         self.tmp.cleanup()
 
     def test_add_list_delete(self):
@@ -54,6 +55,7 @@ class LiveEnforcementTests(unittest.TestCase):
         self.filter = SafetyFilter(custom_provider=self.store.compiled)
 
     def tearDown(self):
+        self.db.close()
         self.tmp.cleanup()
 
     def test_custom_rule_takes_effect_immediately(self):

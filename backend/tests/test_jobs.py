@@ -14,6 +14,7 @@ class JobQueueTests(unittest.TestCase):
 
     def tearDown(self):
         self.q.stop()
+        self.db.close()
         self.tmp.cleanup()
 
     def test_success_path(self):

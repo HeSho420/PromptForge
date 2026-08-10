@@ -32,8 +32,8 @@ class OneShotLLM:
 class ScoutTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        db = Database(Path(self.tmp.name) / "t.sqlite3")
-        self.registry = ModelRegistry(db, Path(self.tmp.name) / "models")
+        self.db = Database(Path(self.tmp.name) / "t.sqlite3")
+        self.registry = ModelRegistry(self.db, Path(self.tmp.name) / "models")
         self.downloads = []
 
         class FakeDownloader:
@@ -43,6 +43,7 @@ class ScoutTests(unittest.TestCase):
         self.downloader = FakeDownloader()
 
     def tearDown(self):
+        self.db.close()
         self.tmp.cleanup()
 
     def _scout(self, llm, routes=None):
@@ -117,8 +118,9 @@ class CivitaiTests(unittest.TestCase):
         }]}
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
-        registry = ModelRegistry(Database(Path(tmp.name) / "t.sqlite3"),
-                                 Path(tmp.name) / "models")
+        db = Database(Path(tmp.name) / "t.sqlite3")
+        self.addCleanup(db.close)
+        registry = ModelRegistry(db, Path(tmp.name) / "models")
         ms = ModelSearch(registry, http_get=lambda url, t: payload)
         out = ms.search_civitai("photo model")
         self.assertEqual(len(out), 1)

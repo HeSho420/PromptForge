@@ -42,10 +42,11 @@ class FakeHttp:
 class ModelSearchTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        db = Database(Path(self.tmp.name) / "t.sqlite3")
-        self.registry = ModelRegistry(db, Path(self.tmp.name) / "models")
+        self.db = Database(Path(self.tmp.name) / "t.sqlite3")
+        self.registry = ModelRegistry(self.db, Path(self.tmp.name) / "models")
 
     def tearDown(self):
+        self.db.close()
         self.tmp.cleanup()
 
     def _search(self, routes):

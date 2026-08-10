@@ -43,6 +43,7 @@ class RegistryTests(unittest.TestCase):
         self.sha = hashlib.sha256(self.payload).hexdigest()
 
     def tearDown(self):
+        self.db.close()
         self.tmp.cleanup()
 
     def _register(self, sha: str | None):
@@ -141,6 +142,7 @@ class ResilientDownloadTests(unittest.TestCase):
         self.downloader = ModelDownloader(self.registry, sleep=self.slept.append)
 
     def tearDown(self):
+        self.db.close()
         self.tmp.cleanup()
 
     def test_transient_failure_is_retried_then_succeeds(self):

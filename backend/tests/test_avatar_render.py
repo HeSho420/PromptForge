@@ -219,10 +219,11 @@ class TransparencyTests(unittest.TestCase):
 class DownloadTelemetryTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        db = Database(Path(self.tmp.name) / "t.sqlite3")
-        self.registry = ModelRegistry(db, Path(self.tmp.name) / "models")
+        self.db = Database(Path(self.tmp.name) / "t.sqlite3")
+        self.registry = ModelRegistry(self.db, Path(self.tmp.name) / "models")
 
     def tearDown(self):
+        self.db.close()
         self.tmp.cleanup()
 
     def test_civitai_token_goes_into_query_not_registry(self):
@@ -274,6 +275,7 @@ class HistoryRestoreTests(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         db = Database(Path(tmp.name) / "t.sqlite3")
+        self.addCleanup(db.close)
 
         q1 = JobQueue(db)
         q1.register("noop", lambda job: {"ok": True})

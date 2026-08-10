@@ -515,10 +515,12 @@ class InpaintModelPolicyTests(unittest.TestCase):
     def _services(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
-        return Services(Settings(
+        s = Services(Settings(
             data_dir=Path(self.tmp.name), inpaint_backend="mock",
             segment_backend="mock", critic_model="",
             first_run_setup=False, comfyui_dir=""))
+        self.addCleanup(s.stop)
+        return s
 
     def test_rank_prefers_modern_photoreal_inpaint_models(self):
         ranked = sorted([

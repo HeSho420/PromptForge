@@ -1188,6 +1188,10 @@ class Services:
             self._text_mask_worker.stop(force=True)
         if self._monitor:
             self._monitor.join(timeout=2)
+        # Workers are joined; release the per-thread SQLite connections so
+        # Windows can delete the database file (tests tear their temp dirs
+        # down right after this).
+        self.db.close()
 
     # -- peer network -------------------------------------------------------------
     # Job types worth sending across the network: the render-heavy ones.

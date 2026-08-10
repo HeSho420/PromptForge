@@ -45,6 +45,7 @@ class QueueManagementTests(unittest.TestCase):
 
     def tearDown(self):
         self.q.stop()
+        self.db.close()
         self.tmp.cleanup()
 
     def test_pause_holds_dispatch_and_resume_releases(self):
@@ -162,6 +163,7 @@ class EtaTests(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         s = _services(tmp.name)
+        self.addCleanup(s.stop)
 
         class LogJob:
             type = "workflow"
@@ -188,6 +190,7 @@ class GalleryTrashTests(unittest.TestCase):
         self.asset = self.s.store.save_upload("a.png", buf.getvalue())
 
     def tearDown(self):
+        self.s.stop()
         self.tmp.cleanup()
 
     def test_delete_hides_restore_brings_back(self):
@@ -238,6 +241,7 @@ class CivitaiRichTests(unittest.TestCase):
         self.db = db
 
     def tearDown(self):
+        self.db.close()
         self.tmp.cleanup()
 
     def test_rich_search_parses_all_fields(self):

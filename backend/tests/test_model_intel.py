@@ -123,6 +123,7 @@ class ResearchWiringTests(unittest.TestCase):
             data_dir=Path(self.tmp.name), inpaint_backend="mock",
             segment_backend="mock", critic_model="",
             first_run_setup=False, comfyui_dir=""))  # not started: no worker
+        self.addCleanup(self.s.stop)
 
     def test_queue_model_research_once_per_missing_model(self):
         class LogJob:

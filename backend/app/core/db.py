@@ -1,11 +1,23 @@
-"""Tiny SQLite layer. Single-file DB, WAL mode, thread-safe via per-call connections.
+"""Tiny SQLite layer. Single-file DB, WAL mode, thread-safe via per-THREAD
+connections.
 
 Deliberately minimal for the MVP; the schema is designed so a later move to
 Postgres (or an ORM) is a mechanical change.
+
+Connections used to be per-CALL — open, pragma, execute, close, every
+operation. Measured (cProfile, Windows): 166 such round-trips inside one
+Services construction cost 0.76s of its 1.02s, and every runtime operation
+paid ~5ms of open/close for a sub-millisecond query. Each thread now keeps
+one connection (SQLite's supported concurrency model under WAL); commit
+semantics per operation are unchanged. close() exists because Windows will
+not delete an open database file — Services.stop() and direct test users
+call it; a generation counter lets any straggler thread reopen safely
+instead of crashing on a closed handle.
 """
 from __future__ import annotations
 
 import sqlite3
+import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -70,23 +82,39 @@ class Database:
     def __init__(self, path: Path):
         self.path = path
         path.parent.mkdir(parents=True, exist_ok=True)
+        self._tls = threading.local()
+        self._lock = threading.Lock()
+        self._open: list[sqlite3.Connection] = []
+        self._generation = 0
         with self.connect() as conn:
             conn.executescript(SCHEMA)
 
+    def _thread_conn(self) -> sqlite3.Connection:
+        """This thread's connection, opened on first use (or after close())."""
+        if getattr(self._tls, "generation", None) == self._generation:
+            return self._tls.conn
+        # check_same_thread=False so close() may close it at shutdown; each
+        # connection is still USED by its one owning thread only.
+        conn = sqlite3.connect(self.path, timeout=30,
+                               check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA foreign_keys=ON")
+        with self._lock:
+            self._open.append(conn)
+            self._tls.conn = conn
+            self._tls.generation = self._generation
+        return conn
+
     @contextmanager
     def connect(self) -> Iterator[sqlite3.Connection]:
-        conn = sqlite3.connect(self.path, timeout=30)
-        conn.row_factory = sqlite3.Row
+        conn = self._thread_conn()
         try:
-            conn.execute("PRAGMA journal_mode=WAL")
-            conn.execute("PRAGMA foreign_keys=ON")
             yield conn
             conn.commit()
         except Exception:
             conn.rollback()
             raise
-        finally:
-            conn.close()
 
     def query(self, sql: str, params: tuple[Any, ...] = ()) -> list[sqlite3.Row]:
         with self.connect() as conn:
@@ -95,3 +123,20 @@ class Database:
     def execute(self, sql: str, params: tuple[Any, ...] = ()) -> None:
         with self.connect() as conn:
             conn.execute(sql, params)
+
+    def close(self) -> None:
+        """Close every connection this Database opened, from any thread.
+
+        Windows cannot delete an open database file, so shutdown (and test
+        teardown) must come through here. Callers whose worker threads are
+        already joined lose nothing; a straggler thread that runs afterwards
+        gets a fresh connection via the generation bump rather than a crash
+        on a closed handle."""
+        with self._lock:
+            conns, self._open = self._open, []
+            self._generation += 1
+        for conn in conns:
+            try:
+                conn.close()
+            except Exception:  # noqa: BLE001 — closing is best-effort
+                pass

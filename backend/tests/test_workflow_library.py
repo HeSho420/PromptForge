@@ -85,6 +85,7 @@ class HardwareBudgetTests(unittest.TestCase):
             data_dir=Path(tmp.name), inpaint_backend="mock",
             segment_backend="mock", critic_model="",
             first_run_setup=False, comfyui_dir=""))
+        self.addCleanup(services.stop)
         services.hardware = Hardware("gpu", 8, 16, 100)  # mid tier
 
         class LogJob:
@@ -113,6 +114,7 @@ class HardwareBudgetTests(unittest.TestCase):
             data_dir=Path(tmp.name), inpaint_backend="mock",
             segment_backend="mock", critic_model="",
             first_run_setup=False, comfyui_dir=""))
+        self.addCleanup(services.stop)
         services.hardware = Hardware("gpu", 8, 16, 100)
 
         class LogJob:
@@ -139,9 +141,11 @@ class MaskRefineTests(unittest.TestCase):
 class RepairKnowledgeTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
-        self.store = ExperienceStore(Database(Path(self.tmp.name) / "t.sqlite3"))
+        self.db = Database(Path(self.tmp.name) / "t.sqlite3")
+        self.store = ExperienceStore(self.db)
 
     def tearDown(self):
+        self.db.close()
         # Windows releases a just-closed SQLite handle a beat late under
         # full-suite load — measured erroring this teardown roughly one run
         # in three (WinError 32) while every targeted run passed. Retry
@@ -227,6 +231,9 @@ class RepairKnowledgeTests(unittest.TestCase):
         rows = services.db.query("SELECT * FROM repair_knowledge")
         # graphs identical → no fix note; make sure no crash either way
         self.assertLessEqual(len(rows), 1)
+        # Close before tearDown's rmtree (the addCleanup above only runs
+        # after tearDown; stop() is idempotent so it remains the safety net).
+        services.stop()
 
 
 class SafetyPolicyHelpersTests(unittest.TestCase):

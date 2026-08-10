@@ -40,8 +40,9 @@ class HardGateTests(unittest.TestCase):
     def test_downloader_enforces_gates(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
-        registry = ModelRegistry(Database(Path(tmp.name) / "t.sqlite3"),
-                                 Path(tmp.name) / "models")
+        db = Database(Path(tmp.name) / "t.sqlite3")
+        self.addCleanup(db.close)
+        registry = ModelRegistry(db, Path(tmp.name) / "models")
         registry.register(ModelInfo(
             name="evil", purpose="x", url="https://evil.example.com/m.safetensors"))
         with self.assertRaises(DownloadError) as ctx:
