@@ -1154,6 +1154,28 @@ shorter wider tighter looser new old clean dirty wet
 """.split())
 
 
+def parse_attribute_change(text: str) -> tuple[str, str] | None:
+    """(source, destination) of a change/replace/make instruction, or None.
+
+    One parse feeding both halves of the same rule: the CONDITIONING leads
+    with the destination (attribute_conditioning — the sampler must paint
+    the new state), while SEGMENTATION looks for the source only
+    (mask_phrases — the picture contains the old state). Deterministic."""
+    text = (text or "").strip()
+    m = _CHANGE_TO.match(text) or _REPLACE_WITH.match(text)
+    if m:
+        return m.group("src").strip(), m.group("dst").strip()
+    m = _MAKE_ADJ.match(text)
+    if m:
+        candidate = m.group("dst").strip()
+        words = candidate.lower().split()
+        # "make the shirt red" parses; "make her smile at the camera"
+        # must not — only accept destinations that read as a STATE.
+        if words and all(w in _STATE_WORDS for w in words):
+            return m.group("src").strip(), candidate
+    return None
+
+
 def attribute_conditioning(instruction: str, target: str,
                            positive: str, negative: str) -> dict | None:
     """Prompts for a CHANGE/REPLACE inpaint that lead with the TARGET STATE.
@@ -1174,20 +1196,8 @@ def attribute_conditioning(instruction: str, target: str,
 
     None when the instruction does not parse as an attribute change — the
     caller keeps the prompt it already has. Deterministic, no model."""
-    text = (instruction or "").strip()
-    src = dst = None
-    m = _CHANGE_TO.match(text) or _REPLACE_WITH.match(text)
-    if m:
-        src, dst = m.group("src").strip(), m.group("dst").strip()
-    else:
-        m = _MAKE_ADJ.match(text)
-        if m:
-            candidate = m.group("dst").strip()
-            words = candidate.lower().split()
-            # "make the shirt red" parses; "make her smile at the camera"
-            # must not — only accept destinations that read as a STATE.
-            if words and all(w in _STATE_WORDS for w in words):
-                src, dst = m.group("src").strip(), candidate
+    parsed = parse_attribute_change(instruction)
+    src, dst = parsed if parsed else (None, None)
     if not src or not dst or len(dst) < 3:
         return None
     src = re.sub(r"\s+", " ", src).strip(" .,")[:60]
@@ -1392,8 +1402,39 @@ def about_the_subject(text: str) -> bool:
                 or _ABOUT_SUBJECT.search(text))
 
 
+def chooser_request(target: str, instruction: str) -> str:
+    """What the mask chooser should be handed for a plan step.
+
+    The render used to prefix the plan's target ("car change the red car
+    to blue") so segmentation knew the object — but the prefix defeats
+    parse_attribute_change's anchored verb, and the instruction already
+    carries the object for exactly the requests where the parse matters.
+    Instruction alone when it parses; target + instruction otherwise."""
+    instruction = (instruction or "").strip()
+    if parse_attribute_change(instruction):
+        return instruction
+    target = (target or "").strip()
+    return f"{target} {instruction}".strip() if target else instruction
+
+
 def mask_phrases(text: str, limit: int = 4) -> list[str]:
-    """The request as short noun phrases a text segmenter can look for."""
+    """The request as short noun phrases a text segmenter can look for.
+
+    For a parsed attribute change, the SOURCE clause only: the engine
+    unions its phrases, so handing it the destination pulls everything
+    already matching the new state into the edit region — "change the red
+    car to blue" with "blue" as a phrase lit up the entire blue background
+    at peak 0.956 / 89% coverage (measured live), which would repaint the
+    sky along with the car. The mirror of attribute_conditioning's rule:
+    condition on the target, segment the source. Garment requests keep
+    their part vocabulary (segment_phrases' garment path never emits
+    adjectives, so they were never polluted)."""
+    if not garment_parts(text):
+        parsed = parse_attribute_change(text)
+        if parsed:
+            src = re.sub(r"\s+", " ", parsed[0]).strip(" .,")[:60]
+            if src:
+                return [src]
     phrases = [p.strip() for p in segment_phrases(text, limit).split(" . ")]
     return [p for p in phrases if p][:limit]
 

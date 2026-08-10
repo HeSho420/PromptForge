@@ -1985,12 +1985,16 @@ class Services:
                         # segmenter that could only reason about position, and
                         # the chooser now leads with engines that match on
                         # appearance, where a location phrase is noise.
-                        seg_target = target or step["instruction"]
                         # ONE chooser, shared with the preview, so the region
                         # you approved on screen is the region that renders.
+                        # chooser_request keeps the parse alive: a prefixed
+                        # target used to defeat segment-the-source and put
+                        # the DESTINATION back among the phrases.
                         choice = self.auto_mask(
                             current,
-                            f"{seg_target} {step['instruction']}", job=job)
+                            quality.chooser_request(target,
+                                                    step["instruction"]),
+                            job=job)
                         if not choice.ok:
                             raise BadMaskError(
                                 f"{choice.reason.capitalize()}. Paint the "

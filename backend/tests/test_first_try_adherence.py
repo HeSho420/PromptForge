@@ -23,6 +23,49 @@ from PIL import Image, ImageDraw
 from app.core import quality
 
 
+class SegmentTheSource(unittest.TestCase):
+    """The text engine unions its phrases, so segmentation must look for the
+    SOURCE of a change, never the destination. Measured live: "blue" as a
+    phrase lit up the entire blue background of a test image at peak 0.956
+    and 89% coverage — an edit mask that would repaint the sky along with
+    the car it was meant to select."""
+
+    def test_change_to_segments_only_the_source(self):
+        self.assertEqual(quality.mask_phrases("change the red car to blue"),
+                         ["red car"])
+
+    def test_replace_with_segments_only_the_source(self):
+        self.assertEqual(
+            quality.mask_phrases("replace the wooden fence with a hedge"),
+            ["wooden fence"])
+
+    def test_make_state_segments_only_the_source(self):
+        # A non-garment noun: garment requests route to the part vocabulary
+        # first ("shirt" would come back as its part label), by design.
+        self.assertEqual(quality.mask_phrases("make the wall green"),
+                         ["wall"])
+
+    def test_non_change_requests_keep_the_word_union(self):
+        self.assertIn("hat", quality.mask_phrases("remove the hat"))
+
+    def test_garment_requests_never_carry_the_destination(self):
+        phrases = quality.mask_phrases("change her red dress to blue")
+        self.assertNotIn("blue", " ".join(phrases).lower())
+        self.assertTrue(any("dress" in p.lower() for p in phrases), phrases)
+
+    def test_render_paths_target_prefix_does_not_defeat_the_parse(self):
+        """The render hands the chooser target + instruction; the prefix
+        used to break the anchored parse and put the destination back
+        among the phrases."""
+        request = quality.chooser_request("car", "change the red car to blue")
+        self.assertEqual(request, "change the red car to blue")
+        self.assertEqual(quality.mask_phrases(request), ["red car"])
+
+    def test_non_change_steps_keep_the_target_prefix(self):
+        self.assertEqual(quality.chooser_request("hat", "remove the hat"),
+                         "hat remove the hat")
+
+
 class AttributeConditioning(unittest.TestCase):
 
     def cond(self, instruction, target=""):
