@@ -92,7 +92,7 @@ def to_mask(maps: np.ndarray, size: tuple[int, int],
     # detections or accepts noise on an image where nothing matches.
     cut = max(threshold, peak * 0.5)
     binary = (union >= cut).astype(np.uint8) * 255
-    mask = Image.fromarray(binary, mode="L").resize(size, Image.BILINEAR)
+    mask = Image.fromarray(binary, mode="L").resize(size, Image.Resampling.BILINEAR)
     mask = mask.point(lambda v: 255 if v >= 128 else 0)
     return mask, {"peak": round(peak, 3), "cut": round(cut, 3)}
 

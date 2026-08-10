@@ -169,7 +169,8 @@ def create_app(services: Services | None = None) -> Flask:
         except BackendUnavailableError as exc:
             return _error(503, "backend_unavailable", str(exc))
         return jsonify({
-            "mask_b64": services.encode_image_b64(mask),
+            # choice.ok above guarantees the mask exists.
+            "mask_b64": services.encode_image_b64(mask),  # type: ignore[arg-type]
             "adapter": services.segmentation.name,
             "is_mock": services.segmentation.is_mock,
             # How the region was chosen, so the UI can say when it was a guess

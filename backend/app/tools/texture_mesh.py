@@ -52,10 +52,13 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
+from typing import cast
 
 import numpy as np
 import trimesh
 from PIL import Image
+
+_Vec4 = tuple[float, float, float, float]
 
 GRID = 168          # silhouette resolution for the global orientation search
 ALIGN_GRID = 208    # finer grid for the per-view similarity refinement
@@ -163,7 +166,7 @@ def _fit_square(mask: np.ndarray) -> np.ndarray:
     h, w = sub.shape
     scale = (GRID - 2) / max(h, w)
     small = Image.fromarray(sub.astype(np.uint8) * 255).resize(
-        (max(1, int(w * scale)), max(1, int(h * scale))), Image.NEAREST)
+        (max(1, int(w * scale)), max(1, int(h * scale))), Image.Resampling.NEAREST)
     out = np.zeros((GRID, GRID), bool)
     a = np.asarray(small) > 127
     oy, ox = (GRID - a.shape[0]) // 2, (GRID - a.shape[1]) // 2
@@ -226,6 +229,7 @@ def solve_orientation(verts: np.ndarray, views: list[View]
                               for t, nom in targets]))
 
     best = (-1.0, 0.0, 1)
+    offset: float
     for offset in range(0, 360, 3):
         for sign in (1, -1):
             score = ensemble(offset, sign)
@@ -357,7 +361,7 @@ def solve_view_mapping(mesh: trimesh.Trimesh, view: View,
     uv0 = _base_uv(mesh.vertices, view, deg)
     target = np.asarray(Image.fromarray(
         view.mask.astype(np.uint8) * 255).resize(
-        (ALIGN_GRID, ALIGN_GRID), Image.NEAREST)) > 127
+        (ALIGN_GRID, ALIGN_GRID), Image.Resampling.NEAREST)) > 127
     bx0, by0, bx1, by1 = view.bbox
     cx, cy = (bx0 + bx1) / 2, (by0 + by1) / 2
 
@@ -370,7 +374,7 @@ def solve_view_mapping(mesh: trimesh.Trimesh, view: View,
         return _iou(_splat(px, py, ALIGN_GRID), target)
 
     params = [1.0, 1.0, 0.0, 0.0]
-    best = overlap(tuple(params))
+    best = overlap(cast(_Vec4, tuple(params)))
     lo = (0.85, 0.85, -0.06, -0.06)
     hi = (1.18, 1.18, 0.06, 0.06)
     for step in (0.04, 0.02, 0.01, 0.005):
@@ -384,7 +388,7 @@ def solve_view_mapping(mesh: trimesh.Trimesh, view: View,
                                              lo[i], hi[i]))
                     if trial[i] == params[i]:
                         continue
-                    got = overlap(tuple(trial))
+                    got = overlap(cast(_Vec4, tuple(trial)))
                     if got > best + 1e-4:
                         params, best = trial, got
                         improved = True
@@ -448,7 +452,7 @@ def refine_photometric(views: list[View], mappings: list[dict],
             return float(np.abs(sample(img, uu) - ref).mean())
 
         params = [1.0, 1.0, 0.0, 0.0]
-        best = start = cost(tuple(params))
+        best = start = cost(cast(_Vec4, tuple(params)))
         lo, hi = (0.94, 0.94, -0.025, -0.025), (1.06, 1.06, 0.025, 0.025)
         for step in (0.008, 0.004, 0.002, 0.001):
             improved = True
@@ -461,12 +465,12 @@ def refine_photometric(views: list[View], mappings: list[dict],
                                                  lo[k], hi[k]))
                         if trial[k] == params[k]:
                             continue
-                        got = cost(tuple(trial))
+                        got = cost(cast(_Vec4, tuple(trial)))
                         if got < best - 1e-4:
                             params, best = trial, got
                             improved = True
         if best < start * 0.99:
-            mm = mappings[i] = compose_mapping(m, tuple(params))
+            mm = mappings[i] = compose_mapping(m, cast(_Vec4, tuple(params)))
             # Later views in the chain must anchor against the REFINED
             # position of this one, not where it used to be.
             uvs[i] = np.stack(
@@ -643,7 +647,7 @@ def build_atlas(images: list[np.ndarray], tile: int,
             r = rects[i]
             box = (r[0] * (w - 1), r[1] * (h - 1),
                    r[2] * (w - 1) + 1, r[3] * (h - 1) + 1)
-        pic = pic.resize((tile, tile), Image.LANCZOS, box=box)
+        pic = pic.resize((tile, tile), Image.Resampling.LANCZOS, box=box)
         atlas.paste(pic, ((i % cols) * tile, (i // cols) * tile))
     return atlas, cols
 
@@ -992,9 +996,9 @@ def paste_tile(glb: Path, report: dict, index: int, refined: Path,
     tile = report["tile"]
     cols = report["cols"]
     pic = np.asarray(Image.open(refined).convert("RGB").resize(
-        (tile, tile), Image.LANCZOS), float)
+        (tile, tile), Image.Resampling.LANCZOS), float)
     mask = np.asarray(Image.open(alpha_path).convert("L").resize(
-        (tile, tile), Image.NEAREST)) > 127
+        (tile, tile), Image.Resampling.NEAREST)) > 127
     # The repaint is a generation: it can shift the silhouette inward a
     # pixel or two, leaving BACKGROUND on texels the raster's alpha calls
     # subject — rendered, that is a spray of white specks along every

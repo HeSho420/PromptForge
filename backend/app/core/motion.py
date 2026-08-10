@@ -102,7 +102,7 @@ def crossfade(a: list[Image.Image], b: list[Image.Image],
         fa = a[len(a) - overlap + i].convert("RGB")
         fb = b[i].convert("RGB")
         if fb.size != fa.size:
-            fb = fb.resize(fa.size, Image.LANCZOS)
+            fb = fb.resize(fa.size, Image.Resampling.LANCZOS)
         out.append(Image.blend(fa, fb, t))
     out.extend(b[overlap:])
     return out

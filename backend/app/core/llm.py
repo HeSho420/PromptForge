@@ -46,7 +46,9 @@ class LLMReply:
 
 
 class LLMClient(Protocol):
-    source: str
+    # Read-only: FallbackLLM derives it with a property.
+    @property
+    def source(self) -> str: ...
 
     def complete(self, system: str, prompt: str, max_tokens: int = 4096) -> LLMReply:
         ...

@@ -156,7 +156,7 @@ def write_video(frames: list[Image.Image], path: str | Path,
         for frame in frames:
             rgb = frame.convert("RGB")
             if rgb.size != size:
-                rgb = rgb.resize(size, Image.LANCZOS)
+                rgb = rgb.resize(size, Image.Resampling.LANCZOS)
             writer.send(rgb.tobytes())
     except Exception as exc:  # noqa: BLE001 — surface ffmpeg's reason
         raise VideoError(f"Could not write the video: {exc}") from exc

@@ -28,7 +28,7 @@ import json
 import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, cast
 
 from PIL import Image, ImageChops, ImageFilter, ImageStat
 
@@ -905,7 +905,8 @@ def plan_edit(llm: LLMClient, prompt: str, has_mask: bool,
         return None
     if not data:
         return None
-    raw = data.get("steps") if isinstance(data.get("steps"), list) else [data]
+    raw = (cast("list[Any]", data.get("steps"))
+           if isinstance(data.get("steps"), list) else [data])
     steps: list[dict[str, Any]] = []
     for item in raw[:3]:
         if not isinstance(item, dict):
@@ -1577,7 +1578,7 @@ def objective_report(before: Image.Image, after: Image.Image,
     b = before.convert("RGB")
     a = after.convert("RGB")
     size_ratio = (a.width * a.height) / max(1, b.width * b.height)
-    aligned = a if a.size == b.size else a.resize(b.size, Image.LANCZOS)
+    aligned = a if a.size == b.size else a.resize(b.size, Image.Resampling.LANCZOS)
     diff = ImageChops.difference(aligned.convert("L"), b.convert("L"))
     changed = diff.point(lambda v: 255 if v > 8 else 0)
     change_fraction = mask_fraction(changed)
@@ -1731,7 +1732,7 @@ def _colour_share(image: Image.Image, mask: Image.Image,
         scale = 512 / max(image.size)
         image = image.resize((max(1, int(image.width * scale)),
                               max(1, int(image.height * scale))),
-                             Image.LANCZOS)
+                             Image.Resampling.LANCZOS)
     h, sat, val = image.convert("HSV").split()
     m = fit_mask(mask, image.size).point(lambda v: 255 if v >= 128 else 0)
     total = _count(m)
@@ -1828,9 +1829,9 @@ def region_change(before: Image.Image, after: Image.Image,
     if max(b.size) > 512:
         scale = 512 / max(b.size)
         b = b.resize((max(1, int(b.width * scale)),
-                      max(1, int(b.height * scale))), Image.LANCZOS)
+                      max(1, int(b.height * scale))), Image.Resampling.LANCZOS)
     if a.size != b.size:
-        a = a.resize(b.size, Image.LANCZOS)
+        a = a.resize(b.size, Image.Resampling.LANCZOS)
     m = fit_mask(mask, b.size).point(lambda v: 255 if v >= 128 else 0)
     n = m.histogram()[255]
     if not n:
@@ -1856,9 +1857,9 @@ def image_change(before: Image.Image, after: Image.Image) -> float:
     if max(b.size) > 384:
         scale = 384 / max(b.size)
         b = b.resize((max(1, int(b.width * scale)),
-                      max(1, int(b.height * scale))), Image.LANCZOS)
+                      max(1, int(b.height * scale))), Image.Resampling.LANCZOS)
     if a.size != b.size:
-        a = a.resize(b.size, Image.LANCZOS)
+        a = a.resize(b.size, Image.Resampling.LANCZOS)
     r1, g1, b1 = ImageChops.difference(a, b).split()
     peak = ImageChops.lighter(ImageChops.lighter(r1, g1), b1)
     total = sum(i * c for i, c in enumerate(peak.histogram()))
@@ -1990,7 +1991,8 @@ def inspect_seams(critic: Any, edited: Image.Image,
             view = edited
             if aligned is not None and aligned.getbbox():
                 # zoom the model in on the edit (plus generous margin)
-                left, top, right, bottom = aligned.getbbox()
+                left, top, right, bottom = cast(
+                    "tuple[int, int, int, int]", aligned.getbbox())
                 mw = int((right - left) * 0.3) + 24
                 mh = int((bottom - top) * 0.3) + 24
                 view = edited.crop((max(0, left - mw), max(0, top - mh),
@@ -2377,8 +2379,9 @@ def better_candidate(candidate: dict[str, int] | None,
         return False
     if ob is None:
         return True
-    pa_new = candidate.get("prompt_accuracy", 0)
-    pa_old = best.get("prompt_accuracy", 0)
+    # overall() returned non-None for both, so neither dict is None here.
+    pa_new = candidate.get("prompt_accuracy", 0)  # type: ignore[union-attr]
+    pa_old = best.get("prompt_accuracy", 0)  # type: ignore[union-attr]
     if pa_new < pa_old - tolerance:
         return False
     if pa_new > pa_old + 10 and oc >= ob - 10:

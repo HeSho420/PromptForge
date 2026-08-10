@@ -26,7 +26,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol, cast
 
 from PIL import (
     Image,
@@ -103,6 +103,12 @@ from .workflow_ai import WorkflowGenerationError, WorkflowGenerator
 def _url_filename(url: str | None) -> str:
     from urllib.parse import urlparse
     return Path(urlparse(url or "").path).name
+
+
+class _GreyPixels(Protocol):
+    """Pixel access of an in-memory "L" image: one int per coordinate."""
+
+    def __getitem__(self, xy: tuple[int, int]) -> int: ...
 
 
 # Registry seed: models the ComfyUI path will need. URLs/checksums are filled
@@ -771,7 +777,8 @@ class _Attempt:
                 and self.accuracy() is not None
                 and other.accuracy() is not None
                 and self.accuracy() != other.accuracy()):
-            return self.accuracy() > other.accuracy()
+            # Non-None per the elif; mypy cannot narrow across method calls.
+            return self.accuracy() > other.accuracy()  # type: ignore[operator]
         s_new = self.crit.score if self.crit else None
         s_old = other.crit.score if other.crit else None
         if s_new is None:
@@ -856,7 +863,8 @@ class _TextMaskWorker:
 
         def read() -> None:
             try:
-                box[0] = proc.stdout.readline() if proc.stdout else None
+                # proc=None only surfaces here as the except arm's None.
+                box[0] = proc.stdout.readline() if proc.stdout else None  # type: ignore[union-attr]
             except Exception:  # noqa: BLE001 — surfaced as None
                 box[0] = None
 
@@ -1289,12 +1297,12 @@ class Services:
             # AMD/Intel machines have no nvidia-smi; at least NAME the GPU
             # so the other machine's Network view is not blank about it.
             try:
-                out = subprocess.run(
+                ps = subprocess.run(
                     ["powershell", "-NoProfile", "-Command",
                      "(Get-CimInstance Win32_VideoController | "
                      "Select-Object -First 1 -ExpandProperty Name)"],
                     capture_output=True, text=True, timeout=6)
-                name = (out.stdout or "").strip()
+                name = (ps.stdout or "").strip()
                 if name:
                     stats["gpu_name"] = name
             except Exception:  # noqa: BLE001
@@ -1817,7 +1825,7 @@ class Services:
             job.log("info", "Skipping the scene analysis — this edit goes to "
                             "Kontext, which reads the picture itself")
             scene_graph: dict[str, Any] = {}
-            scene = ""
+            scene: str | None = ""
         else:
             scene_graph = self._scene_graph(job, asset_id, image, real)
             scene = scene_module.summary(scene_graph)
@@ -2000,7 +2008,7 @@ class Services:
                                 f"{choice.reason.capitalize()}. Paint the "
                                 "region yourself if it is there and I have "
                                 "missed it.")
-                        mask = choice.mask
+                        mask = cast(Image.Image, choice.mask)  # ok-checked
                         mask_source = choice.source
                         job.log("info", f"Region selected by {choice.source}"
                                 + (f" — {'; '.join(choice.notes)}"
@@ -2117,7 +2125,8 @@ class Services:
                         # the parameter exists.
                         extra = ({"denoise": inpaint_denoise}
                                  if inpaint_denoise is not None else {})
-                        res = self.inpainting.inpaint(
+                        # Kwargs the supports-check above proved available.
+                        res = self.inpainting.inpaint(  # type: ignore[call-arg]
                             current, mask, step_positive,
                             negative=enh["negative"],
                             checkpoint=ckpt, variant=variant or "modern",
@@ -2209,7 +2218,7 @@ class Services:
                                     "moving the subject into a new pose")
                     # Reset the vacated-share measurement; the render below
                     # fills it in and the verify stage reads it (D19).
-                    self._pose_vacated_share = None
+                    self._pose_vacated_share: float | None = None
                     current = self._render_pose_step(
                         job, current, step["instruction"],
                         with_scene(enh["positive"]), enh["negative"],
@@ -2667,7 +2676,8 @@ class Services:
                             tried_ckpts.add(recipe.get("checkpoint"))
                             tried_variants.add(recipe.get("variant"))
                             if can_swap_model:
-                                res2 = self.inpainting.inpaint(
+                                # Kwargs gated on the adapter's capability.
+                                res2 = self.inpainting.inpaint(  # type: ignore[call-arg]
                                     final_input, last_mask, retry_pos,
                                     negative=last_negative, **recipe)
                             else:
@@ -2778,7 +2788,8 @@ class Services:
                         and last_mask is not None
                         and (quality.region_change(final_input, candidate,
                                                    last_mask) or 1.0) < 0.02)
-                    pa2 = scores2.get("prompt_accuracy", 0)
+                    # overall(scores2) was non-None, so scores2 is a dict.
+                    pa2 = scores2.get("prompt_accuracy", 0)  # type: ignore[union-attr]
                     pab = (best_scores or {}).get("prompt_accuracy", 0)
                     # Prompt fidelity gates first: fewer unmet requirements
                     # wins outright, and more unmet requirements loses
@@ -2885,7 +2896,7 @@ class Services:
         if (current.size != image.size
                 and abs(current.width - image.width) <= 8
                 and abs(current.height - image.height) <= 8):
-            current = current.resize(image.size, Image.LANCZOS)
+            current = current.resize(image.size, Image.Resampling.LANCZOS)
             job.log("info", f"Output restored to the input's exact size "
                             f"({image.width}x{image.height}) — the renderer "
                             "works in multiples of 8 and had trimmed the "
@@ -2957,8 +2968,9 @@ class Services:
                             "the first")
             return mask
         job.log("info", f"Mask corrected via {choice.source}")
-        self._save_step_mask(job, asset_id, choice.mask, "corrected mask")
-        return choice.mask
+        corrected = cast(Image.Image, choice.mask)  # ok-checked above
+        self._save_step_mask(job, asset_id, corrected, "corrected mask")
+        return corrected
 
     def _face_drift(self, job: Job, before: Image.Image,
                     after: Image.Image) -> float | None:
@@ -2976,7 +2988,7 @@ class Services:
         b = before.convert("L").crop(box)
         aligned = after
         if aligned.size != before.size:
-            aligned = aligned.resize(before.size, Image.LANCZOS)
+            aligned = aligned.resize(before.size, Image.Resampling.LANCZOS)
         a = aligned.convert("L").crop(box)
         diff = ImageChops.difference(a, b)
         changed = diff.point(lambda v: 255 if v > 12 else 0)
@@ -3281,7 +3293,7 @@ class Services:
         Skin texture, features and edges are the input's; only the shading,
         direction and colour temperature come from the render."""
         original = original.convert("RGB")
-        relit = relit.convert("RGB").resize(original.size, Image.LANCZOS)
+        relit = relit.convert("RGB").resize(original.size, Image.Resampling.LANCZOS)
         # Large enough to carry illumination, far too large to carry features.
         radius = max(6, int(max(original.size) * 0.04))
         blur = ImageFilter.GaussianBlur(radius)
@@ -3328,7 +3340,7 @@ class Services:
         except Exception:  # noqa: BLE001 — the caller falls back
             return None
         if mask.size != image.size:
-            mask = mask.resize(image.size, Image.NEAREST)
+            mask = mask.resize(image.size, Image.Resampling.NEAREST)
         return mask if mask.getbbox() else None
 
     # CLIPSeg's own confidence, below which it is saying "I do not see that".
@@ -3414,7 +3426,7 @@ class Services:
                 return None, report
             mask = Image.open(out).convert("L")
             if mask.size != image.size:
-                mask = mask.resize(image.size, Image.NEAREST)
+                mask = mask.resize(image.size, Image.Resampling.NEAREST)
             return (mask if mask.getbbox() else None), report
 
     def preview_region(self, image: Image.Image,
@@ -3982,7 +3994,7 @@ class Services:
             job.log("info", f"Face detection failed: {exc}")
             return None
         if features.size != image.size:
-            features = features.resize(image.size, Image.NEAREST)
+            features = features.resize(image.size, Image.Resampling.NEAREST)
         anchor = features.point(lambda v: 255 if v > 127 else 0).getbbox()
         if not anchor or (anchor[2] - anchor[0]) < 12 or \
                 (anchor[3] - anchor[1]) < 12:
@@ -4012,7 +4024,7 @@ class Services:
         # The matte is the skin pass CLIPPED to that box, so torso skin can
         # never join the face however much of it the parser labelled.
         if surface is not None and surface.size != image.size:
-            surface = surface.resize(image.size, Image.NEAREST)
+            surface = surface.resize(image.size, Image.Resampling.NEAREST)
         mask = Image.new("L", image.size, 0)
         source = surface if surface is not None else features
         mask.paste(source.crop(box), (box[0], box[1]))
@@ -4061,7 +4073,7 @@ class Services:
         tw, th = dst_box[2] - dst_box[0], dst_box[3] - dst_box[1]
         scale = min(tw / face.width, th / face.height)
         face = face.resize((max(1, int(face.width * scale)),
-                            max(1, int(face.height * scale))), Image.LANCZOS)
+                            max(1, int(face.height * scale))), Image.Resampling.LANCZOS)
         # Centre it on the target face's centre, so eyes land near eyes.
         cx = (dst_box[0] + dst_box[2]) // 2
         cy = (dst_box[1] + dst_box[3]) // 2
@@ -4240,7 +4252,7 @@ class Services:
         if subject is None:
             return posed
         if posed.size != original.size:
-            posed = posed.resize(original.size, Image.LANCZOS)
+            posed = posed.resize(original.size, Image.Resampling.LANCZOS)
         new_subject = None
         if self._pack_active("rmbg"):
             new_subject = self._region_mask(posed, "BiRefNetRMBG", {
@@ -4278,7 +4290,9 @@ class Services:
                             "pose covers where the old one was")
             return out
         try:
-            filled = self.inpainting.inpaint(
+            # `negative` is unknown to simple adapters; the except keeps
+            # the plain paste usable either way.
+            filled = self.inpainting.inpaint(  # type: ignore[call-arg]
                 out, hole,
                 "continue the existing background, empty scene, no people",
                 negative="person, figure, limbs, duplicate, text, watermark")
@@ -4387,7 +4401,7 @@ class Services:
         scale = (megapixels * 1e6 / (w * h)) ** 0.5
         return image.resize((max(256, round(w * scale / 16) * 16),
                              max(256, round(h * scale / 16) * 16)),
-                            Image.LANCZOS)
+                            Image.Resampling.LANCZOS)
 
     def kontext_ready(self) -> tuple[bool, str]:
         """Can FLUX.1 Kontext run right now — template, weights, memory, and
@@ -4459,7 +4473,8 @@ class Services:
                             "Switching this step to the masked inpaint "
                             "engine.")
             memo.add(instruction)
-            job._kontext_declined = memo
+            # Deliberately dynamic: a per-job memo, read back via getattr.
+            job._kontext_declined = memo  # type: ignore[attr-defined]
             return self._inpaint_fallback(job, image, instruction)
         return self._restore_resolution(job, out, image.size)
 
@@ -4481,7 +4496,9 @@ class Services:
         variant, checkpoint = self._choose_inpaint(job, instruction)
         enh = quality.enhance_prompt(self.llm, instruction, "inpaint")
         try:
-            result = self.inpainting.inpaint(
+            # Kwargs beyond the base signature; the except handles adapters
+            # without them.
+            result = self.inpainting.inpaint(  # type: ignore[call-arg]
                 image, mask, enh["positive"],
                 negative=enh["negative"],
                 checkpoint=checkpoint,
@@ -4509,18 +4526,18 @@ class Services:
         # from a model upscale and free.
         if min(size[0] / max(1, image.size[0]),
                size[1] / max(1, image.size[1])) < 1.1:
-            return image.resize(size, Image.LANCZOS)
+            return image.resize(size, Image.Resampling.LANCZOS)
         if not self._template_runnable("upscale")[0]:
-            return image.resize(size, Image.LANCZOS)
+            return image.resize(size, Image.Resampling.LANCZOS)
         try:
             bigger = self._render_template_step(job, "upscale", image, "")
             job.log("info", f"[stage] upscale — restored {size[0]}×{size[1]} "
                             "with the detail-preserving upscaler")
-            return bigger.resize(size, Image.LANCZOS)
+            return bigger.resize(size, Image.Resampling.LANCZOS)
         except Exception as exc:  # noqa: BLE001 — the edit itself is done
             job.log("info", f"The upscaler did not run ({exc}); the edit was "
                             "resized back to its original size instead")
-            return image.resize(size, Image.LANCZOS)
+            return image.resize(size, Image.Resampling.LANCZOS)
 
     def _render_template_step(self, job: Job, task: str, image: Image.Image,
                               positive: str, negative: str = "",
@@ -4699,8 +4716,11 @@ class Services:
                 "download it from the Models page and run this again.")
         if not model.sha256 and (model.meta or {}).get("repo"):
             try:
-                for f in self.model_search.list_weight_files(model.meta["repo"]):
-                    if f.filename == model.meta.get("file") and f.sha256:
+                # meta is non-None: the repo key above came out of it.
+                for f in self.model_search.list_weight_files(
+                        model.meta["repo"]):  # type: ignore[index]
+                    if (f.filename == model.meta.get("file")  # type: ignore[union-attr]
+                            and f.sha256):
                         model.sha256 = f.sha256
                         self.registry.register(model)
                         job.log("info", f"Verified checksum for '{name}' "
@@ -5527,9 +5547,11 @@ class Services:
                     # have withheld one, so this is a belt-and-braces skip
                     # rather than a licence to abandon a working template for
                     # a minutes-long custom design.
-                    job.log("info", f"The '{triage.get('workflow')}' template "
-                                    "pins its own model — skipping the "
-                                    "change-model step")
+                    # Reaching a template rung implies triage ran.
+                    job.log("info",
+                            f"The '{triage.get('workflow')}' "  # type: ignore[union-attr]
+                            "template pins its own model — skipping the "
+                            "change-model step")
                     return None, context
             new_context = self._plan_context(job, task, prompt,
                                              strategy.checkpoint, ckpts,
@@ -5815,7 +5837,8 @@ class Services:
             if self.comfy.is_up():  # someone else already revived it
                 return True
             try:
-                py = self._comfy_python(base)
+                # main.exists() above proves base is a real Path.
+                py = self._comfy_python(cast(Path, base))
             except PermanentError:
                 py = sys.executable
             args = [py, str(main), "--listen", "127.0.0.1"]
@@ -6589,9 +6612,10 @@ class Services:
 
         if used_template:
             gen = template_gen
-            model_note = f"template: {triage['workflow']}"
+            # used_template is only ever set from a non-None triage.
+            model_note = f"template: {triage['workflow']}"  # type: ignore[index]
             job.log("info", f"[stage] plan — using the "
-                            f"'{triage['workflow']}' template (chosen by "
+                            f"'{triage['workflow']}' template (chosen by "  # type: ignore[index]
                             "triage; its models are ready)")
             context = self._plan_context(job, task, prompt, chosen, ckpts,
                                          image_context)
@@ -6665,7 +6689,8 @@ class Services:
             "prompt": prompt[:300],
             "prompt_enhanced": (prompt_used[:300]
                                 if prompt_used != prompt else None),
-            "workflow": (f"{triage['workflow']} template" if used_template
+            # used_template is only ever set from a non-None triage.
+            "workflow": (f"{triage['workflow']} template" if used_template  # type: ignore[index]
                          else "LLM-planned custom graph"
                          + (f" (reference template: {triage['workflow']})"
                             if triage and triage.get("workflow") else "")),
@@ -6711,7 +6736,9 @@ class Services:
             pad_x = int((box[2] - box[0]) * 0.08) + 8
             pad_y = int((box[3] - box[1]) * 0.08) + 8
             cut = Image.new("RGB", subject.size, (128, 128, 128))
-            cut.paste(subject, (0, 0), quality.fit_mask(mask, subject.size))
+            # box came from mask.getbbox(), so mask cannot be None here.
+            cut.paste(subject, (0, 0),
+                      quality.fit_mask(cast(Image.Image, mask), subject.size))
             subject = cut.crop((max(0, box[0] - pad_x), max(0, box[1] - pad_y),
                                 min(subject.width, box[2] + pad_x),
                                 min(subject.height, box[3] + pad_y)))
@@ -6719,7 +6746,7 @@ class Services:
         square = Image.new("RGB", (side, side), (128, 128, 128))
         square.paste(subject, ((side - subject.width) // 2,
                                (side - subject.height) // 2))
-        return square.resize((size, size), Image.LANCZOS)
+        return square.resize((size, size), Image.Resampling.LANCZOS)
 
     @staticmethod
     def _orbit_frames(total: int, wanted: int, span: float) -> list[int]:
@@ -6981,7 +7008,7 @@ class Services:
         if not self._pack_active("rmbg"):
             return None
         try:
-            scaled = [f.convert("RGB").resize(size, Image.LANCZOS)
+            scaled = [f.convert("RGB").resize(size, Image.Resampling.LANCZOS)
                       for f in frames]
             name = self.comfy.upload_frames(scaled, "motion_src")
             graph = {
@@ -7100,7 +7127,7 @@ class Services:
                 "prompt": positive,
                 "reference": self.comfy.upload_image(reference, "motion_ref"),
                 "control": self.comfy.upload_frames(
-                    [f.resize((w, h), Image.LANCZOS) for f in piece],
+                    [f.resize((w, h), Image.Resampling.LANCZOS) for f in piece],
                     "motion_ctrl", fps),
                 "width": w, "height": h, "length": length,
                 "strength": float(p.get("strength") or 1.0),
@@ -7244,7 +7271,7 @@ class Services:
                         clip.convert("RGB"), "vup")
                     graph = build_workflow(template, {"image": frame_name})
                     out, _pid = self.comfy.run_graph(graph)
-                    frames.append(out.resize(target, Image.LANCZOS))
+                    frames.append(out.resize(target, Image.Resampling.LANCZOS))
                     if (i + 1) % 12 == 0:
                         job.log("info", f"Upscaled {i + 1}/{n} frames")
             # Was written lossy at quality=90, which is exactly the setting
@@ -7390,10 +7417,10 @@ class Services:
         try:
             with Image.open(asset.path) as clip:
                 clip.seek(0)
-                first = clip.convert("RGB").resize((64, 64), Image.LANCZOS)
+                first = clip.convert("RGB").resize((64, 64), Image.Resampling.LANCZOS)
         except Exception:  # noqa: BLE001 — advisory only, never fails a job
             return None
-        ref = source.convert("RGB").resize((64, 64), Image.LANCZOS)
+        ref = source.convert("RGB").resize((64, 64), Image.Resampling.LANCZOS)
         a = [p / 255.0 for p in ref.tobytes()]
         b = [p / 255.0 for p in first.tobytes()]
         drift = sum(abs(x - y)
@@ -7487,7 +7514,7 @@ class Services:
         Used to pick the best photo out of a set rather than the first one.
         Resized first so the score compares like with like across a dataset
         of mixed resolutions."""
-        grey = image.convert("L").resize((256, 256), Image.LANCZOS)
+        grey = image.convert("L").resize((256, 256), Image.Resampling.LANCZOS)
         return float(ImageStat.Stat(grey.filter(ImageFilter.FIND_EDGES)).var[0])
 
     # Bins ordered by how much of the subject's front they show. SV3D was
@@ -7514,7 +7541,7 @@ class Services:
         fragment, and a fragment reconstructs as a fragment."""
         m = mask.convert("L").point(lambda v: 255 if v > 127 else 0)
         w, h = m.size
-        px = m.load()
+        px = cast(_GreyPixels, m.load())
         box = m.getbbox()
         if not box or w < 2 or h < 2:
             return 1.0
@@ -7651,7 +7678,7 @@ class Services:
     def _subject_edges(self, matte: Image.Image) -> dict[str, float]:
         """How much of each frame edge the subject occupies, 0..1."""
         w, h = matte.size
-        px = matte.convert("L").load()
+        px = cast(_GreyPixels, matte.convert("L").load())
         thresh = 128
         top = sum(1 for x in range(w) if px[x, 0] > thresh) / max(1, w)
         bottom = sum(1 for x in range(w) if px[x, h - 1] > thresh) / max(1, w)
@@ -8207,13 +8234,13 @@ class Services:
         import numpy as np
         size = (512, 512)
         mask = np.asarray(alpha.convert("L").resize(size,
-                                                    Image.NEAREST)) > 127
+                                                    Image.Resampling.NEAREST)) > 127
         if not mask.any():
             return 0.0, 0.0, 255.0
         out: list[float] = []
         arrs: list[Any] = []
         for img in (before, after):
-            small = img.convert("RGB").resize(size, Image.LANCZOS)
+            small = img.convert("RGB").resize(size, Image.Resampling.LANCZOS)
             grey = small.convert("L")
             med = grey.filter(ImageFilter.MedianFilter(3))
             g = np.asarray(grey, float)
@@ -8288,7 +8315,7 @@ class Services:
                 try:
                     before = Image.open(raster).convert("RGB")
                     small = before.copy()
-                    small.thumbnail((1024, 1024), Image.LANCZOS)
+                    small.thumbnail((1024, 1024), Image.Resampling.LANCZOS)
                     graph = build_workflow(template, {
                         "prompt": self._REFINE_PROMPT,
                         "image": self.comfy.upload_image(
@@ -8302,7 +8329,7 @@ class Services:
                     # through the upscale model evicted Kontext every
                     # single view and the reload dwarfed the repaint.
                     out = out.convert("RGB").resize(
-                        (report["tile"], report["tile"]), Image.LANCZOS)
+                        (report["tile"], report["tile"]), Image.Resampling.LANCZOS)
                 except Exception as exc:  # noqa: BLE001
                     skipped.append({"view": i, "why": str(exc)[:80]})
                     continue
@@ -8677,7 +8704,8 @@ class Services:
             return None
         # Geometry only is what the model gives; the colour comes from the
         # photographs. Guarded: a mesh without colour still beats no mesh.
-        textured_here, report = False, {}
+        textured_here = False
+        report: dict[str, Any] = {}
         if not texture:
             job.log("info", "Texturing is switched off — the mesh is bare "
                             "geometry, which is what you want if you are "
@@ -8875,7 +8903,8 @@ class Services:
                     "background": "Alpha", "background_color": "#222222"})
             if mask is None and point_capable:
                 try:
-                    mask = self.segmentation.point_mask(
+                    # hasattr-probed above (point_capable); SAM-only method.
+                    mask = self.segmentation.point_mask(  # type: ignore[attr-defined]
                         image, image.width // 2, image.height // 2)
                     job.log("info", "BiRefNet unavailable — fell back to a "
                                     "SAM click, which often selects only part "
@@ -9157,7 +9186,7 @@ class Services:
                 # One batch means one shape: match the reference photo.
                 size = frames[0].size
                 frames = [f if f.size == size else f.resize(size,
-                                                            Image.LANCZOS)
+                                                            Image.Resampling.LANCZOS)
                           for f in frames]
                 name = self.comfy.upload_frames(frames, "identity_ref", 1)
                 job.log("info", f"Identity built from {len(frames)} consented "

@@ -17,6 +17,7 @@ Handlers signal error kinds by raising:
 """
 from __future__ import annotations
 
+import builtins
 import json
 import sqlite3
 import threading
@@ -139,7 +140,7 @@ class JobQueue:
         self._worker = threading.Thread(target=self._run, name="pf-worker", daemon=True)
         self._worker.start()
 
-    def start_helper(self, gate, wrap, types: set[str]) -> None:
+    def start_helper(self, gate, wrap, types: set[str] | frozenset[str]) -> None:
         """A SECOND worker that exists to hand work to an idle network peer.
 
         It takes a pending job only when the main worker is already busy,
@@ -500,7 +501,8 @@ class JobQueue:
             # one late write must never crash the worker thread.
             pass
 
-    def recent_durations(self, job_type: str, limit: int = 20) -> list[float]:
+    # builtins-qualified: this class's own .list method shadows the name here.
+    def recent_durations(self, job_type: str, limit: int = 20) -> builtins.list[float]:
         """Wall-clock RENDER seconds of the most recent COMPLETED jobs of a
         type — used to estimate expected render time from real history.
 

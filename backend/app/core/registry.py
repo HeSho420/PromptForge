@@ -13,6 +13,7 @@ ready model.
 """
 from __future__ import annotations
 
+import builtins
 import hashlib
 import json
 import shutil
@@ -124,7 +125,8 @@ class ModelRegistry:
         m = self.get(name)
         return bool(m and m.status == "ready" and m.path and Path(m.path).exists())
 
-    def reset_stale(self) -> list[str]:
+    # builtins-qualified: this class's own .list method shadows the name here.
+    def reset_stale(self) -> builtins.list[str]:
         """Flip any model left in 'downloading' (a crash mid-download) back to
         'not_downloaded' so its Download button reappears and a fresh attempt
         can resume from the partial .part file. Returns the names reset."""

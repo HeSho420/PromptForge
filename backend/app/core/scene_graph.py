@@ -13,7 +13,7 @@ a render.
 from __future__ import annotations
 
 import re
-from typing import Any
+from typing import Any, cast
 
 from PIL import Image
 
@@ -48,7 +48,9 @@ def _palette(image: Image.Image, k: int = 5) -> list[list[int]]:
     small = image.convert("RGB").resize((64, 64))
     quant = small.quantize(colors=k, method=Image.Quantize.FASTOCTREE)
     pal = quant.getpalette() or []
-    counts = sorted(quant.getcolors() or [], reverse=True)
+    # A quantized (P-mode) image counts palette indices, not colour tuples.
+    counts = sorted(cast("list[tuple[int, int]]", quant.getcolors() or []),
+                    reverse=True)
     out: list[list[int]] = []
     for _count, idx in counts[:k]:
         out.append([pal[idx * 3], pal[idx * 3 + 1], pal[idx * 3 + 2]])

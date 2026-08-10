@@ -37,7 +37,7 @@ import urllib.request
 from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from urllib.parse import quote, unquote
 
 log = logging.getLogger("promptforge.peers")
@@ -65,6 +65,19 @@ class Peer:
         return {"name": self.name, "host": self.host, "port": self.port,
                 "static": self.static,
                 "seen_ago_s": round(time.time() - self.last_seen, 1)}
+
+
+class _PeerHandler(BaseHTTPRequestHandler):
+    """Module-level so PeerService's route methods can be typed against
+    the class that actually carries the _json helper."""
+
+    def _json(self, code: int, payload: Any) -> None:
+        body = json.dumps(payload).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
 
 
 class PeerService:
@@ -161,19 +174,11 @@ class PeerService:
         service = self
         bind_host = "127.0.0.1" if self.loopback_only else "0.0.0.0"
 
-        class Handler(BaseHTTPRequestHandler):
+        class Handler(_PeerHandler):
             protocol_version = "HTTP/1.1"
 
             def log_message(self, *_args):  # keep the console quiet
                 pass
-
-            def _json(self, code: int, payload: Any) -> None:
-                body = json.dumps(payload).encode()
-                self.send_response(code)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Content-Length", str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
 
             def do_GET(self):  # noqa: N802
                 try:
@@ -268,7 +273,7 @@ class PeerService:
         self._comfy_cache = (time.time(), out)
         return out
 
-    def _handle_get(self, req: BaseHTTPRequestHandler) -> None:
+    def _handle_get(self, req: _PeerHandler) -> None:
         path = req.path.split("?", 1)[0]
         if path == "/pf-peer/info":
             # Every slow probe is served from cache and refreshed in the
@@ -321,7 +326,7 @@ class PeerService:
         "doctor-report.txt", "launch.log",
     })
 
-    def _serve_log(self, req: BaseHTTPRequestHandler, name: str) -> None:
+    def _serve_log(self, req: _PeerHandler, name: str) -> None:
         if not self.share:
             req._json(403, {"error": "sharing is off"})
             return
@@ -346,7 +351,7 @@ class PeerService:
         req.end_headers()
         req.wfile.write(data)
 
-    def _handle_post(self, req: BaseHTTPRequestHandler) -> None:
+    def _handle_post(self, req: _PeerHandler) -> None:
         path = req.path.split("?", 1)[0]
         if path.startswith("/pf-peer/comfy/"):
             length = int(req.headers.get("Content-Length") or 0)
@@ -411,7 +416,7 @@ class PeerService:
                         "meta": dict(m.meta or {})})
         return out
 
-    def _serve_model(self, req: BaseHTTPRequestHandler, name: str) -> None:
+    def _serve_model(self, req: _PeerHandler, name: str) -> None:
         m = self.registry.get(name)
         root = self.registry.models_dir.resolve()
         if m is None or m.status != "ready" or not m.path:
@@ -458,7 +463,7 @@ class PeerService:
                 req.wfile.write(chunk)
                 remaining -= len(chunk)
 
-    def _proxy(self, req: BaseHTTPRequestHandler, body: bytes | None) -> None:
+    def _proxy(self, req: _PeerHandler, body: bytes | None) -> None:
         """Forward one request to the local ComfyUI, policy first.
 
         The peer decides for itself: rendering for others can be switched
@@ -510,7 +515,8 @@ class PeerService:
         try:
             for info in socket.getaddrinfo(socket.gethostname(), None,
                                            socket.AF_INET):
-                ips.add(info[4][0])
+                # AF_INET sockaddr is (host, port); the host is a str.
+                ips.add(cast(str, info[4][0]))
         except OSError:
             pass
         try:
@@ -536,7 +542,7 @@ class PeerService:
                 "pf": 1, "token": self.token, "name": self.name,
                 "http": self.http_port}).encode()
             if self.loopback_only:
-                socks = []
+                socks: list[socket.socket] = []
                 targets = ["127.0.0.1"]
             else:
                 locals_ = self._local_ipv4s()

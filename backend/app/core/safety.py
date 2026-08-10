@@ -24,6 +24,7 @@ as "grass" matching "ass".
 """
 from __future__ import annotations
 
+import builtins
 import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -194,7 +195,8 @@ class SafetyRuleStore:
         self._db.execute("DELETE FROM safety_rules WHERE id=?", (rule_id,))
         return True
 
-    def compiled(self) -> list[tuple[str, re.Pattern[str], str]]:
+    # builtins-qualified: this class's own .list method shadows the name here.
+    def compiled(self) -> builtins.list[tuple[str, re.Pattern[str], str]]:
         """Live-compiled rules for the filter. Never memoized."""
         out: list[tuple[str, re.Pattern[str], str]] = []
         for r in self._db.query(

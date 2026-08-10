@@ -119,8 +119,9 @@ def _probe_ram_gb() -> float:
         return round(status.ullTotalPhys / 1024**3, 1)
     try:
         import os
-        return round(os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
-                     / 1024**3, 1)
+        return round(
+            os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")  # type: ignore[attr-defined]
+            / 1024**3, 1)
     except (ValueError, OSError, AttributeError):
         return 8.0
 

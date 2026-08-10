@@ -170,10 +170,11 @@ class WorkflowLibrary:
                 raise WorkflowValidationError(f"No template found for task '{task}'.")
             path = candidates[-1]
         else:
-            path = next((p for p in self._glob(f"{task}_v{version}.json")), None)
-            if path is None:
+            found = next((p for p in self._glob(f"{task}_v{version}.json")), None)
+            if found is None:
                 raise WorkflowValidationError(
                     f"Template {task}_v{version}.json does not exist.")
+            path = found
         template = json.loads(path.read_text())
         validate_workflow(template["graph"])
         return template

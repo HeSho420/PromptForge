@@ -74,7 +74,7 @@ def main() -> int:
         return 2
     out = Path(sys.argv[1])
     scene = trimesh.Scene()
-    report = []
+    report: list[dict] = []
     anchor: np.ndarray | None = None
     for i, path in enumerate(sys.argv[2:]):
         loaded = trimesh.load(path, force="scene")
