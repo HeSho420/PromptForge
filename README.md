@@ -135,7 +135,8 @@ touch it.
 
 (If PowerShell blocks the script: `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`, once.)
 
-**Linux/macOS** — backend (Python 3.12+, only Flask and Pillow needed):
+**Linux/macOS** — backend (Python 3.12+; Flask, Pillow, imageio-ffmpeg and
+the anthropic client — the app runs without API credentials):
 
 ```bash
 cd backend
@@ -159,7 +160,7 @@ automatically, so production use needs only `python run.py`.
 
 ```bash
 cd backend
-python3 -m unittest discover -s tests -v   # 94 tests, no network needed
+python3 -m unittest discover -s tests -v   # 800 tests, no network needed
 ruff check app tests                        # lint (pip install ruff)
 mypy app                                    # types (pip install mypy)
 
@@ -167,10 +168,11 @@ cd frontend
 npm run typecheck                           # strict tsc
 ```
 
-Tests use the mock adapters and `file://` download sources, so the whole suite
-runs offline in ~1 second. Nothing in the suite fakes a success state: the
-mock adapters really execute, files are really written, checksums are really
-verified.
+Tests use the mock adapters and `file://` download sources, so the whole
+suite runs offline — expect ~7 minutes, because nothing in it fakes a
+success state: the mock adapters really execute, real job pipelines run end
+to end, files are really written, and checksums are really verified. One
+test is skipped unless `PROMPTFORGE_LIVE_COMFYUI=1` opts into a real render.
 
 ## Configuration
 
