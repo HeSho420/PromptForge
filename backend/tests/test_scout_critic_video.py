@@ -158,6 +158,22 @@ class CriticTests(unittest.TestCase):
         crit = ImageCritic("http://127.0.0.1:11434/v1", "llava", http_post=post)
         self.assertEqual(crit.critique(self._img(), "x").score, 7.0)
 
+    def test_salvage_parses_whole_numbers_and_decimals(self):
+        """The old salvage regex read '0.5' as 5, truncated '8.75' to 8.0,
+        and could not match a two-digit '12' at all — raising 'unavailable'
+        and aborting a critique it should have salvaged."""
+        def crit_for(text):
+            return ImageCritic(
+                "http://127.0.0.1:11434/v1", "llava",
+                http_post=lambda u, p, t: {"message": {"content": text}})
+        # "12" salvages to a clamped 10, not an aborted critique.
+        self.assertEqual(crit_for("12").critique(self._img(), "x").score, 10.0)
+        # "0.5" is a terrible score, clamped to the 1.0 floor — not 5.
+        self.assertEqual(crit_for("0.5").critique(self._img(), "x").score, 1.0)
+        # A decimal keeps its precision.
+        self.assertEqual(crit_for("8.75").critique(self._img(), "x").score,
+                         8.75)
+
     def test_unreachable_raises_unavailable(self):
         def post(url, payload, timeout):
             raise OSError("refused")

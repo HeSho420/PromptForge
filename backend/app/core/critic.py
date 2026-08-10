@@ -108,8 +108,12 @@ class ImageCritic:
             score = float(parsed["score"])
             issues = [str(i) for i in parsed.get("issues", [])][:8]
         except (json.JSONDecodeError, KeyError, ValueError, TypeError):
-            # Salvage a bare number if the model rambled.
-            m = re.search(r"\b(10|[1-9])(?:\.\d)?\b", text)
+            # Salvage a bare number if the model rambled. Match a WHOLE
+            # number with its full decimals, then clamp: the old regex read
+            # "0.5" as 5, truncated "8.75" to 8.0, and — worse — could not
+            # match a two-digit "12" at all, raising CriticUnavailable and
+            # aborting a critique it should have salvaged as a 10.
+            m = re.search(r"\d{1,2}(?:\.\d+)?", text)
             if not m:
                 raise CriticUnavailable(
                     f"Critic reply unparseable: {text[:200]}") from None
