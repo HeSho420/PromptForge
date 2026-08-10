@@ -213,6 +213,25 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(change["task"], "inpaint")
         self.assertEqual(change["operation"], "CHANGE_ATTRIBUTE")
 
+    def test_no_planner_fallback_covers_every_capability(self):
+        """A machine with a flaky or absent LLM must not silently lose a
+        capability to a generic inpaint. Each intent reaches its own engine
+        in the no-planner fallback, matching what plan_edit gives an LLM
+        plan."""
+        for prompt, task in (
+            ("turn this into a 3D scene", "scene3d"),
+            ("make the image wider to 16:9", "outpaint"),
+            ("change her pose to sitting", "pose"),
+            ("show her from the side", "angles"),
+            ("relight this with warm sunset light", "relight"),
+        ):
+            with self.subTest(prompt=prompt):
+                self.assertEqual(
+                    quality.default_edit_step(prompt)["task"], task)
+        # scene3d is a mesh rebuild, not a repaint.
+        self.assertEqual(
+            quality.default_edit_step("make this 3D")["denoise"], 0.0)
+
     def test_a_lighting_miss_still_goes_to_relight(self):
         """'sunlit background' is a lighting miss, not a backdrop miss."""
         self.assertEqual(

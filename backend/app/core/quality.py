@@ -895,11 +895,28 @@ def default_edit_step(prompt: str) -> dict[str, Any]:
     base: dict[str, Any] = {
         "target": "", "instruction": prompt, "mask_adjust": "keep",
         "adjust_px": 0, "denoise": 0.6, "reason": ""}
-    if animate_intent(prompt):
-        return {**base, "task": "video", "operation": "ANIMATE"}
-    if background_intent(prompt):
-        return {**base, "task": "background",
-                "operation": "REPLACE_BACKGROUND"}
+    # Each capability, in the same precedence plan_edit applies to an LLM
+    # plan, mapped to (task, operation). A single-step fallback picks the
+    # first that matches — routing to the right engine can only beat the
+    # generic inpaint that used to swallow all of these (measured live:
+    # background left a grey wall grey; pose/angles/3D/format all fared no
+    # better because segmentation cannot deliver them). view before relight,
+    # exactly as plan_edit orders them.
+    intents: tuple[tuple[Callable[[str], bool], str, str], ...] = (
+        (animate_intent, "video", "ANIMATE"),
+        (scene3d_intent, "scene3d", "SCENE_3D"),
+        (format_intent, "outpaint", "OUTPAINT"),
+        (background_intent, "background", "REPLACE_BACKGROUND"),
+        (pose_intent, "pose", "CHANGE_POSE"),
+        (view_intent, "angles", "MULTI_VIEW"),
+        (light_intent, "relight", "CHANGE_LIGHTING"),
+    )
+    for detector, task, operation in intents:
+        if detector(prompt):
+            step = {**base, "task": task, "operation": operation}
+            if task == "scene3d":
+                step["denoise"] = 0.0  # a mesh rebuild, not a repaint
+            return step
     op = "ADD_OBJECT" if classify_edit(prompt) == "add" else "CHANGE_ATTRIBUTE"
     return {**base, "task": "inpaint", "operation": op}
 

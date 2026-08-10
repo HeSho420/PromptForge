@@ -1698,12 +1698,18 @@ class Services:
             step = quality.default_edit_step(prompt)
             steps = [step]
             if real:
-                job.log("info", "[llm] plan: " + {
-                    "video": "animate request — image-to-video (default)",
-                    "background": "background replacement (default) — "
-                                  "inverting the subject matte",
-                    "inpaint": "single inpaint step (default)",
-                }[step["task"]])
+                detail = {
+                    "video": "animate request — image-to-video",
+                    "background": "background replacement — inverting the "
+                                  "subject matte",
+                    "outpaint": "canvas extension",
+                    "pose": "pose change",
+                    "angles": "new camera angles",
+                    "scene3d": "3D scene rebuild",
+                    "relight": "relighting",
+                    "inpaint": "single inpaint step",
+                }.get(step["task"], step["task"])
+                job.log("info", f"[llm] plan: {detail} (default, no planner)")
         # A second image attached IS the request to combine them — whatever
         # the planner called the step. Deterministic, like the animate and
         # viewpoint guarantees: the user does not lose a capability because a
