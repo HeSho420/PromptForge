@@ -154,6 +154,28 @@ class JobQueueTests(unittest.TestCase):
         rows = self.db.query("SELECT state FROM jobs WHERE id=?", (job.id,))
         self.assertEqual(rows[0]["state"], "completed")
 
+    def test_unserializable_result_does_not_kill_the_worker(self):
+        """A handler is supposed to return a JSON-serializable dict. One that
+        returns a set/bytes/object would raise TypeError inside _persist,
+        killing the worker thread and stopping the whole queue. Persistence
+        must survive it: the job still reaches a terminal state, the row is
+        written, and the NEXT job still runs."""
+        self.q.register("bad", lambda job: {"weird": {1, 2, 3}})  # a set
+        self.q.register("ok", lambda job: {"x": 1})
+        self.q.start()
+        bad = self.q.enqueue("bad", {})
+        done = self.q.wait_for(bad.id, timeout=5)
+        self.assertEqual(done.state, JobState.COMPLETED)
+        # The row persisted with a marker instead of crashing.
+        row = self.db.query("SELECT state, result FROM jobs WHERE id=?",
+                            (bad.id,))[0]
+        self.assertEqual(row["state"], "completed")
+        self.assertIn("not serializable", row["result"] or "")
+        # The worker is still alive — a following job completes.
+        good = self.q.enqueue("ok", {})
+        self.assertEqual(self.q.wait_for(good.id, timeout=5).state,
+                         JobState.COMPLETED)
+
 
 if __name__ == "__main__":
     unittest.main()

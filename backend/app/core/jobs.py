@@ -494,8 +494,24 @@ class JobQueue:
         job.state = state
 
     # -- persistence (job history survives restarts) --------------------------
+    @staticmethod
+    def _safe_json(value: Any, fallback: str) -> str:
+        """json.dumps that cannot raise. A handler is supposed to return a
+        JSON-serializable dict, but one that returns a PIL image, a set or
+        bytes would otherwise raise TypeError HERE — inside the worker
+        thread, killing it and stopping the WHOLE queue. The terminal state
+        still matters more than the payload, so a bad value is replaced by a
+        marker and the row is written with the right state."""
+        try:
+            return json.dumps(value)
+        except (TypeError, ValueError):
+            return fallback
+
     def _persist(self, job: Job, state: JobState | None = None) -> None:
         try:
+            result = (self._safe_json(job.result,
+                                      '{"error": "result was not serializable"}')
+                      if job.result else None)
             self._db.execute(
                 """INSERT INTO jobs (id, type, state, attempts, payload, result,
                                      error, logs, created_at, updated_at)
@@ -505,11 +521,11 @@ class JobQueue:
                      result=excluded.result, error=excluded.error,
                      logs=excluded.logs, updated_at=excluded.updated_at""",
                 (job.id, job.type, (state or job.state).value, job.attempts,
-                 json.dumps(job.payload),
-                 json.dumps(job.result) if job.result else None,
-                 job.error, json.dumps(job.logs), job.created_at, job.updated_at),
+                 self._safe_json(job.payload, "{}"), result,
+                 job.error, self._safe_json(job.logs, "[]"),
+                 job.created_at, job.updated_at),
             )
-        except sqlite3.OperationalError:
+        except sqlite3.Error:
             # The data directory can vanish under a worker mid-shutdown (or in
             # test teardown). Job history persistence is best-effort — losing
             # one late write must never crash the worker thread.
