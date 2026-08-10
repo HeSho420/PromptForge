@@ -2105,6 +2105,15 @@ class Services:
                         # tone and atmosphere may change, composition stays.
                         # An explicit REPLACE keeps full denoise — swapping
                         # the content is what was asked.
+                        #
+                        # Measured live (RTX 4060, universal template,
+                        # 512px skyline test): 0.45 changed almost nothing,
+                        # 0.6 kept every building and warmed the light,
+                        # 1.0 gave the dramatic sunset. 0.6 is the right
+                        # FLOOR — when the checklist later confirms the
+                        # asked-for change did not land, escalation (not a
+                        # bigger first guess) is the mechanism to spend
+                        # more denoise.
                         variant = "universal"
                         inpaint_denoise = 0.6
                         job.log("info", "Inpaint technique: whole-frame "
