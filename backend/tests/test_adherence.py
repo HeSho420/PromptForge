@@ -124,6 +124,16 @@ class AnswerMatchingTests(unittest.TestCase):
         nothing at all in common is still reported (and then confirmed)."""
         self.assertIs(quality.answer_verdict("a wooden chair", "red"), False)
 
+    def test_a_wrong_count_is_not_met_by_substring(self):
+        """A checklist count probe expects "2"; "12 people" CONTAINS "2" as a
+        substring, and the old fast-path marked the wrong count satisfied —
+        so the correction retry never fired. Whole-word containment only."""
+        self.assertIs(quality.answer_verdict("12 people", "2"), False)
+        self.assertIs(quality.answer_verdict("there are 21 birds", "2"), False)
+        # The right count still passes, by digit and by number word.
+        self.assertIs(quality.answer_verdict("2 people", "2"), True)
+        self.assertIs(quality.answer_verdict("two people", "2"), True)
+
     def test_the_text_model_settles_a_wording_disagreement(self):
         """When the words share nothing, the TEXT model is asked whether they
         mean the same thing. It never sees the image, so it cannot do what

@@ -2275,7 +2275,13 @@ def answer_verdict(answer: str, expect: str) -> bool | None:
         return negative
     if negative:
         return False
-    if e in a:
+    # WHOLE-word containment, not raw substring: "2" is a substring of "12",
+    # so a checklist probe expecting "2" (exactly two people) was marked met
+    # by an examiner answer of "12 people" — the wrong count reported
+    # satisfied, and the corrective retry the checklist exists to trigger
+    # silently skipped. Padding with spaces requires the expected phrase to
+    # appear as complete words ("red dress" still matches "a red dress").
+    if f" {e} " in f" {a} ":
         return True
     hits, total = _matched_tokens(answer, expect)
     if not total:
