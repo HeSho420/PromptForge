@@ -175,12 +175,18 @@ export function Workspace() {
         </span>
       </div>
 
-      <nav className="ws-modes" role="tablist" aria-label="What to do">
+      {/* A mode switcher, styled as a segmented control and operated as a
+          toggle-button group: aria-pressed states which mode is active, and
+          every mode stays Tab-reachable. A full ARIA tab widget was the
+          other option, but its roving tabindex takes the non-active modes
+          out of the Tab order — the wrong trade for primary navigation, and
+          the panels were never wired up as tabpanels to begin with. */}
+      <nav className="ws-modes" role="group" aria-label="What to do">
         {MODES.map((m) => (
           <button
             key={m.key}
-            role="tab"
-            aria-selected={mode === m.key}
+            type="button"
+            aria-pressed={mode === m.key}
             className={`ws-mode${mode === m.key ? " active" : ""}`}
             onClick={() => setMode(m.key)}
             title={m.hint}

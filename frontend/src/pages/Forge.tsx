@@ -251,13 +251,14 @@ export function Forge({ onBusy }: PanelProps = {}) {
       </p>
 
       <div className="panel stack" style={{ maxWidth: 760 }}>
-        <div className="seg" role="tablist" aria-label="Task type">
+        {/* Toggle-button group, not an ARIA tab widget (no tabpanels, no
+            arrow-key roving) — aria-pressed matches how it truly works. */}
+        <div className="seg" role="group" aria-label="Task type">
           {TASKS.map((t) => (
             <button
               key={t.key}
               type="button"
-              role="tab"
-              aria-selected={task === t.key}
+              aria-pressed={task === t.key}
               className={task === t.key ? "on" : ""}
               onClick={() => setTask(t.key)}
             >

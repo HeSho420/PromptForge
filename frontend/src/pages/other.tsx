@@ -202,13 +202,16 @@ export function Queue() {
       )}
 
       <div className="row" style={{ flexWrap: "wrap", gap: 8, marginBottom: 12 }}>
-        <div className="seg" role="tablist" aria-label="Filter jobs">
+        {/* A segmented control, not an ARIA tab widget: there are no
+            tabpanels and no arrow-key roving, so role=tab would promise a
+            keyboard model that isn't here. Toggle buttons in a labelled
+            group say exactly what this is — Tab to reach, Enter to pick. */}
+        <div className="seg" role="group" aria-label="Filter jobs">
           {QUEUE_FILTERS.map((f) => (
             <button
               key={f.key}
               type="button"
-              role="tab"
-              aria-selected={filter === f.key}
+              aria-pressed={filter === f.key}
               className={filter === f.key ? "on" : ""}
               onClick={() => setFilter(f.key)}
             >
@@ -734,11 +737,10 @@ function FindModelsOnline({ onProposed }: { onProposed: () => void }) {
     <div className="panel stack" style={{ marginTop: 20 }}>
       <div className="row" style={{ justifyContent: "space-between" }}>
         <h2 style={{ margin: 0 }}>Find models online</h2>
-        <div className="seg" role="tablist" aria-label="Model source">
+        <div className="seg" role="group" aria-label="Model source">
           <button
             type="button"
-            role="tab"
-            aria-selected={source === "civitai"}
+            aria-pressed={source === "civitai"}
             className={source === "civitai" ? "on" : ""}
             onClick={() => setSource("civitai")}
           >
@@ -746,8 +748,7 @@ function FindModelsOnline({ onProposed }: { onProposed: () => void }) {
           </button>
           <button
             type="button"
-            role="tab"
-            aria-selected={source === "hf"}
+            aria-pressed={source === "hf"}
             className={source === "hf" ? "on" : ""}
             onClick={() => setSource("hf")}
           >
