@@ -821,6 +821,136 @@ class EventLog:
             return n
 
 
+class _TextMaskWorker:
+    """The CLIPSeg text engine as a resident subprocess.
+
+    One-shot invocation paid a fresh torch import on EVERY regional edit —
+    measured 35s warm and 132s with the machine under load. Resident, the
+    model loads once and answers in ~2s (measured). The worker exits by
+    itself after 10 idle minutes (its --idle-exit flag) so the ~700 MB it
+    holds is only resident while edits are actually flowing; whoever asks
+    next just respawns it."""
+
+    IDLE_EXIT_S = 600.0
+    # First answer covers a torch import and, on the first run ever, the
+    # weight download — the same 300s budget the one-shot always had.
+    READY_TIMEOUT_S = 300.0
+    ASK_TIMEOUT_S = 120.0  # measured warm: 2-5s; generous for loaded machines
+
+    def __init__(self, python: str, tool: str):
+        self.python, self.tool = python, tool
+        self._proc: subprocess.Popen | None = None
+        self._lock = threading.Lock()
+
+    @property
+    def warm(self) -> bool:
+        proc = self._proc
+        return proc is not None and proc.poll() is None
+
+    def _readline(self, timeout: float) -> str | None:
+        """One stdout line, or None on timeout/EOF. Windows pipes cannot be
+        select()ed, so a throwaway reader thread carries the deadline; on
+        timeout the caller kills the process and the thread dies on EOF."""
+        box: list[str | None] = [None]
+        proc = self._proc
+
+        def read() -> None:
+            try:
+                box[0] = proc.stdout.readline() if proc.stdout else None
+            except Exception:  # noqa: BLE001 — surfaced as None
+                box[0] = None
+
+        t = threading.Thread(target=read, daemon=True)
+        t.start()
+        t.join(timeout)
+        return None if t.is_alive() else (box[0] or None)
+
+    def _read_json(self, timeout: float) -> dict | None:
+        """The next JSON object line, skipping any library chatter that
+        lands on stdout (hub warnings have been seen there)."""
+        deadline = time.monotonic() + timeout
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return None
+            line = self._readline(remaining)
+            if line is None:
+                return None
+            try:
+                data = json.loads(line)
+            except json.JSONDecodeError:
+                continue  # progress noise, not an answer
+            if isinstance(data, dict):
+                return data
+
+    def _spawn(self) -> bool:
+        try:
+            flags = 0x08000000 if os.name == "nt" else 0  # no console window
+            self._proc = subprocess.Popen(
+                [self.python, self.tool, "--serve",
+                 "--idle-exit", str(self.IDLE_EXIT_S)],
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL, text=True, bufsize=1,
+                creationflags=flags)
+        except OSError:
+            self._proc = None
+            return False
+        ready = self._read_json(self.READY_TIMEOUT_S)
+        if not (ready and ready.get("ready")):
+            self.stop(force=True)
+            return False
+        return True
+
+    def ask(self, src: str, out: str, phrases: list[str],
+            controls: list[str], threshold: float) -> dict | None:
+        """One segmentation via the resident engine; None means the engine
+        could not answer (the caller falls through to its next rung). Any
+        failure kills the process so the NEXT ask starts clean."""
+        with self._lock:
+            if not self.warm and not self._spawn():
+                return None
+            try:
+                assert self._proc is not None and self._proc.stdin is not None
+                self._proc.stdin.write(json.dumps(
+                    {"src": src, "out": out, "phrases": phrases,
+                     "controls": controls, "threshold": threshold}) + "\n")
+                self._proc.stdin.flush()
+            except (OSError, ValueError, AssertionError):
+                self.stop(force=True)
+                return None
+            answer = self._read_json(self.ASK_TIMEOUT_S)
+            if answer is None or answer.get("error"):
+                self.stop(force=True)
+                return None
+            return answer
+
+    def stop(self, force: bool = False) -> None:
+        """Kill the resident process. force=False is the memory-pressure
+        path: it declines rather than block behind (or corrupt) an ask in
+        flight — the idle watchdog reaps the process later anyway."""
+        if not force:
+            if not self._lock.acquire(blocking=False):
+                return
+            try:
+                self._kill()
+            finally:
+                self._lock.release()
+            return
+        self._kill()
+
+    def _kill(self) -> None:
+        proc, self._proc = self._proc, None
+        if proc is not None and proc.poll() is None:
+            try:
+                proc.kill()
+                # TerminateProcess returns before the process is gone; wait
+                # so the interpreter file is actually unlocked (Windows) and
+                # no zombie lingers.
+                proc.wait(timeout=5)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+
+
 class Services:
     def __init__(self, settings: Settings | None = None):
         self.settings = settings or Settings()
@@ -1046,6 +1176,8 @@ class Services:
             self.peers.stop()
         except Exception:  # noqa: BLE001
             pass
+        if self._text_mask_worker is not None:
+            self._text_mask_worker.stop(force=True)
         if self._monitor:
             self._monitor.join(timeout=2)
 
@@ -3166,6 +3298,8 @@ class Services:
     # 0.08-0.17 (shoes 0.081, necklace 0.168). The gap is wide enough that
     # this floor is not a fine judgement call.
     _TEXT_MASK_FLOOR = 0.45
+    _text_mask_worker: _TextMaskWorker | None = None
+    _text_mask_worker_lock = threading.Lock()
     # Per-image calibration on top of the absolute floor: the request's peak
     # must beat the best ABSENT-object control peak on the same image by
     # this margin. A single global floor cannot separate present from absent
@@ -3204,35 +3338,31 @@ class Services:
             python = self._comfy_python(base)
         except Exception:  # noqa: BLE001 — the caller falls back
             return None, {}
-        if log is not None:
-            # The engine is about to be silent for a while and the wait is
-            # structural: a fresh interpreter imports torch on every call
-            # (~35s measured warm), and the first call ever also fetches
-            # CLIPSeg's ~150 MB of weights. Say so — a stalled log line
-            # reads as a hang, and this step used to be exactly that.
-            log("Reading the request with the text engine — this loads a "
-                "model each time (~35s; the first run also downloads its "
-                "weights once)")
+        # Init under a lock: the peer-helper thread can run an image_edit
+        # concurrently with the main worker, and check-then-set here would
+        # give each its own 700 MB engine (the loser only self-reaps at the
+        # idle timeout).
+        with self._text_mask_worker_lock:
+            worker = self._text_mask_worker
+            if worker is None or worker.python != python:
+                worker = self._text_mask_worker = _TextMaskWorker(
+                    python, str(tool))
+        if log is not None and not worker.warm:
+            # Only the COLD start is slow (torch import, ~35s — minutes
+            # under load or on the first run ever while weights download);
+            # warm answers take ~2s and need no explanation. Say so — a
+            # stalled log line reads as a hang, and this step was one.
+            log("Starting the text engine — its model loads once (about "
+                "half a minute, longer on a busy machine or while its "
+                "weights first download) and later requests answer in "
+                "seconds")
         with tempfile.TemporaryDirectory() as tmp:
             src, out = Path(tmp) / "src.png", Path(tmp) / "mask.png"
             image.convert("RGB").save(src, format="PNG")
-            args = [python, str(tool), str(src), str(out)]
-            for phrase in phrases[:4]:
-                args += ["--phrase", phrase]
-            for control in self._TEXT_MASK_CONTROLS:
-                args += ["--control", control]
-            try:
-                proc = subprocess.run(args, capture_output=True, text=True,
-                                      timeout=300)
-            except Exception:  # noqa: BLE001
+            report = worker.ask(str(src), str(out), phrases[:4],
+                                list(self._TEXT_MASK_CONTROLS), 0.40)
+            if report is None or not out.exists():
                 return None, {}
-            if proc.returncode != 0 or not out.exists():
-                return None, {}
-            try:
-                report = json.loads(
-                    (proc.stdout or "{}").strip().splitlines()[-1])
-            except (json.JSONDecodeError, IndexError):
-                report = {}
             peak = float(report.get("peak", 0.0))
             if peak < self._TEXT_MASK_FLOOR:
                 return None, report
@@ -5440,6 +5570,16 @@ class Services:
             release()
             job.log("info", "Released SAM weights to free memory "
                             "(reloads on next mask request)")
+        # The resident text engine holds ~700 MB of CPU RAM — real money on
+        # the machines whose heavy renders are RAM-killed, so it yields
+        # here. Never at the cost of an ask in flight: stop(force=False)
+        # declines if the engine is busy (the idle watchdog reaps it later).
+        worker = self._text_mask_worker
+        if worker is not None and worker.warm:
+            worker.stop()
+            if not worker.warm:
+                job.log("info", "Stopped the idle text engine to free "
+                                "memory (restarts on next mask request)")
 
     @staticmethod
     def _heavy_signature(graph: dict[str, Any]) -> str:

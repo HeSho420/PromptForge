@@ -6,6 +6,19 @@ already live there, and transformers 5.13 supports CLIPSeg natively.
     python text_mask.py <image.png> <out.png> --phrase "necklace" [--phrase ...]
                         [--threshold 0.40] [--json]
 
+Or resident, for callers that segment often (one-shot pays a fresh torch
+import per call — measured 35s warm and 132s with the machine under load;
+resident answers in ~2s):
+
+    python text_mask.py --serve [--idle-exit 600]
+
+--serve loads the model once, prints {"ready": true}, then answers one
+JSON request per stdin line ({"src", "out", "phrases", "controls"?,
+"threshold"?}) with the same report the one-shot prints. A request that
+fails answers {"error": ...} and the loop lives on. After --idle-exit
+seconds without a request the process exits on its own, returning its
+~700 MB to the machine; the caller just respawns it next time.
+
 Why this exists. The general segmenter here is SAM, which proposes every
 region it can find and then picks one with a purely GEOMETRIC prior — a
 handful of hardcoded branches for sky, backdrop and floor, and otherwise
@@ -53,11 +66,12 @@ def load_model():
     return processor, model
 
 
-def heatmaps(image: Image.Image, phrases: list[str]) -> np.ndarray:
+def heatmaps(image: Image.Image, phrases: list[str],
+             bundle=None) -> np.ndarray:
     """One 0..1 map per phrase, at CLIPSeg's own resolution."""
     import torch
 
-    processor, model = load_model()
+    processor, model = bundle or load_model()
     rgb = image.convert("RGB")
     inputs = processor(text=phrases, images=[rgb] * len(phrases),
                        padding=True, return_tensors="pt")
@@ -83,43 +97,24 @@ def to_mask(maps: np.ndarray, size: tuple[int, int],
     return mask, {"peak": round(peak, 3), "cut": round(cut, 3)}
 
 
-def main() -> int:
-    argv = sys.argv[1:]
-    positional, phrases, controls, threshold = [], [], [], 0.40
-    i = 0
-    while i < len(argv):
-        if argv[i] == "--phrase":
-            phrases.append(argv[i + 1])
-            i += 2
-        elif argv[i] == "--control":
-            controls.append(argv[i + 1])
-            i += 2
-        elif argv[i] == "--threshold":
-            threshold = float(argv[i + 1])
-            i += 2
-        elif argv[i].startswith("--"):
-            i += 1
-        else:
-            positional.append(argv[i])
-            i += 1
-    if len(positional) < 2 or not phrases:
-        print(__doc__)
-        return 2
-
-    image = Image.open(positional[0])
+def run_request(src: str, out: str, phrases: list[str],
+                controls: list[str], threshold: float,
+                bundle=None) -> dict:
+    """One segmentation, shared by the one-shot CLI and --serve."""
+    image = Image.open(src)
     # Controls ride along in the SAME batch: phrases naming things that are
     # certainly not in the photo. Their peaks measure what confidence "not
     # there" attracts on THIS image — a single global floor cannot, because
     # an absent object scored 0.61-0.65 on one photo and below the floor on
     # another (measured live). The caller compares the request's peak
     # against the controls' and requires a margin.
-    maps = heatmaps(image, phrases + controls)
+    maps = heatmaps(image, phrases + controls, bundle)
     request_maps = maps[:len(phrases)]
     control_maps = maps[len(phrases):]
     mask, detail = to_mask(request_maps, image.size, threshold)
-    out = Path(positional[1])
-    out.parent.mkdir(parents=True, exist_ok=True)
-    mask.save(out, format="PNG")
+    out_path = Path(out)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    mask.save(out_path, format="PNG")
 
     covered = float(np.asarray(mask).mean() / 255.0)
     report = {
@@ -133,7 +128,78 @@ def main() -> int:
         report["controls"] = controls
         report["control_peak"] = round(
             max(float(m.max()) for m in control_maps), 3)
-    print(json.dumps(report))
+    return report
+
+
+def serve(idle_exit_s: float) -> int:
+    """Load once, answer many. Exits by itself after idle_exit_s quiet."""
+    import os
+    import threading
+    import time
+
+    bundle = load_model()
+    last = [time.monotonic()]
+
+    def watchdog() -> None:
+        while True:
+            time.sleep(min(30.0, max(0.2, idle_exit_s / 4)))
+            if time.monotonic() - last[0] > idle_exit_s:
+                os._exit(0)  # idle: give the memory back; callers respawn
+
+    threading.Thread(target=watchdog, daemon=True).start()
+    print(json.dumps({"ready": True}), flush=True)
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        last[0] = time.monotonic()
+        try:
+            req = json.loads(line)
+            report = run_request(
+                str(req["src"]), str(req["out"]),
+                [str(p) for p in req.get("phrases") or []],
+                [str(c) for c in req.get("controls") or []],
+                float(req.get("threshold") or 0.40), bundle)
+        except Exception as exc:  # noqa: BLE001 — one bad request must not kill the loop
+            report = {"error": str(exc)[:300]}
+        print(json.dumps(report), flush=True)
+        last[0] = time.monotonic()
+    return 0
+
+
+def main() -> int:
+    argv = sys.argv[1:]
+    positional, phrases, controls, threshold = [], [], [], 0.40
+    serve_mode, idle_exit_s = False, 600.0
+    i = 0
+    while i < len(argv):
+        if argv[i] == "--phrase":
+            phrases.append(argv[i + 1])
+            i += 2
+        elif argv[i] == "--control":
+            controls.append(argv[i + 1])
+            i += 2
+        elif argv[i] == "--threshold":
+            threshold = float(argv[i + 1])
+            i += 2
+        elif argv[i] == "--serve":
+            serve_mode = True
+            i += 1
+        elif argv[i] == "--idle-exit":
+            idle_exit_s = float(argv[i + 1])
+            i += 2
+        elif argv[i].startswith("--"):
+            i += 1
+        else:
+            positional.append(argv[i])
+            i += 1
+    if serve_mode:
+        return serve(idle_exit_s)
+    if len(positional) < 2 or not phrases:
+        print(__doc__)
+        return 2
+    print(json.dumps(run_request(positional[0], positional[1],
+                                 phrases, controls, threshold)))
     return 0
 
 
