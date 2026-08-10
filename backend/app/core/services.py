@@ -22,6 +22,7 @@ import urllib.request
 import uuid
 import zipfile
 from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -3146,8 +3147,9 @@ class Services:
     _TEXT_MASK_MARGIN = 0.12
     _TEXT_MASK_CONTROLS = ("a purple octopus", "an igloo", "a unicycle")
 
-    def _text_mask(self, image: Image.Image,
-                   phrases: list[str]) -> tuple[Image.Image | None, dict]:
+    def _text_mask(self, image: Image.Image, phrases: list[str],
+                   log: Callable[[str], None] | None = None,
+                   ) -> tuple[Image.Image | None, dict]:
         """Segment what the WORDS name, via CLIPSeg.
 
         Exists because the general segmenter cannot read: SAM scores its
@@ -3157,6 +3159,13 @@ class Services:
         crashes against transformers 5.13, and the CLIPSeg node is a stub for
         an extension that is not installed — so this runs the model directly,
         in ComfyUI's interpreter, the same way the mesh texturer does."""
+        # Mock mode means OFFLINE (the _live_object_info rule): a ComfyUI
+        # install on this box belongs to some other setup, and borrowing its
+        # interpreter here ran a real 35-second CLIPSeg inference inside a
+        # supposedly mocked edit (measured live — the mock is for tests and
+        # demos, which must stay fast and self-contained).
+        if self.settings.inpaint_backend == "mock":
+            return None, {}
         base = Path(self.settings.comfyui_dir) if self.settings.comfyui_dir \
             else None
         tool = Path(__file__).resolve().parent.parent / "tools" / \
@@ -3167,6 +3176,15 @@ class Services:
             python = self._comfy_python(base)
         except Exception:  # noqa: BLE001 — the caller falls back
             return None, {}
+        if log is not None:
+            # The engine is about to be silent for a while and the wait is
+            # structural: a fresh interpreter imports torch on every call
+            # (~35s measured warm), and the first call ever also fetches
+            # CLIPSeg's ~150 MB of weights. Say so — a stalled log line
+            # reads as a hang, and this step used to be exactly that.
+            log("Reading the request with the text engine — this loads a "
+                "model each time (~35s; the first run also downloads its "
+                "weights once)")
         with tempfile.TemporaryDirectory() as tmp:
             src, out = Path(tmp) / "src.png", Path(tmp) / "mask.png"
             image.convert("RGB").save(src, format="PNG")
@@ -3335,7 +3353,7 @@ class Services:
                 "checks — asking the engine that reads the request instead")
 
         phrases = quality.mask_phrases(request)
-        found, report = self._text_mask(image, phrases)
+        found, report = self._text_mask(image, phrases, log=log)
         if found is not None:
             notes.append(f"read the request as {', '.join(phrases)} "
                          f"(confidence {report.get('peak')})")
@@ -5894,6 +5912,13 @@ class Services:
         keeping generation local, as the project intends."""
         if ollama_is_up(self.settings.llm_url):
             return True
+        # Mock mode means OFFLINE (the _live_object_info rule): an Ollama
+        # binary on this box belongs to some other setup. A running one is
+        # still used (the up-check above) — but a mocked demo must not
+        # LAUNCH other software and block 30s waiting on it (measured live:
+        # this wait was the first half of a 'stuck' mock edit).
+        if self.settings.inpaint_backend == "mock":
+            return False
         exe = shutil.which("ollama")
         if not exe:
             return False
