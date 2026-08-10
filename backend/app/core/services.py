@@ -2083,6 +2083,26 @@ class Services:
                         job.log("info", "Inpaint technique: recolour — low "
                                         "denoise so the object keeps its "
                                         "shape and only its colour changes")
+                    elif (supports and mask_source == "whole-frame"
+                            and not is_add and not is_remove
+                            and op != "REPLACE_OBJECT"
+                            and not quality.is_replacement(
+                                step["instruction"])):
+                        # A whole-frame ATTRIBUTE change ("make the sky a
+                        # warm sunset" on a photo that is nearly all sky) at
+                        # replacement denoise generates a NEW picture that
+                        # merely matches the words — the user's photo is
+                        # gone. The same structure-preserving principle as
+                        # the recolour above, with a little more freedom:
+                        # tone and atmosphere may change, composition stays.
+                        # An explicit REPLACE keeps full denoise — swapping
+                        # the content is what was asked.
+                        variant = "universal"
+                        inpaint_denoise = 0.6
+                        job.log("info", "Inpaint technique: whole-frame "
+                                        "restyle — moderate denoise so the "
+                                        "picture keeps its composition and "
+                                        "only its look changes")
                     # A removal's positive prompt must stay free of the scene
                     # summary too — it can name the very object being removed.
                     step_positive = (enh["positive"] if is_remove

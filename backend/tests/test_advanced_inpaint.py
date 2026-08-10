@@ -284,6 +284,35 @@ class DriverModelChoiceTests(unittest.TestCase):
         self.assertTrue(any("consulting the model knowledge" in e["msg"]
                             for e in done.logs))
 
+    def test_whole_frame_attribute_change_keeps_composition(self):
+        """A whole-frame restyle must run at moderate denoise: replacement
+        denoise on a full-frame mask generates a NEW picture that merely
+        matches the words — the user's photo is gone."""
+        full = Image.new("L", (32, 32), 255)
+        self.s._text_mask = lambda *a, **k: (full, {"peak": 0.9})
+        job = self.s.queue.enqueue("image_edit", {
+            "asset_id": self.asset.id,
+            "prompt": "make the sky a warm sunset"})
+        done = self.s.queue.wait_for(job.id, timeout=30)
+        self.assertEqual(done.state.value, "completed", done.error)
+        call = self.adapter.calls[0]
+        self.assertEqual(call["variant"], "universal")
+        self.assertEqual(call["denoise"], 0.6)
+        self.assertTrue(any("whole-frame restyle" in e["msg"]
+                            for e in done.logs), done.logs)
+
+    def test_whole_frame_replace_keeps_full_denoise(self):
+        """An explicit REPLACE of a frame-filling thing asked for new
+        content — structure preservation would fight the request."""
+        full = Image.new("L", (32, 32), 255)
+        self.s._text_mask = lambda *a, **k: (full, {"peak": 0.9})
+        job = self.s.queue.enqueue("image_edit", {
+            "asset_id": self.asset.id,
+            "prompt": "replace the sky with a starry night sky"})
+        done = self.s.queue.wait_for(job.id, timeout=30)
+        self.assertEqual(done.state.value, "completed", done.error)
+        self.assertIsNone(self.adapter.calls[0]["denoise"])
+
     def test_invented_outpaint_step_is_dropped_end_to_end(self):
         class PlanLLM:
             source = "local"

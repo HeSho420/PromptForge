@@ -1154,6 +1154,13 @@ shorter wider tighter looser new old clean dirty wet
 """.split())
 
 
+def is_replacement(text: str) -> bool:
+    """True for an explicit replace/swap instruction — the attribute-change
+    shape whose destination is new CONTENT, not a new look. Callers that
+    preserve structure for attribute changes must stand aside for these."""
+    return bool(_REPLACE_WITH.match((text or "").strip()))
+
+
 def parse_attribute_change(text: str) -> tuple[str, str] | None:
     """(source, destination) of a change/replace/make instruction, or None.
 
