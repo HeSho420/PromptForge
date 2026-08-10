@@ -24,6 +24,37 @@ from PIL import Image, ImageDraw, ImageFilter
 from .base import EditResult, validate_mask
 
 
+class OfflineComfyClient:
+    """Mock mode's stand-in for the ComfyUI client: every probe answers
+    OFFLINE, and anything that would actually talk to a server raises.
+
+    Mock mode means this process makes NO connection to a ComfyUI — one
+    answering on this box belongs to some other setup. Measured live before
+    this existed: a mock avatar build passed the is-ComfyUI-up gate via the
+    machine's resident real instance and rendered its mesh there, and
+    cancelling that job posted /interrupt into the same instance — a mocked
+    build interfering with renders it does not own. Probes are quiet no-ops
+    so health checks stay honest; everything else fails loudly so a new
+    render path cannot leak through unnoticed."""
+
+    offline = True
+
+    def is_up(self) -> bool:
+        return False
+
+    def health(self) -> tuple[bool, str]:
+        return False, "mock mode is offline — renders never contact ComfyUI."
+
+    def interrupt(self) -> bool:
+        return False  # nothing of ours is running anywhere; cancel goes on
+
+    def __getattr__(self, name: str):
+        raise AttributeError(
+            f"OfflineComfyClient has no '{name}': mock mode is offline, so "
+            "no ComfyUI call is available — gate the calling path on mock "
+            "mode instead.")
+
+
 class MockSegmentationAdapter:
     name = "mock-segmentation"
     is_mock = True

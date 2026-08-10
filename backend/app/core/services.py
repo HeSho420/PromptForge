@@ -56,7 +56,11 @@ from ..adapters.comfyui import (
     build_workflow,
     validate_workflow,
 )
-from ..adapters.mock import MockInpaintingAdapter, MockSegmentationAdapter
+from ..adapters.mock import (
+    MockInpaintingAdapter,
+    MockSegmentationAdapter,
+    OfflineComfyClient,
+)
 from ..adapters.sam import SamSegmentationAdapter
 from ..config import PROJECT_ROOT, Settings
 from . import eta, motion, node_packs, quality
@@ -864,7 +868,13 @@ class Services:
         # every other thread sees. Must exist before the `comfy` property
         # is first read.
         self._comfy_tls = threading.local()
-        self.comfy = ComfyUIClient(self.settings.comfyui_url)
+        # Mock mode means OFFLINE: the client itself is the null object, so
+        # every probe anywhere in the app answers "down" without a request
+        # leaving the process. Tests that stub `services.comfy = Fake()`
+        # replace it either way (that is what the setter is for).
+        self.comfy = (OfflineComfyClient()
+                      if self.settings.inpaint_backend == "mock"
+                      else ComfyUIClient(self.settings.comfyui_url))
         self.hardware = probe(self.settings.data_dir)
         self.trust = TrustJudge(self.llm)
         self.scout = ModelScout(
@@ -4419,6 +4429,13 @@ class Services:
 
     def _download_progress(self, job: Job, name: str):
         def progress(done: int, total: int | None) -> None:
+            # The one place a transfer visits on every chunk — so it is
+            # where a cancel takes effect. Without this, cancelling the job
+            # marked it cancelled and the download kept pulling gigabytes
+            # (measured live: +108 MB in the 18s after the cancel).
+            if job.cancel_requested:
+                raise TransientError(
+                    f"Download of '{name}' stopped — the job was cancelled.")
             if total and done % (total // 10 or 1) < ModelDownloader.CHUNK:
                 job.log("info", f"Downloading {name}: {done * 100 // total}%")
         return progress
@@ -4464,16 +4481,31 @@ class Services:
                         return repo.repo_id, f.filename, f.sha256
         return None
 
-    def _ensure_model(self, name: str, job: Job) -> None:
+    def _ensure_model(self, name: str, job: Job, *,
+                      requested: bool = False) -> None:
         """Download a registry model if missing, backfilling its sha256 from
         the hub's LFS metadata first so the download stays verified. If the
         source turns out to be gated (401/403), a checksum-published public
-        mirror is located automatically and the download retried."""
+        mirror is located automatically and the download retried.
+
+        `requested` marks an explicit ask (the model_download job type) as
+        opposed to a render path discovering a missing dependency — only
+        the latter is what the auto_install setting governs."""
         if self.registry.is_ready(name):
             return
         model = self.registry.get(name)
         if model is None:
             raise PermanentError(f"Model '{name}' is not in the registry.")
+        # This IS the behavior the auto_install setting names ("download
+        # missing required models when a job needs them") — it was enforced
+        # for checkpoints below but not here, so a required mesh model
+        # started a multi-GB download on a build that had said no. A
+        # download the user ASKED for (a Models-page click arrives as a
+        # model_download job) is not auto-install and stays allowed.
+        if not requested and not self.settings.auto_install:
+            raise PermanentError(
+                f"'{name}' is not downloaded and auto-install is off — "
+                "download it from the Models page and run this again.")
         if not model.sha256 and (model.meta or {}).get("repo"):
             try:
                 for f in self.model_search.list_weight_files(model.meta["repo"]):
@@ -5858,6 +5890,18 @@ class Services:
         A generated workflow once hard-crashed ComfyUI and every render after
         that failed until a manual reboot — this is the guard against that.
         """
+        # Mock mode means OFFLINE, and this is the one gate every real-render
+        # path passes through. Without it the check was answered by whatever
+        # ComfyUI happened to be listening on this box (a mock avatar build
+        # rendered its mesh through the resident real instance, measured
+        # live) — and on failure the recovery below would LAUNCH one. The
+        # flag, not the settings, is consulted: tests legitimately stub
+        # `services.comfy = Fake()` on a mock-configured Services to drive
+        # these paths, and their fakes must keep working.
+        if getattr(self.comfy, "offline", False):
+            raise PermanentError(
+                "This build runs mock renders only — real rendering and "
+                "reconstruction need the ComfyUI backend.")
         # A DELEGATED job talks to another machine's ComfyUI. That machine
         # is not ours to restart: if the peer stops answering, drop the
         # binding and carry on with the local checks below — the job simply
@@ -9271,7 +9315,10 @@ class Services:
         try:
             # Shares the workflow path's machinery: checksum backfill from the
             # hub, gated-source self-healing via verified public mirrors.
-            self._ensure_model(name, job)
+            # requested=True: this job type IS the user's explicit ask (or an
+            # enqueue site that applied its own auto_install check), so the
+            # auto-install gate does not apply.
+            self._ensure_model(name, job, requested=True)
         except PermanentError:
             raise
         except DownloadError as exc:
