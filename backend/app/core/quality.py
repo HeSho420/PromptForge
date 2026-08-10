@@ -883,6 +883,27 @@ def reconcile_capability_steps(prompt: str,
     return notes
 
 
+def default_edit_step(prompt: str) -> dict[str, Any]:
+    """The single step to run when no planner is available (the LLM failed
+    or is absent). Capability INTENTS are honored deterministically here the
+    same way plan_edit coerces them on an LLM plan, so a machine with a
+    flaky or missing LLM still reaches the right engine — an animate request
+    still becomes a video, and a background swap still reaches the
+    matte-inverting engine instead of a generic inpaint that leaves the
+    backdrop untouched. Everything else is one inpaint whose operation
+    reflects whether the prompt ADDS content."""
+    base: dict[str, Any] = {
+        "target": "", "instruction": prompt, "mask_adjust": "keep",
+        "adjust_px": 0, "denoise": 0.6, "reason": ""}
+    if animate_intent(prompt):
+        return {**base, "task": "video", "operation": "ANIMATE"}
+    if background_intent(prompt):
+        return {**base, "task": "background",
+                "operation": "REPLACE_BACKGROUND"}
+    op = "ADD_OBJECT" if classify_edit(prompt) == "add" else "CHANGE_ATTRIBUTE"
+    return {**base, "task": "inpaint", "operation": op}
+
+
 def plan_edit(llm: LLMClient, prompt: str, has_mask: bool,
               dropped: list[dict[str, Any]] | None = None
               ) -> list[dict[str, Any]] | None:

@@ -194,6 +194,25 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(quality.capability_gap(["a snowy forest background"]),
                          "background")
 
+    def test_no_planner_fallback_still_reaches_the_background_engine(self):
+        """With no working LLM the fallback plan must still route a background
+        swap to the matte-inverting engine, not a generic inpaint. Measured
+        live (real render, dead LLM): the generic path left a grey wall grey;
+        the background task composited the subject onto a real beach."""
+        step = quality.default_edit_step(
+            "replace the background with a sunny beach")
+        self.assertEqual(step["task"], "background")
+        self.assertEqual(step["operation"], "REPLACE_BACKGROUND")
+
+    def test_no_planner_fallback_routes_other_intents(self):
+        self.assertEqual(
+            quality.default_edit_step("animate this photo")["task"], "video")
+        self.assertEqual(
+            quality.default_edit_step("add a hat")["operation"], "ADD_OBJECT")
+        change = quality.default_edit_step("make the shirt red")
+        self.assertEqual(change["task"], "inpaint")
+        self.assertEqual(change["operation"], "CHANGE_ATTRIBUTE")
+
     def test_a_lighting_miss_still_goes_to_relight(self):
         """'sunlit background' is a lighting miss, not a backdrop miss."""
         self.assertEqual(

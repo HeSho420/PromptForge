@@ -1692,29 +1692,18 @@ class Services:
                     job.log("info", "[llm] plan: format/aspect change is a "
                                     "canvas extension — routed to outpaint")
         if not steps:
-            # No planner: one inpaint step. The operation still reflects
-            # whether the prompt ADDS content, so add-edits get a placement
-            # region instead of segmentation even without the LLM — and an
-            # animate request still becomes a video without any LLM at all.
-            if quality.animate_intent(prompt):
-                steps = [{"task": "video", "operation": "ANIMATE",
-                          "target": "", "instruction": prompt,
-                          "mask_adjust": "keep", "adjust_px": 0,
-                          "denoise": 0.6, "reason": ""}]
-                if real:
-                    job.log("info", "[llm] plan: animate request — "
-                                    "image-to-video (default)")
-            else:
-                default_op = ("ADD_OBJECT"
-                              if quality.classify_edit(prompt) == "add"
-                              else "CHANGE_ATTRIBUTE")
-                steps = [{"task": "inpaint", "operation": default_op,
-                          "target": "", "instruction": prompt,
-                          "mask_adjust": "keep", "adjust_px": 0,
-                          "denoise": 0.6, "reason": ""}]
-                if real:
-                    job.log("info",
-                            "[llm] plan: single inpaint step (default)")
+            # No planner: one deterministic step. Capability intents (animate,
+            # background) reach their own engine even with no LLM at all; an
+            # add-edit still gets a placement region instead of segmentation.
+            step = quality.default_edit_step(prompt)
+            steps = [step]
+            if real:
+                job.log("info", "[llm] plan: " + {
+                    "video": "animate request — image-to-video (default)",
+                    "background": "background replacement (default) — "
+                                  "inverting the subject matte",
+                    "inpaint": "single inpaint step (default)",
+                }[step["task"]])
         # A second image attached IS the request to combine them — whatever
         # the planner called the step. Deterministic, like the animate and
         # viewpoint guarantees: the user does not lose a capability because a
