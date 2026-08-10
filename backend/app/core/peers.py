@@ -79,6 +79,26 @@ class _PeerHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def read_body(self, cap: int) -> bytes | None:
+        """The request body, or None when the Content-Length is unusable.
+
+        A raw `int(Content-Length)` accepts a NEGATIVE value, and
+        rfile.read(-1) reads until EOF — on a keep-alive connection that
+        never comes, so the handler thread blocks forever. Repeat that and
+        the ThreadingHTTPServer's unbounded daemon threads pile up: a
+        one-line denial of service from any LAN host. The length is floored
+        at zero and capped, so a hostile or garbage header can only ever ask
+        for a bounded, finite read."""
+        raw = self.headers.get("Content-Length")
+        if raw is None:
+            return b""
+        try:
+            declared = int(raw)
+        except ValueError:
+            return None
+        length = max(0, min(declared, cap))
+        return self.rfile.read(length) if length else b""
+
 
 class PeerService:
     """Announce this install, discover others, serve models, proxy renders."""
@@ -176,6 +196,15 @@ class PeerService:
 
         class Handler(_PeerHandler):
             protocol_version = "HTTP/1.1"
+            # No timeout means a slow (or hostile) client holds a handler
+            # thread forever: dribble the request line, or declare a body
+            # and never send it. HTTP/1.1 keep-alive makes the idle case
+            # persistent too. 30s is generous for a LAN manifest or graph
+            # and applies per socket operation (not per transfer), so a
+            # legitimate steady model download is unaffected — only a
+            # stalled connection is dropped. BaseHTTPRequestHandler turns
+            # the resulting socket timeout into a clean close.
+            timeout = 30
 
             def log_message(self, *_args):  # keep the console quiet
                 pass
@@ -354,8 +383,13 @@ class PeerService:
     def _handle_post(self, req: _PeerHandler) -> None:
         path = req.path.split("?", 1)[0]
         if path.startswith("/pf-peer/comfy/"):
-            length = int(req.headers.get("Content-Length") or 0)
-            body = req.rfile.read(length) if length else b""
+            # 256 MB covers any ComfyUI graph or uploaded image with room to
+            # spare; the cap is what stops a claimed-huge body from being
+            # read wholesale into memory before it is proxied.
+            body = req.read_body(256 * 1024 * 1024)
+            if body is None:
+                req._json(400, {"error": "bad Content-Length"})
+                return
             self._proxy(req, body=body)
             return
         if path == "/pf-peer/pull":
@@ -368,9 +402,10 @@ class PeerService:
             # the client is still writing races into a connection reset,
             # so the client never sees the honest error (caught live by
             # the suite under load). Capped — a manifest is tiny.
-            length = min(int(req.headers.get("Content-Length") or 0),
-                         8 * 1024 * 1024)
-            raw = req.rfile.read(length) if length else b""
+            raw = req.read_body(8 * 1024 * 1024)
+            if raw is None:
+                req._json(400, {"error": "bad Content-Length"})
+                return
             if not self.share:
                 req._json(403, {"error": "model sharing is off"})
                 return
@@ -438,8 +473,17 @@ class PeerService:
         if rng and rng.startswith("bytes="):
             try:
                 s, _, e = rng[len("bytes="):].partition("-")
-                start = int(s) if s else 0
-                end = int(e) if e else size - 1
+                if not s:
+                    # Suffix range "bytes=-N" means the LAST N bytes, not
+                    # bytes 0..N. The old code read it as the latter and
+                    # served the wrong bytes under a 206 — silent corruption
+                    # for any conformant client (the transfer client only
+                    # sends "bytes=N-", which is why it stayed hidden).
+                    n = int(e) if e else 0
+                    start, end = max(0, size - n), size - 1
+                else:
+                    start = int(s)
+                    end = int(e) if e else size - 1
                 partial = True
             except ValueError:
                 start, end, partial = 0, size - 1, False
@@ -598,24 +642,34 @@ class PeerService:
                 continue
             except OSError:
                 break
+            # EVERYTHING derived from the packet is parsed inside this
+            # guard. A crafted datagram from any LAN host used to kill the
+            # discovery thread until restart: a token-less packet slipped
+            # the check below (None != self.token) and then raised KeyError
+            # on msg["token"], and a non-numeric "http" raised ValueError on
+            # int() — both outside the json guard, both unhandled, both
+            # fatal to the one thread that finds other machines.
             try:
                 msg = json.loads(data.decode())
-            except (ValueError, UnicodeDecodeError):
-                continue
-            if msg.get("pf") != 1 or msg.get("token") == self.token:
+                if not isinstance(msg, dict) or msg.get("pf") != 1:
+                    continue
+                token = msg.get("token")
+                if not isinstance(token, str) or not token \
+                        or token == self.token:
+                    continue
+                http_port = int(msg.get("http") or 8765)
+                name = str(msg.get("name") or host)
+            except (ValueError, TypeError, UnicodeDecodeError):
                 continue
             with self._lock:
-                peer = self.peers.get(msg["token"])
+                peer = self.peers.get(token)
                 if peer is None:
-                    self.peers[msg["token"]] = Peer(
-                        msg["token"], str(msg.get("name") or host),
-                        host, int(msg.get("http") or 8765))
-                    log.info("discovered peer '%s' at %s",
-                             msg.get("name"), host)
+                    self.peers[token] = Peer(token, name, host, http_port)
+                    log.info("discovered peer '%s' at %s", name, host)
                 else:
                     peer.last_seen = time.time()
                     peer.host = host
-                    peer.port = int(msg.get("http") or peer.port)
+                    peer.port = http_port
         sock.close()
 
     # -------------------------------------------------------------- scanner

@@ -535,6 +535,159 @@ class AskForNearbyModels(unittest.TestCase):
         self.assertIn("not sharing models", src)
 
 
+class HostileRequests(unittest.TestCase):
+    """The peer listener faces untrusted LAN input. A malformed or hostile
+    request must be refused cleanly and MUST NOT wedge a handler thread."""
+
+    def _raw(self, port: int, request: bytes, timeout: float = 4.0) -> bytes:
+        import socket as _socket
+        s = _socket.create_connection(("127.0.0.1", port), timeout=timeout)
+        s.settimeout(timeout)
+        try:
+            s.sendall(request)
+            chunks = []
+            while True:
+                try:
+                    b = s.recv(4096)
+                except TimeoutError:
+                    break
+                if not b:
+                    break
+                chunks.append(b)
+                if b"\r\n\r\n" in b"".join(chunks) and len(b) < 4096:
+                    break
+            return b"".join(chunks)
+        finally:
+            s.close()
+
+    def test_negative_content_length_does_not_hang_the_thread(self):
+        """`Content-Length: -1` made rfile.read(-1) read until EOF — on a
+        keep-alive socket that never comes, so the handler thread blocked
+        forever. A few of those exhaust the pool. It must answer promptly."""
+        with tempfile.TemporaryDirectory() as tmp:
+            reg = FakeRegistry(Path(tmp) / "m")
+            svc = PeerService(reg, share=True, render=True,
+                              http_port=BASE_HTTP + 60,
+                              udp_port=BASE_UDP + 60, name="victim",
+                              loopback_only=True)
+            svc.on_pull = lambda entries: {"queued": [], "already": []}
+            svc.start()
+            try:
+                port = svc.http_port
+                req = (b"POST /pf-peer/pull HTTP/1.1\r\nHost: x\r\n"
+                       b"Content-Length: -1\r\nConnection: close\r\n\r\n")
+                t0 = time.time()
+                resp = self._raw(port, req)
+                # The property that matters: a prompt, valid HTTP response
+                # (negative length is floored to an empty body), never the
+                # read-until-EOF hang.
+                self.assertLess(time.time() - t0, 3.0,
+                                "listener hung on a negative Content-Length")
+                self.assertTrue(resp.startswith(b"HTTP/1.1 "), resp[:40])
+                # And the server is still answering afterwards.
+                info = json.loads(urllib.request.urlopen(
+                    f"http://127.0.0.1:{port}/pf-peer/info", timeout=4)
+                    .read().decode())
+                self.assertEqual(info["app"], "promptforge")
+            finally:
+                svc.stop()
+
+    def test_garbage_content_length_is_a_clean_400(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            reg = FakeRegistry(Path(tmp) / "m")
+            svc = PeerService(reg, share=True, render=True,
+                              http_port=BASE_HTTP + 61,
+                              udp_port=BASE_UDP + 61, name="victim2",
+                              loopback_only=True)
+            svc.start()
+            try:
+                req = (b"POST /pf-peer/pull HTTP/1.1\r\nHost: x\r\n"
+                       b"Content-Length: notanumber\r\n"
+                       b"Connection: close\r\n\r\n")
+                resp = self._raw(svc.http_port, req)
+                self.assertIn(b"400", resp.split(b"\r\n", 1)[0])
+            finally:
+                svc.stop()
+
+    def test_suffix_range_serves_the_last_bytes_not_the_first(self):
+        """`Range: bytes=-4` means the LAST 4 bytes. The old parser served
+        bytes 0..4 under a 206 — silent corruption for a conformant client."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "m"
+            (root / "checkpoints").mkdir(parents=True)
+            f = root / "checkpoints" / "tiny.bin"
+            f.write_bytes(b"ABCDEFGHIJ")  # 10 bytes; last 4 = "GHIJ"
+            reg = FakeRegistry(root)
+            m = ModelInfo(name="tiny", purpose="p", license="mit",
+                          url="", sha256="ab" * 32,
+                          meta={"folder": "checkpoints"})
+            m.status = "ready"
+            m.path = str(f)
+            reg.models["tiny"] = m
+            svc = PeerService(reg, share=True, render=True,
+                              http_port=BASE_HTTP + 62,
+                              udp_port=BASE_UDP + 62, name="lender2",
+                              loopback_only=True)
+            svc.start()
+            try:
+                r = urllib.request.Request(
+                    f"http://127.0.0.1:{svc.http_port}/pf-peer/model/tiny",
+                    headers={"Range": "bytes=-4"})
+                with urllib.request.urlopen(r, timeout=4) as resp:
+                    self.assertEqual(resp.status, 206)
+                    self.assertEqual(resp.read(), b"GHIJ")
+                    self.assertEqual(resp.headers.get("Content-Range"),
+                                     "bytes 6-9/10")
+            finally:
+                svc.stop()
+
+    def test_hostile_beacon_packets_do_not_kill_discovery(self):
+        """A crafted UDP datagram from any LAN host used to raise an
+        unhandled KeyError/ValueError out of the receive loop and kill the
+        discovery thread until restart: a token-less packet, or a
+        non-numeric 'http' port. Discovery must shrug them off and still
+        find a real peer afterwards."""
+        import socket as _socket
+        with tempfile.TemporaryDirectory() as tmp:
+            reg = FakeRegistry(Path(tmp) / "m")
+            svc = PeerService(reg, share=True, render=True,
+                              http_port=BASE_HTTP + 63,
+                              udp_port=BASE_UDP + 63, name="listener",
+                              loopback_only=True)
+            svc.start()
+            tx = _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM)
+            try:
+                hostile = [
+                    b"not json at all",
+                    json.dumps({"pf": 1}).encode(),                # no token
+                    json.dumps({"pf": 1, "token": 123}).encode(),  # token not str
+                    json.dumps({"pf": 1, "token": "x",
+                                "http": "abc"}).encode(),          # bad port
+                    json.dumps([1, 2, 3]).encode(),                # not a dict
+                ]
+                for pkt in hostile:
+                    for port in range(svc.udp_port,
+                                      svc.udp_port + svc.UDP_RANGE):
+                        tx.sendto(pkt, ("127.0.0.1", port))
+                time.sleep(0.4)  # let the receiver chew through them
+                # A valid beacon after the hostile ones must still register.
+                good = json.dumps({"pf": 1, "token": "real-peer-tok",
+                                   "name": "friend", "http": 12345}).encode()
+                for port in range(svc.udp_port,
+                                  svc.udp_port + svc.UDP_RANGE):
+                    tx.sendto(good, ("127.0.0.1", port))
+                found = _wait(lambda: any(
+                    p.name == "friend" for p in svc.peers_list()), timeout=5)
+                self.assertTrue(found,
+                                "discovery thread died on a hostile packet")
+                friend = next(p for p in svc.peers_list()
+                              if p.name == "friend")
+                self.assertEqual(friend.port, 12345)
+            finally:
+                tx.close()
+                svc.stop()
+
+
 class DeviceRouting(unittest.TestCase):
     """The picker's contract: forced jobs go through the peer wrap even
     when the gate says no; 'local' jobs never leave this machine."""
