@@ -8706,20 +8706,23 @@ class Services:
                 def _covered(lo: float, hi: float) -> bool:
                     return any(lo <= a <= hi for a in used)
 
-                wanted: list[tuple[float, str]] = []
+                # NOT `wanted` — this function already binds that name to
+                # the checkpoint filename above, and the shadow poisoned
+                # every type inference below it (found by mypy).
+                missing_views: list[tuple[float, str]] = []
                 if textured_here and not _covered(145, 215):
-                    wanted.append((180.0, "back"))
+                    missing_views.append((180.0, "back"))
                 if textured_here and not _covered(55, 125):
-                    wanted.append((90.0, "left"))
+                    missing_views.append((90.0, "left"))
                 if textured_here and not _covered(235, 305):
-                    wanted.append((270.0, "right"))
-                if wanted:
-                    names = ", ".join(w for _, w in wanted)
+                    missing_views.append((270.0, "right"))
+                if missing_views:
+                    names = ", ".join(w for _, w in missing_views)
                     job.log("info", "[stage] texture — no usable camera on "
                                     f"the {names} arc(s); generating the "
                                     "missing view(s) (invented, and "
                                     "recorded as such)")
-                    synth = [(az, img) for az, which in wanted
+                    synth = [(az, img) for az, which in missing_views
                              if (img := self._synthesize_view(job, which))
                              is not None]
                     if synth:
