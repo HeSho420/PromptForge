@@ -45,7 +45,13 @@ class FakeComfyIdentity:
         return Image.new("RGB", (16, 16), (90, 80, 70))
 
     def wait_for_output_file(self, prompt_id):
-        return b"RIFFfakewebp", "avatar_video_00001_.webp"
+        # A REAL webp, as ComfyUI's SaveAnimatedWEBP produces — the saved
+        # asset is now decode-validated (an animated .webp is an image
+        # kind), so fake bytes would be rejected exactly as a corrupt
+        # upload is.
+        buf = io.BytesIO()
+        Image.new("RGB", (16, 16), (40, 60, 80)).save(buf, format="WEBP")
+        return buf.getvalue(), "avatar_video_00001_.webp"
 
 
 class AvatarRenderTests(unittest.TestCase):

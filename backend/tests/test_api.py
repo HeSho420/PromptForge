@@ -290,6 +290,29 @@ class ApiIntegrationTests(unittest.TestCase):
             "file": (io.BytesIO(b"hello"), "notes.txt")})
         self.assertEqual(resp.status_code, 415)
 
+    def test_corrupt_image_content_is_rejected_at_upload(self):
+        """A .png extension does not prove the bytes are a PNG. A renamed
+        text file or a truncated download was accepted as a first-class
+        image (measured live: HTTP 201) and only failed deep in the render
+        pipeline. It must be refused at upload, like an unreadable video."""
+        for label, data in (
+            ("renamed text", b"this is definitely not an image"),
+            ("png signature only", b"\x89PNG\r\n\x1a\n" + b"garbage"),
+            ("empty", b""),
+        ):
+            resp = self.client.post("/api/assets", data={
+                "file": (io.BytesIO(data), "photo.png")})
+            self.assertEqual(resp.status_code, 415, label)
+            self.assertIn("could not be read",
+                          resp.get_json()["error"]["message"], label)
+
+    def test_valid_image_upload_records_its_dimensions(self):
+        resp = self.client.post("/api/assets", data={
+            "file": (io.BytesIO(_png_bytes(size=(64, 48))), "photo.png")})
+        self.assertEqual(resp.status_code, 201)
+        meta = resp.get_json()["meta"]
+        self.assertEqual((meta["width"], meta["height"]), (64, 48))
+
     def test_edit_on_missing_asset_404s(self):
         resp = self.client.post("/api/edits",
                                 json={"asset_id": "nope", "prompt": "remove the chair"})

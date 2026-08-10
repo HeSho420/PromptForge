@@ -129,6 +129,19 @@ class AssetStore:
             except UnsupportedFormatError:
                 shutil.rmtree(folder, ignore_errors=True)
                 raise
+        elif kind == "image":
+            # Same principle the video path already applies: the extension
+            # only names the format, it does not prove the bytes ARE one.
+            # A renamed .txt, a truncated download or a corrupt PNG was
+            # accepted here and stored as a first-class image (measured
+            # live: 12 bytes of "not an image" → HTTP 201), then failed
+            # deep in masking or rendering with a cryptic PIL error. Decode
+            # it once, now, and reject a broken upload with a plain message.
+            try:
+                extra = self._describe_image(path)
+            except UnsupportedFormatError:
+                shutil.rmtree(folder, ignore_errors=True)
+                raise
 
         asset = Asset(asset_id, kind, path.name, str(path), _now(),
                       {"bytes": len(data), **extra, **(meta or {})})
@@ -164,6 +177,33 @@ class AssetStore:
         except Exception:  # noqa: BLE001 — a missing poster is cosmetic
             pass
         return out
+
+    def _describe_image(self, path: Path) -> dict[str, Any]:
+        """Decode an uploaded image to prove it is one, and record its size.
+
+        Two opens on purpose: verify() checks structural integrity but
+        leaves the file unusable afterwards and does NOT catch a truncated
+        body, so a real load() follows to force every pixel through the
+        decoder. Either failure is a broken upload; the caller deletes it.
+        The width/height also give the gallery and the pipeline the
+        dimensions without a second open later."""
+        from PIL import Image, UnidentifiedImageError
+        try:
+            with Image.open(path) as probe:
+                probe.verify()
+            with Image.open(path) as full:
+                full.load()
+                width, height = full.size
+        except (UnidentifiedImageError, OSError, SyntaxError,
+                ValueError) as exc:
+            # The PIL message embeds the absolute on-disk path of the
+            # upload; that is server-internal and does not belong in a
+            # client-facing error. Keep the reason type, drop the path.
+            reason = type(exc).__name__
+            raise UnsupportedFormatError(
+                "That image could not be read — it may be corrupt, "
+                f"truncated, or not really an image ({reason}).") from exc
+        return {"width": width, "height": height}
 
     def get_asset(self, asset_id: str) -> Asset | None:
         rows = self._db.query("SELECT * FROM assets WHERE id=?", (asset_id,))

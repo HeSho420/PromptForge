@@ -574,9 +574,15 @@ class InpaintModelPolicyTests(unittest.TestCase):
 
     def test_gallery_skips_assets_whose_file_vanished(self):
         s = self._services()
-        a = s.store.save_upload("gone.png", b"\x89PNG\r\n\x1a\n123")
+
+        def _png() -> bytes:
+            buf = io.BytesIO()
+            Image.new("RGB", (4, 4), (7, 7, 7)).save(buf, format="PNG")
+            return buf.getvalue()
+
+        a = s.store.save_upload("gone.png", _png())
         Path(a.path).unlink()
-        b = s.store.save_upload("here.png", b"\x89PNG\r\n\x1a\n456")
+        b = s.store.save_upload("here.png", _png())
         ids = [g["asset"]["id"] for g in s.store.gallery()]
         self.assertIn(b.id, ids)
         self.assertNotIn(a.id, ids)

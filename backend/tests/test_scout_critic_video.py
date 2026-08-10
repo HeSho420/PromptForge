@@ -194,7 +194,11 @@ class FakeComfyVideo:
         return "vid-1"
 
     def wait_for_output_file(self, prompt_id):
-        return b"RIFFfakewebpdata", "promptforge_video_00001_.webp"
+        # A REAL webp, as ComfyUI produces — the saved asset is decode-
+        # validated now (an animated .webp is an image kind).
+        buf = io.BytesIO()
+        Image.new("RGB", (16, 16), (30, 50, 70)).save(buf, format="WEBP")
+        return buf.getvalue(), "promptforge_video_00001_.webp"
 
 
 class VideoJobTests(unittest.TestCase):
