@@ -1097,6 +1097,28 @@ _REMOVAL_TARGET_STRIP = re.compile(
     r"all\s+(the\s+)?|both\s+)?", re.IGNORECASE)
 
 
+# Subjects an inpaint model grows in a LARGE emptied region: handed a big
+# void where an object was, it fills it with a figure far more readily than
+# with more background (measured live — "remove the bench" on a wide grass
+# shot grew a standing person and a debris mound in the hole). The plain
+# "new object" negative did not name them, so they slipped through.
+_REMOVAL_FILLERS = ("person", "people", "man", "woman", "child", "human",
+                    "figure", "crowd", "animal", "statue", "mound")
+# Below this coverage the surrounding pixels already constrain the fill, and
+# these terms would fight a legitimate on-subject reconstruction (the hair
+# and forehead under a removed hat), so a small removal keeps the old
+# negative untouched.
+_REMOVAL_LARGE_HOLE = 0.15
+
+
+def removal_fillers_negative(coverage: float) -> str:
+    """Extra negative terms for a large-area REMOVAL — the subjects a model
+    invents in a big hole. Empty for a small removal (see the threshold)."""
+    if coverage < _REMOVAL_LARGE_HOLE:
+        return ""
+    return ", ".join(_REMOVAL_FILLERS)
+
+
 def removal_conditioning(instruction: str, target: str,
                          negative: str) -> dict[str, str]:
     """Prompts for a REMOVE_OBJECT inpaint: what should be THERE goes in the

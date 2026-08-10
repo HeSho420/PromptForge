@@ -2128,6 +2128,19 @@ class Services:
                     # summary too — it can name the very object being removed.
                     step_positive = (enh["positive"] if is_remove
                                      else with_scene(enh["positive"]))
+                    step_negative = enh["negative"]
+                    if is_remove:
+                        # A big emptied region invites an invented subject;
+                        # name the usual ones in the negative (coverage-gated
+                        # so a small on-subject removal is untouched).
+                        fillers = quality.removal_fillers_negative(
+                            quality.mask_fraction(mask))
+                        if fillers:
+                            step_negative = f"{step_negative}, {fillers}"
+                            job.log("info", "Removing a large region — the "
+                                            "negative also refuses an "
+                                            "invented person or creature in "
+                                            "the emptied space")
                     job.log("info", f"[stage] render — step {i + 1}/{n}: "
                                     f"inpainting via {self.inpainting.name}"
                                     + ("" if real else " [mock]"))
@@ -2141,7 +2154,7 @@ class Services:
                         # Kwargs the supports-check above proved available.
                         res = self.inpainting.inpaint(  # type: ignore[call-arg]
                             current, mask, step_positive,
-                            negative=enh["negative"],
+                            negative=step_negative,
                             checkpoint=ckpt, variant=variant or "modern",
                             **extra)
                         if res.meta.get("template"):

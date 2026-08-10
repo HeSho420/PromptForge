@@ -199,6 +199,19 @@ class RemovalConditioningTests(unittest.TestCase):
                                            "")
         self.assertIn("background", enh["positive"])
 
+    def test_large_removal_refuses_an_invented_subject(self):
+        """Measured live: 'remove the bench' on a wide grass shot (27%
+        coverage) grew a standing person in the hole. A large emptied
+        region names the usual fillers in the negative."""
+        big = quality.removal_fillers_negative(0.27)
+        self.assertIn("person", big)
+        self.assertIn("animal", big)
+
+    def test_small_removal_keeps_the_negative_untouched(self):
+        """A hat is a small region; 'person' in the negative would fight the
+        hair and forehead the fill must reconstruct."""
+        self.assertEqual(quality.removal_fillers_negative(0.03), "")
+
 
 class ViewIntentTests(unittest.TestCase):
     """D26 + D2 — 'show her from the side' must route AND be reachable."""
