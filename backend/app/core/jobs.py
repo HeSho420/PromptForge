@@ -317,6 +317,11 @@ class JobQueue:
             if not job:
                 return False
             if job.state in (JobState.PENDING, JobState.RETRYING):
+                # cancel_requested is sticky: a RETRYING job is asleep in its
+                # backoff INSIDE _execute, which re-reads this flag after it
+                # wakes — without it the loop would overwrite CANCELLED with
+                # RUNNING and run the very attempt the user just stopped.
+                job.cancel_requested = True
                 job.state = JobState.CANCELLED
                 job.log("info", "Cancelled before execution")
                 self._persist(job)
@@ -468,6 +473,15 @@ class JobQueue:
                 self._persist(job)
                 if self._stop.wait(delay):
                     return
+                # The backoff window is exactly when a user cancels a job
+                # that reads "Retrying in Ns". cancel() flipped it to
+                # CANCELLED (and set cancel_requested) under the lock; re-read
+                # that before the loop re-enters, or the cancelled attempt
+                # runs anyway and can even complete — a false "cancelled".
+                with self._lock:
+                    if (job.cancel_requested
+                            or job.state is JobState.CANCELLED):
+                        return
 
     def _finish(self, job: Job, state: JobState) -> None:
         """Persist the terminal row BEFORE publishing the in-memory state.

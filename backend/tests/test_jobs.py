@@ -1,4 +1,5 @@
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -68,6 +69,54 @@ class JobQueueTests(unittest.TestCase):
         self.assertTrue(self.q.cancel(job.id))
         self.assertEqual(self.q.get(job.id).state, JobState.CANCELLED)
         self.q.start()  # worker must skip the cancelled job without crashing
+
+    def test_cancel_during_retry_backoff_does_not_resume(self):
+        """A job cancelled while it reads "Retrying in Ns" must NOT run the
+        attempt it was stopped for. The retry loop used to overwrite the
+        CANCELLED state with RUNNING after its backoff wait and could even
+        complete — a false 'cancelled' plus wasted work."""
+        import threading
+
+        # Own temp dir + explicit teardown IN this test: the wider 0.5s
+        # backoff means the queue must be stopped and its DB closed before
+        # the shared tearDown deletes its own dir (Windows won't unlink an
+        # open sqlite file).
+        tmp = tempfile.TemporaryDirectory()
+        db = Database(Path(tmp.name) / "backoff.sqlite3")
+        q = JobQueue(db, max_retries=3, backoff_s=0.5)  # a wide window
+        started = threading.Event()
+        calls = {"n": 0}
+
+        def flaky(job):
+            calls["n"] += 1
+            started.set()
+            raise TransientError("first attempt fails, then it backs off")
+
+        try:
+            q.register("flaky", flaky)
+            q.start()
+            job = q.enqueue("flaky", {})
+            self.assertTrue(started.wait(5), "handler never ran")
+            # Wait until attempt 1 has RAISED and the job is asleep in its
+            # backoff — cancelling earlier (still RUNNING) would exercise the
+            # already-working cooperative path, not the RETRYING-backoff bug.
+            deadline = time.monotonic() + 5
+            while (q.get(job.id).state is not JobState.RETRYING
+                   and time.monotonic() < deadline):
+                time.sleep(0.02)
+            self.assertEqual(q.get(job.id).state, JobState.RETRYING)
+            self.assertTrue(q.cancel(job.id))
+            # Wait PAST the 0.5s backoff — the bug only manifests when the
+            # sleep expires and the loop resumes. Checking earlier would catch
+            # the transient CANCELLED before the buggy resume even happens.
+            time.sleep(1.2)
+            self.assertEqual(q.get(job.id).state, JobState.CANCELLED)
+            # The decisive assertion: the stopped attempt never re-ran.
+            self.assertEqual(calls["n"], 1)
+        finally:
+            q.stop()
+            db.close()
+            tmp.cleanup()
 
     def test_manual_retry_of_failed_job(self):
         attempts = {"n": 0}
