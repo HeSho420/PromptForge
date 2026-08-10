@@ -1,7 +1,15 @@
+import { lazy, Suspense } from "react";
 import { api } from "../api";
 import { revealOnLoad } from "./parts";
-import { Viewer3D } from "./Viewer3D";
 import type { Asset } from "../types";
+
+/* three.js is ~600 kB of the app bundle and a mesh is the RAREST result
+   kind — most sessions never show one. Loading the viewer on demand keeps
+   first paint light on the weak machines this project promises to run on;
+   the chunk fetch hides inside the mesh's own render time. */
+const Viewer3D = lazy(() =>
+  import("./Viewer3D").then((m) => ({ default: m.Viewer3D })),
+);
 
 /**
  * One component that can display anything the pipeline produces.
@@ -33,7 +41,18 @@ export function ResultView({
   if (resolved === "model") {
     return (
       <div className="stack" style={{ gap: 8 }}>
-        <Viewer3D url={src} mode={mode} height={height} />
+        {/* The fallback mirrors Viewer3D's own scaffold (canvas box + note)
+            so the moment the chunk lands nothing on screen moves. */}
+        <Suspense
+          fallback={
+            <div className="viewer3d">
+              <div className="viewer3d-canvas" style={{ height }} />
+              <span className="viewer3d-note">loading the 3D viewer…</span>
+            </div>
+          }
+        >
+          <Viewer3D url={src} mode={mode} height={height} />
+        </Suspense>
         <div className="row" style={{ gap: 8 }}>
           <a className="btn ghost small" href={src} download>
             Download GLB
