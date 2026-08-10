@@ -2147,6 +2147,13 @@ class Services:
                         if i == n - 1:
                             last_inpaint = {"checkpoint": ckpt,
                                             "variant": variant or "modern"}
+                            if inpaint_denoise is not None:
+                                # The structure guard must survive into the
+                                # retry recipe — without this a whole-frame
+                                # restyle retry rendered at the template
+                                # DEFAULT denoise, regenerating the very
+                                # picture the guard exists to keep.
+                                last_inpaint["denoise"] = inpaint_denoise
                     else:
                         res = self.inpainting.inpaint(current, mask,
                                                       step_positive)
@@ -2684,6 +2691,30 @@ class Services:
                                 recipe["variant"] = swap_variant
                             tried_ckpts.add(recipe.get("checkpoint"))
                             tried_variants.add(recipe.get("variant"))
+                            if (recipe.get("denoise") is not None
+                                    and swap_variant
+                                    and swap_variant != "universal"):
+                                # The denoise dial belongs to the universal
+                                # technique; a different-technique rung runs
+                                # that technique's own defaults.
+                                recipe.pop("denoise")
+                            elif (recipe.get("denoise") == 0.6
+                                    and base_mask is not None
+                                    and quality.mask_fraction(base_mask)
+                                    > quality.MASK_CEILING):
+                                # Whole-frame restyle rung, measured live
+                                # (RTX 4060 A/B): 0.6 keeps the composition
+                                # but can undershoot the asked-for look; 0.8
+                                # spends real change while staying short of
+                                # the full regeneration that loses the
+                                # photo. Rolling the same 0.6 twice is not a
+                                # strategy — the ladder's own rule.
+                                recipe["denoise"] = 0.8
+                                job.log("info",
+                                        "Retry raises denoise 0.6 → 0.8: "
+                                        "the look still misses the request, "
+                                        "so the composition guard loosens "
+                                        "one notch (never all the way)")
                             if can_swap_model:
                                 # Kwargs gated on the adapter's capability.
                                 res2 = self.inpainting.inpaint(  # type: ignore[call-arg]

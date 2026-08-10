@@ -528,6 +528,52 @@ class EditPipelineIntegrationTests(unittest.TestCase):
         self.assertIn("Round 2 kept", logs)
         self.assertIn("weakest category", logs)
 
+    def test_whole_frame_restyle_retry_escalates_denoise(self):
+        """Measured live (RTX 4060 A/B): 0.6 keeps composition but can
+        undershoot the look. A retry must spend MORE denoise (0.8), never
+        re-roll the same 0.6 — and never fall back to the template default,
+        which regenerates the whole picture (the recipe used to drop the
+        denoise entirely)."""
+        class VariantInpaint:
+            name = "fake-variant"
+            is_mock = False
+            supports_variants = True
+            calls: list[dict] = []
+
+            def inpaint(self, image, mask, prompt, *, negative="",
+                        checkpoint=None, variant="modern", denoise=None):
+                VariantInpaint.calls.append(
+                    {"variant": variant, "denoise": denoise})
+                return EditResult(image=Image.new("RGB", image.size),
+                                  adapter=self.name, is_mock=False, meta={})
+
+        VariantInpaint.calls = []
+        self.s.inpainting = VariantInpaint()
+        self.s.llm = DeadLLM()
+        full = Image.new("L", (32, 32), 255)
+        self.s._text_mask = lambda *a, **k: (full, {"peak": 0.9})
+        self.s._next_edit_recipe = lambda *a, **k: (None, None)
+        # Consumption order (traced): verify_mask eats reply 1 as a harmless
+        # advisory no-op (no "match" key), inspect eats reply 2, scorecard
+        # eats reply 3 (no SCORE_KEYS → None), and attempt 1's adherence
+        # fallback eats reply 4. The 70 makes attempt 1 miss; round 1's
+        # judges hit an empty script and keep the best — the assertions are
+        # settled by then, because the retry RENDER itself carries the 0.8.
+        self.s.critic = ScriptedCritic([
+            '{"issues": []}', self._score_json(70),
+            '{"issues": []}', self._score_json(96),
+        ])
+        self.s.start()
+        job = self.s.queue.enqueue("image_edit", {
+            "asset_id": self.asset.id, "prompt": "make the sky a warm sunset"})
+        done = self.s.queue.wait_for(job.id, timeout=20)
+        self.assertEqual(done.state.value, "completed", done.error)
+        denoises = [c["denoise"] for c in VariantInpaint.calls]
+        self.assertEqual(denoises[0], 0.6)         # the measured floor
+        self.assertEqual(denoises[-1], 0.8)        # the escalation rung
+        logs = " ".join(e["msg"] for e in done.logs)
+        self.assertIn("Retry raises denoise 0.6 → 0.8", logs)
+
     def test_retry_that_undoes_the_edit_is_rejected(self):
         """Regression (seen live): a retry drifting back toward the ORIGINAL
         photo averages higher — identity/consistency soar as the edit fades —
