@@ -350,5 +350,35 @@ class TemplateOnDisk(unittest.TestCase):
         self.assertNotIn("mask", params)
 
 
+class InpaintFallback(unittest.TestCase):
+    """The masked route promised when Kontext silently declines an edit.
+
+    Regression: this path called quality.enhance_prompt with a `log` kwarg
+    that does not exist and without the required `task` argument — a
+    guaranteed TypeError, so every declined Kontext edit died on a raw
+    error instead of the promised fallback (found by mypy)."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.s = Services(Settings(
+            data_dir=Path(self.tmp.name), inpaint_backend="mock",
+            segment_backend="mock", critic_model="", first_run_setup=False,
+            comfyui_dir="", llm_url="http://127.0.0.1:9/v1"))
+        self.addCleanup(self.s.stop)
+
+    def test_declined_edit_lands_on_the_masked_route(self):
+        image = Image.new("RGB", (64, 64), (20, 30, 40))
+        good = Image.new("L", (64, 64), 0)
+        good.paste(255, (16, 16, 48, 48))
+        self.s.auto_mask = lambda *a, **k: quality.MaskChoice(
+            good, "text", "", [])
+        self.s._choose_inpaint = lambda job, instr: ("modern", None)
+        job = FakeJob()
+        out = self.s._inpaint_fallback(job, image,
+                                       "change the jacket to red")
+        self.assertEqual(out.size, image.size)
+
+
 if __name__ == "__main__":
     unittest.main()

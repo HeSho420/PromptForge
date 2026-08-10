@@ -4210,9 +4210,13 @@ class Services:
         self._free_vram(job)
         try:
             posed, _pid = self.comfy.run_graph(graph)
-        except BackendUnavailableError:
+        except BackendUnavailableError as exc:
+            # exc, not negative: passing the negative prompt here stored
+            # "process died: <negative prompt>" in the failure-learning
+            # records (found by mypy — the only call site of ten that
+            # dropped the exception).
             raise self._comfy_died_midrender(job, "pose", positive,
-                                             negative) from None
+                                             exc) from None
         except WorkflowRuntimeError as exc:
             self._diagnose_and_record(job, "pose", positive, str(exc))
             raise
@@ -4475,8 +4479,7 @@ class Services:
                 "Paint the region by hand and run it again.")
         mask = self._refine_mask(choice.mask)
         variant, checkpoint = self._choose_inpaint(job, instruction)
-        enh = quality.enhance_prompt(self.llm, instruction,
-                                     log=lambda m: None)
+        enh = quality.enhance_prompt(self.llm, instruction, "inpaint")
         try:
             result = self.inpainting.inpaint(
                 image, mask, enh["positive"],
