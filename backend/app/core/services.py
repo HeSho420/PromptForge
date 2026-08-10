@@ -1314,14 +1314,21 @@ class Services:
 
     def _monitor_loop(self) -> None:
         comfy_down = 0
+        ollama_nagged = False
         tick = 0
         while not self._monitor_stop.wait(self.MONITOR_INTERVAL_S):
             tick += 1
+            # Mock mode means OFFLINE (the _live_object_info rule): a mocked
+            # instance must never probe, launch or revive the real services —
+            # a resident ComfyUI or Ollama belongs to some other setup.
+            # start() already applies this rule to the peer helper; without
+            # it here this loop launches 'ollama serve' every 4th tick for
+            # as long as a mock instance runs (the job-path twin of this
+            # bug was measured live spending 33s per edit).
+            revive = self.settings.inpaint_backend != "mock"
             # ComfyUI: two consecutive failed probes → restart it.
             try:
-                if self.comfy.is_up():
-                    comfy_down = 0
-                else:
+                if revive and not self.comfy.is_up():
                     comfy_down += 1
                     if comfy_down == 2:
                         self.events.log("error", "ComfyUI is not responding — "
@@ -1329,21 +1336,32 @@ class Services:
                         if self._spawn_comfy() and self._wait_comfy(120):
                             self.events.log("info", "ComfyUI restarted and "
                                                     "healthy again")
-                            comfy_down = 0
                         else:
                             self.events.log("error", "ComfyUI restart failed; "
                                                      "will keep trying")
-                            comfy_down = 0  # re-arm the two-strike counter
+                        comfy_down = 0  # re-arm the two-strike counter
+                else:
+                    comfy_down = 0
             except Exception:  # noqa: BLE001 — the monitor must never die
                 pass
-            # Ollama: same idea, every 4th tick (~1 min).
+            # Ollama: same idea, every 4th tick (~1 min) — but one revival
+            # per downtime, not one per minute: when it cannot come back
+            # (not installed where llm_url points, or the URL is another
+            # product entirely) the old loop spawned it and logged the same
+            # error line forever, drowning Behind the Scenes. A job that
+            # needs the LLM still gets its own attempt via _revive_ollama.
             try:
-                if tick % 4 == 0 and not ollama_is_up(self.settings.llm_url):
-                    exe = shutil.which("ollama")
-                    if exe:
-                        self.events.log("error", "Ollama is not responding — "
-                                                 "restarting it")
-                        self._spawn_ollama(exe)
+                if revive and tick % 4 == 0:
+                    if ollama_is_up(self.settings.llm_url):
+                        ollama_nagged = False
+                    elif not ollama_nagged:
+                        exe = shutil.which("ollama")
+                        if exe:
+                            self.events.log("error",
+                                            "Ollama is not responding — "
+                                            "restarting it")
+                            self._spawn_ollama(exe)
+                            ollama_nagged = True
             except Exception:  # noqa: BLE001
                 pass
             # Model index: keep the online catalog fresh (network-quiet).
