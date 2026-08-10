@@ -149,8 +149,13 @@ export function Pipeline({ job }: { job: Job }) {
   const etaTotal = etaMatch ? Number(etaMatch[1]) : null;
   const remaining =
     etaTotal !== null && elapsed !== null ? etaTotal - elapsed : null;
+  // Past the estimate by a clear margin, the countdown has nothing honest
+  // left to count — "any moment" was sitting on screen for the whole
+  // overrun, which is the worst possible moment to be wrong. Say what is
+  // actually known instead; the elapsed clock beside it keeps the truth.
+  const overdue = remaining !== null && remaining < -20;
   const remainingLabel =
-    remaining === null
+    remaining === null || overdue
       ? null
       : remaining > 90
         ? `${Math.round(remaining / 60)} min`
@@ -197,6 +202,11 @@ export function Pipeline({ job }: { job: Job }) {
         {busy && remainingLabel && (
           <span className="pipe-eta" title="Estimated time remaining">
             ⏱ Estimated time remaining: ~{remainingLabel}
+          </span>
+        )}
+        {busy && overdue && (
+          <span className="pipe-eta" title="The render passed its estimate">
+            ⏱ Taking longer than estimated — still working
           </span>
         )}
         <button
