@@ -171,6 +171,31 @@ class ChooserTests(unittest.TestCase):
         choice = self.s.auto_mask(self.image, "remove the necklace")
         self.assertFalse(choice.ok)
 
+    def test_text_full_coverage_routes_to_whole_frame(self):
+        """CLIPSeg confidently finding the request EVERYWHERE is a
+        whole-frame edit, not a missing answer. Measured live: a sky-only
+        photo asked for a warmer sky scored peak 0.889 at 98% coverage and
+        died with "nothing matching is clearly visible" — the opposite of
+        what the engine had said."""
+        full = box_mask((0, 0, 199, 299))
+        self.s._text_mask = lambda *a, **k: (full, {"peak": 0.89})
+        choice = self.s.auto_mask(self.image, "make the sky a warm sunset")
+        self.assertTrue(choice.ok)
+        self.assertEqual(choice.source, "whole-frame")
+        self.assertGreater(quality.mask_fraction(choice.mask), 0.99)
+        self.assertTrue(any("whole picture" in n for n in choice.notes),
+                        choice.notes)
+
+    def test_subject_confined_full_coverage_keeps_the_strict_path(self):
+        """A garment mask covering ~everything is a segmenter error, not a
+        whole-frame request — the subject-confined path must keep its trim
+        and rejection, never repaint the frame."""
+        full = box_mask((0, 0, 199, 299))
+        self.s._text_mask = lambda *a, **k: (full, {"peak": 0.9})
+        choice = self.s.auto_mask(self.image, "change her dress to red")
+        self.assertNotEqual(choice.source, "whole-frame")
+        self.assertFalse(choice.ok)
+
 
 class LadderFallThroughTests(unittest.TestCase):
     """A REJECTED candidate is one engine failing, not the chooser's answer.

@@ -1364,7 +1364,7 @@ MASK_MIN_FILL = 0.12
 class MaskChoice:
     """A chosen edit region, and how much to trust it."""
     mask: Image.Image | None
-    source: str                 # named-part | text | sam | none
+    source: str     # named-part | text | whole-frame | background | sam | none
     reason: str                 # why there is no mask, when there is none
     notes: list[str]
 

@@ -2036,7 +2036,17 @@ class Services:
                                 # is, and the preview's whole promise is that
                                 # what you approved is what renders. So the
                                 # objection is reported and the region stands.
-                                if mask_source in (None, "user"):
+                                # "whole-frame" is deliberate too: the text
+                                # engine confidently found the named thing
+                                # everywhere, and re-cutting a smaller region
+                                # out of that would undo the routing.
+                                if mask_source == "whole-frame":
+                                    job.log("info",
+                                            "Keeping the whole frame — the "
+                                            "request names essentially the "
+                                            "entire picture, and the check "
+                                            "is advisory")
+                                elif mask_source in (None, "user"):
                                     job.log("info",
                                             "Keeping the region you approved "
                                             "— the check is advisory and your "
@@ -2900,7 +2910,12 @@ class Services:
         through the chooser, which is ordered by strength of evidence, and the
         replacement is only taken if it comes from an engine at least as good
         as the one that produced the original."""
-        rank = {"named-part": 3, "text": 2, "sam": 1, "none": 0}
+        # whole-frame outranks text: it is the text engine's answer PLUS the
+        # evidence that the answer covers everything — a re-cut that comes
+        # back whole-frame should replace a doubted text region, not be
+        # logged as "weaker".
+        rank = {"whole-frame": 3, "named-part": 3, "text": 2, "sam": 1,
+                "none": 0}
         hint = step.get("target") or step["instruction"]
         request = f"{hint}. Not: {why}" if why else str(hint)
         try:
@@ -3515,6 +3530,25 @@ class Services:
         if found is not None:
             notes.append(f"read the request as {', '.join(phrases)} "
                          f"(confidence {report.get('peak')})")
+            if (not confine
+                    and quality.mask_fraction(found) > quality.MASK_CEILING):
+                # The ceiling exists to stop GEOMETRY engines from repainting
+                # everything on a whim. This engine READ the request and
+                # answered, confidently, that the named thing covers
+                # essentially the whole picture — "make the sky warmer" on a
+                # photo that is nearly all sky. That is not a missing answer,
+                # it is a whole-frame edit; failing it with "nothing matching
+                # is clearly visible" stated the opposite of what happened
+                # (measured live). Subject-confined requests keep the strict
+                # path: a garment covering 95% is a segmenter error, and the
+                # matte trim below is what fixes it.
+                log("What you asked to change covers essentially the whole "
+                    "picture — the whole frame is the edit region")
+                return quality.MaskChoice(
+                    Image.new("L", image.size, 255), "whole-frame", "",
+                    notes + ["what you asked to change covers essentially "
+                             "the whole picture, so the whole frame will be "
+                             "repainted to match the request"])
             chosen = gated("text", found)
             if chosen is not None:
                 return chosen
