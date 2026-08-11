@@ -201,6 +201,10 @@ export const api = {
       name?: string;
       idle?: boolean;
     }>("/api/peers/probe", json({ host, port })),
+  peerLog: (host: string, name: string) =>
+    request<{ name: string; text: string }>(
+      `/api/peers/log?host=${encodeURIComponent(host)}&name=${encodeURIComponent(name)}`,
+    ),
   pushModels: (host: string, port?: number) =>
     request<{
       offered: number;

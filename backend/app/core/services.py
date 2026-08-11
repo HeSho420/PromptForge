@@ -1712,8 +1712,16 @@ class Services:
     MONITOR_INTERVAL_S = 15
     INDEX_REFRESH_EVERY = 4 * 60  # monitor ticks (~1h) between index sweeps
 
+    # Consecutive failed automatic ComfyUI restarts before the monitor
+    # stops trying (and stops filling the event log). A crash restart
+    # usually works on attempt one; a machine where ComfyUI CANNOT start
+    # (not installed, no dir configured) used to get two error events
+    # every 30 seconds forever — measured live on the test install.
+    COMFY_RESTART_ATTEMPTS = 3
+
     def _monitor_loop(self) -> None:
         comfy_down = 0
+        comfy_restart_fails = 0
         ollama_nagged = False
         tick = 0
         while not self._monitor_stop.wait(self.MONITOR_INTERVAL_S):
@@ -1726,22 +1734,59 @@ class Services:
             # as long as a mock instance runs (the job-path twin of this
             # bug was measured live spending 33s per edit).
             revive = self.settings.inpaint_backend != "mock"
-            # ComfyUI: two consecutive failed probes → restart it.
+            # ComfyUI: two consecutive failed probes → restart it, a
+            # bounded number of times per downtime. Jobs that need it
+            # keep their own revival attempt (_require_comfy) and their
+            # own honest failure messages either way.
             try:
                 if revive and not self.comfy.is_up():
                     comfy_down += 1
-                    if comfy_down == 2:
+                    if (comfy_down == 2
+                            and comfy_restart_fails
+                            < self.COMFY_RESTART_ATTEMPTS):
                         self.events.log("error", "ComfyUI is not responding — "
                                                  "restarting it")
-                        if self._spawn_comfy() and self._wait_comfy(120):
+                        # A RAISING spawn (unwritable log dir, broken env)
+                        # is a failed attempt like any other: without this
+                        # it skipped both the counter and the re-arm, and
+                        # the loop went silently dead at comfy_down > 2.
+                        try:
+                            revived = (self._spawn_comfy()
+                                       and self._wait_comfy(120))
+                        except Exception:  # noqa: BLE001
+                            revived = False
+                        if revived:
                             self.events.log("info", "ComfyUI restarted and "
                                                     "healthy again")
+                            comfy_restart_fails = 0
                         else:
-                            self.events.log("error", "ComfyUI restart failed; "
-                                                     "will keep trying")
+                            comfy_restart_fails += 1
+                            if (comfy_restart_fails
+                                    >= self.COMFY_RESTART_ATTEMPTS):
+                                self.events.log(
+                                    "error",
+                                    "ComfyUI could not be started after "
+                                    f"{comfy_restart_fails} attempts — "
+                                    "pausing automatic restarts until it "
+                                    "answers again. Run doctor.ps1 (or "
+                                    "the launcher) to fix its install; "
+                                    "renders that need it will still say "
+                                    "exactly what failed.")
+                            else:
+                                self.events.log("error",
+                                                "ComfyUI restart failed; "
+                                                "will keep trying")
                         comfy_down = 0  # re-arm the two-strike counter
                 else:
+                    # Fires on fails alone — comfy_down may already be 0
+                    # right after the capping attempt, and the retraction
+                    # must still happen or "pausing automatic restarts"
+                    # stands as a false last word.
+                    if comfy_restart_fails >= self.COMFY_RESTART_ATTEMPTS \
+                            and revive:
+                        self.events.log("info", "ComfyUI is answering again")
                     comfy_down = 0
+                    comfy_restart_fails = 0
             except Exception:  # noqa: BLE001 — the monitor must never die
                 pass
             # Ollama: same idea, every 4th tick (~1 min) — but one revival

@@ -1403,6 +1403,111 @@ function Sparkline({ points }: { points: number[] }) {
   );
 }
 
+/** Read a peer's whitelisted install/crash logs from HERE — the machine
+ *  that works helps debug the one that does not, without walking over.
+ *  Stays mounted through reachability blips: the peer restarting is
+ *  exactly when its crash log is being read. */
+function PeerLogReader({
+  host,
+  name,
+  reachable,
+}: {
+  host: string;
+  name: string;
+  reachable: boolean;
+}) {
+  const LOGS = [
+    "comfyui-err.log",
+    "comfyui.log",
+    "backend-live-err.log",
+    "doctor-report.txt",
+    "launch.log",
+  ];
+  const [picked, setPicked] = useState(LOGS[0]);
+  // The fetched text stays labeled with the log it came from, so
+  // changing the dropdown cannot mislabel what is on screen.
+  const [shown, setShown] = useState<{ log: string; text: string } | null>(
+    null,
+  );
+  const [err, setErr] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  const read = async () => {
+    setLoading(true);
+    setErr(null);
+    try {
+      const r = await api.peerLog(host, picked);
+      setShown({
+        log: picked,
+        text: r.text.trim() || "(the file exists but is empty)",
+      });
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <details style={{ fontSize: 12 }}>
+      <summary className="dim" style={{ cursor: "pointer" }}>
+        Read its logs (diagnose {name} from here)
+      </summary>
+      <div className="row" style={{ gap: 8, marginTop: 6 }}>
+        <select
+          aria-label="Which log to read"
+          value={picked}
+          onChange={(e) => setPicked(e.target.value)}
+          style={{ fontSize: 12 }}
+        >
+          {LOGS.map((l) => (
+            <option key={l} value={l}>
+              {l}
+            </option>
+          ))}
+        </select>
+        <button
+          type="button"
+          className="btn small ghost"
+          disabled={loading || !reachable}
+          title={
+            reachable ? undefined : "The machine is not answering right now"
+          }
+          onClick={() => void read()}
+        >
+          {loading ? "Reading…" : "Read"}
+        </button>
+      </div>
+      {err && (
+        <div className="dim" style={{ marginTop: 6 }}>
+          {err}
+        </div>
+      )}
+      {shown !== null && (
+        <div style={{ marginTop: 6 }}>
+          <div className="dim mono" style={{ fontSize: 10.5 }}>
+            {shown.log} · last 32 KB
+          </div>
+          <pre
+            style={{
+              marginTop: 4,
+              maxHeight: 240,
+              overflow: "auto",
+              whiteSpace: "pre-wrap",
+              fontSize: 11,
+              background: "var(--panel-2, rgba(0,0,0,0.2))",
+              padding: 8,
+              borderRadius: 6,
+            }}
+          >
+            {shown.text}
+          </pre>
+        </div>
+      )}
+    </details>
+  );
+}
+
 function NetworkPanel() {
   const { data, refresh } = usePolling(api.peers, 5000);
   const [host, setHost] = useState("");
@@ -1669,6 +1774,11 @@ function NetworkPanel() {
                     Ask for its models
                   </button>
                 </div>
+                <PeerLogReader
+                  host={p.host}
+                  name={p.name}
+                  reachable={p.reachable}
+                />
               </div>
             );
           })}

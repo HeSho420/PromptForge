@@ -60,6 +60,10 @@ STATUS_FRESH_S = 12.0        # cached info younger than this needs no probe
 OFFLINE_AFTER_FAILS = 2      # consecutive failed probes before "offline"
 BACKOFF_AFTER_FAILS = 4      # then probe every Nth tick, not every tick
 BACKOFF_EVERY_TICKS = 6
+# A remembered address that has not answered for this long is forgotten:
+# without decay, every test rig and re-IP'd machine ever connected would
+# be re-probed by the scanner forever.
+HOST_MEMORY_S = 14 * 24 * 3600.0
 
 
 class Peer:
@@ -213,6 +217,9 @@ class PeerService:
         # keeps re-probing these, so a peer that reboots comes back on its
         # own without waiting for a beacon to make it through.
         self.known_hosts: set[tuple[str, int]] = set()
+        # When each of them last actually answered — old ones decay out.
+        self._host_last_ok: dict[tuple[str, int], float] = {}
+        self._hosts_saved_at = 0.0
         # ...and they survive restarts: the same file is re-probed at the
         # next start(), so two machines reconnect without rediscovery.
         self._hosts_file = Path(registry.models_dir).parent / "peers.json"
@@ -934,26 +941,55 @@ class PeerService:
             raw = json.loads(self._hosts_file.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return   # first run, or a corrupt file — rediscovery still works
+        now = time.time()
         for e in raw if isinstance(raw, list) else []:
             if not isinstance(e, dict):
                 continue
             host = str(e.get("host") or "").strip()
             port = e.get("port")
-            if host and isinstance(port, int) and 0 < port < 65536:
-                self.known_hosts.add((host, port))
+            last_ok = e.get("last_ok")
+            if not (isinstance(last_ok, int | float) and last_ok > 0):
+                last_ok = now   # a pre-decay file: treat as fresh once
+            if not (host and isinstance(port, int) and 0 < port < 65536):
+                continue
+            if now - float(last_ok) > HOST_MEMORY_S:
+                continue        # decayed: not answered for two weeks
+            self.known_hosts.add((host, port))
+            self._host_last_ok[(host, port)] = float(last_ok)
 
-    def _save_hosts(self, snapshot: list[tuple[str, int]]) -> None:
+    def _save_hosts(self,
+                    snapshot: list[tuple[str, int, float]]) -> None:
         """Write a SNAPSHOT taken under the lock — iterating the live set
         here raced concurrent add_peer calls (scanner + request threads +
         reconnect threads) into 'set changed size during iteration'."""
         try:
             self._hosts_file.parent.mkdir(parents=True, exist_ok=True)
             self._hosts_file.write_text(
-                json.dumps([{"host": h, "port": p}
-                            for h, p in snapshot][:64]),
+                json.dumps([{"host": h, "port": p, "last_ok": ok}
+                            for h, p, ok in snapshot][:64]),
                 encoding="utf-8")
         except OSError:
             pass   # remembering peers is a convenience, never a failure
+
+    def _remember_host(self, host: str, port: int) -> None:
+        """Record that this address answered as a PromptForge just now.
+        Writes the file when something NEW appears, and otherwise at most
+        hourly — the timestamps only need day-scale resolution."""
+        now = time.time()
+        with self._lock:
+            key = (host, port)
+            is_new = key not in self.known_hosts
+            self.known_hosts.add(key)
+            self._host_last_ok[key] = now
+            if not is_new and now - self._hosts_saved_at < 3600:
+                return
+            self._hosts_saved_at = now
+            snapshot = sorted(
+                (h, p, self._host_last_ok.get((h, p), now))
+                for h, p in self.known_hosts
+                if now - self._host_last_ok.get((h, p), now)
+                <= HOST_MEMORY_S)
+        self._save_hosts(snapshot)
 
     # ---------------------------------------------------------------- client
     def peers_list(self) -> list[Peer]:
@@ -991,13 +1027,7 @@ class PeerService:
             return None
         if info.get("token") == self.token:
             return {"self": True, **info}
-        snapshot: list[tuple[str, int]] | None = None
-        with self._lock:
-            if (host, int(port)) not in self.known_hosts:
-                self.known_hosts.add((host, int(port)))
-                snapshot = sorted(self.known_hosts)
-        if snapshot is not None:
-            self._save_hosts(snapshot)
+        self._remember_host(host, int(port))
         with self._lock:
             peer = self.peers.get(info["token"])
             if peer is None:
@@ -1119,6 +1149,18 @@ class PeerService:
                 "license": e.get("license") or "",
                 "meta": meta})
         return entries
+
+    def fetch_log(self, peer: Peer, name: str) -> str:
+        """One whitelisted operational log from a peer — remote diagnosis:
+        the machine that CAN render helps debug the one that cannot. The
+        peer enforces its own whitelist; this is only transport. The read
+        is CAPPED: a real peer serves at most 32 KiB, and 'the peer is
+        not trusted' is this module's doctrine — an impostor streaming an
+        endless body must not fill this machine's RAM."""
+        with urllib.request.urlopen(
+                f"{peer.base}/pf-peer/log/{quote(name, safe='')}",
+                timeout=HTTP_TIMEOUT_S) as resp:
+            return resp.read(64 * 1024).decode("utf-8", "replace")
 
     def post_pull(self, peer: Peer, manifest: list[dict]) -> dict[str, Any]:
         """Offer this machine's model manifest to a peer; it queues what

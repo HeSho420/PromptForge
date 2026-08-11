@@ -894,6 +894,159 @@ class LiveStatusPicture(unittest.TestCase):
                 teller.stop()
 
 
+class RememberedHostsDecay(unittest.TestCase):
+    """Addresses that stopped answering are eventually forgotten — the
+    scanner must not re-probe every test rig and re-IP'd machine ever
+    connected, forever."""
+
+    def test_old_entries_decay_and_fresh_ones_survive(self):
+        from app.core.peers import HOST_MEMORY_S
+        with tempfile.TemporaryDirectory() as tmp:
+            reg_dir = Path(tmp) / "m"
+            reg_dir.mkdir(parents=True)
+            stale = time.time() - HOST_MEMORY_S - 60
+            (Path(tmp) / "peers.json").write_text(json.dumps([
+                {"host": "10.0.0.5", "port": 8765,
+                 "last_ok": time.time() - 60},
+                {"host": "10.0.0.6", "port": 8765, "last_ok": stale},
+                {"host": "10.0.0.7", "port": 8765},   # pre-decay format
+            ]))
+            svc = PeerService(FakeRegistry(reg_dir), share=True,
+                              render=True, http_port=BASE_HTTP + 78,
+                              udp_port=BASE_UDP + 79, name="decay",
+                              loopback_only=True)
+            self.assertIn(("10.0.0.5", 8765), svc.known_hosts)
+            self.assertNotIn(("10.0.0.6", 8765), svc.known_hosts)
+            # No timestamp = an older install's file: kept (fresh once).
+            self.assertIn(("10.0.0.7", 8765), svc.known_hosts)
+
+    def test_saved_files_carry_the_last_answered_time(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            reg_dir = Path(tmp) / "m"
+            reg_dir.mkdir(parents=True)
+            svc = PeerService(FakeRegistry(reg_dir), share=True,
+                              render=True, http_port=BASE_HTTP + 79,
+                              udp_port=BASE_UDP + 80, name="writer",
+                              loopback_only=True)
+            svc._remember_host("10.0.0.9", 8765)
+            raw = json.loads((Path(tmp) / "peers.json").read_text())
+            self.assertEqual(raw[0]["host"], "10.0.0.9")
+            self.assertGreater(raw[0]["last_ok"], time.time() - 30)
+
+
+class RemoteLogReading(unittest.TestCase):
+    """The working machine debugs the broken one from its own UI: the
+    fetch_log transport against the peer's whitelisted log endpoint."""
+
+    def test_fetch_log_reads_a_whitelisted_log(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            reg = FakeRegistry(Path(tmp) / "m")
+            logs = Path(tmp) / "logs"
+            logs.mkdir(parents=True)
+            (logs / "comfyui-err.log").write_text("torch kaboom line")
+            svc = PeerService(reg, share=True, render=True,
+                              http_port=BASE_HTTP + 85,
+                              udp_port=BASE_UDP + 85, name="patient",
+                              loopback_only=True)
+            svc.start()
+            try:
+                from app.core.peers import Peer
+                peer = Peer("tok", "patient", "127.0.0.1", svc.http_port)
+                text = svc.fetch_log(peer, "comfyui-err.log")
+                self.assertIn("torch kaboom line", text)
+                with self.assertRaises(urllib.error.HTTPError) as ctx:
+                    svc.fetch_log(peer, "secrets.txt")
+                self.assertEqual(ctx.exception.code, 404)
+            finally:
+                svc.stop()
+
+
+class MonitorRestartNagCap(unittest.TestCase):
+    """A PC where ComfyUI cannot start must not get two error events
+    every 30 seconds forever. Behavioral: the REAL monitor loop runs
+    against stubs, tick by tick — bounded attempts, one final honest
+    line, silence after, and a recovery notice when it answers again."""
+
+    def _drive(self, up_script, ticks, spawn_raises=False):
+        from types import SimpleNamespace
+        events: list[tuple[str, str]] = []
+
+        class Stop:
+            def __init__(self, n):
+                self.n = n
+
+            def wait(self, _t):
+                self.n -= 1
+                return self.n < 0      # False = run another tick
+
+        ups = iter(up_script)
+        last = {"v": False}
+
+        def is_up():
+            try:
+                last["v"] = next(ups)
+            except StopIteration:
+                pass
+            return last["v"]
+
+        def spawn():
+            if spawn_raises:
+                raise OSError("log dir unwritable")
+            return False
+
+        fake = SimpleNamespace(
+            _monitor_stop=Stop(ticks),
+            MONITOR_INTERVAL_S=0,
+            COMFY_RESTART_ATTEMPTS=Services.COMFY_RESTART_ATTEMPTS,
+            INDEX_REFRESH_EVERY=10 ** 9,
+            settings=SimpleNamespace(inpaint_backend="comfyui",
+                                     llm_url="http://127.0.0.1:9/v1"),
+            comfy=SimpleNamespace(is_up=is_up),
+            events=SimpleNamespace(
+                log=lambda lv, m: events.append((lv, m))),
+            _spawn_comfy=spawn,
+            _wait_comfy=lambda _s: False,
+            _spawn_ollama=lambda _exe: True,   # never spawn real software
+            model_index=SimpleNamespace(refresh_stale=lambda: []),
+        )
+        # The Ollama arm is not under test — and its real probe costs
+        # seconds per tick against a dead URL on some Windows stacks.
+        from unittest.mock import patch
+        with patch("app.core.services.ollama_is_up",
+                   lambda _url: True):
+            Services._monitor_loop(fake)
+        return [m for _lv, m in events if "ComfyUI" in m]
+
+    def test_exactly_bounded_attempts_then_one_final_line_then_silence(self):
+        got = self._drive([False], ticks=12)
+        attempts = Services.COMFY_RESTART_ATTEMPTS
+        self.assertEqual(
+            got.count("ComfyUI is not responding — restarting it"),
+            attempts)
+        self.assertEqual(
+            len([m for m in got if "pausing automatic restarts" in m]), 1)
+        # The final line IS final: nothing after it.
+        self.assertIn("pausing automatic restarts", got[-1])
+
+    def test_recovery_right_after_the_cap_still_retracts(self):
+        # Downs long enough to hit the cap, then up on the very next
+        # tick — the state where comfy_down was just re-armed to 0 and
+        # the retraction used to be skipped.
+        downs = [False] * (2 * Services.COMFY_RESTART_ATTEMPTS)
+        got = self._drive([*downs, True, True], ticks=len(downs) + 2)
+        self.assertIn("ComfyUI is answering again", got[-1])
+        self.assertEqual(got.count("ComfyUI is answering again"), 1)
+
+    def test_a_raising_spawn_counts_as_a_failed_attempt(self):
+        # _spawn_comfy raising used to skip both the counter and the
+        # re-arm: one event, then the loop went silently dead forever.
+        got = self._drive([False], ticks=12, spawn_raises=True)
+        self.assertEqual(
+            got.count("ComfyUI is not responding — restarting it"),
+            Services.COMFY_RESTART_ATTEMPTS)
+        self.assertIn("pausing automatic restarts", got[-1])
+
+
 class AutoUpdatePropagation(unittest.TestCase):
     """When one install runs newer code, the other catches up by itself —
     through its OWN git remote. The peer is only the messenger."""

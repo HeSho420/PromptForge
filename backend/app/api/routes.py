@@ -294,6 +294,36 @@ def create_app(services: Services | None = None) -> Flask:
         except Exception as exc:  # noqa: BLE001 — surfaced, not a 500
             return _error(502, "fetch_failed", str(exc)[:300])
 
+    @api.get("/peers/log")
+    def peers_log():
+        """One whitelisted operational log from a connected peer, proxied
+        for the UI (the browser cannot reach the peer's listener
+        cross-origin). The whitelist lives on the PEER: install/crash
+        logs only, never user data — a refusal passes through honestly."""
+        import json as _json
+        import urllib.error as _uerr
+        host = str(request.args.get("host") or "").strip()
+        name = str(request.args.get("name") or "").strip()
+        if not host or not name:
+            return _error(400, "missing_field", "host and name are required.")
+        peer = services.peers.find_peer(host)
+        if peer is None:
+            return _error(404, "no_peer", f"No connected peer at {host}.")
+        try:
+            text = services.peers.fetch_log(peer, name)
+        except _uerr.HTTPError as exc:
+            detail = ""
+            try:
+                detail = str(_json.loads(exc.read(4096).decode())
+                             .get("error") or "")[:300]
+            except Exception:  # noqa: BLE001 — the status alone will do
+                pass
+            return _error(exc.code if exc.code in (403, 404) else 502,
+                          "peer_refused", detail or f"HTTP {exc.code}")
+        except Exception as exc:  # noqa: BLE001 — surfaced, not a 500
+            return _error(502, "peer_unreachable", str(exc)[:200])
+        return jsonify({"name": name, "text": text})
+
     @api.post("/peers/probe")
     def peers_probe():
         """Connect to a peer by address â€” for networks where the UDP
