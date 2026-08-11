@@ -23,6 +23,29 @@ export interface Job {
   logs: LogEntry[];
   created_at: string;
   updated_at: string;
+  /** When the current attempt started RUNNING (not when it was queued) —
+   *  the honest base for an elapsed-time display. */
+  started_at?: string | null;
+}
+
+/** Prompt-free live picture of a queue — this machine's own, or what a
+ *  peer shares about itself over the LAN. */
+export interface QueueSnapshot {
+  pending: number;
+  paused: boolean;
+  running: {
+    id?: string;
+    type: string;
+    attempts: number;
+    started_at: string | null;
+    stage: string | null;
+  } | null;
+}
+
+/** A PromptForge install's version identity (git commit + commit time). */
+export interface VersionInfo {
+  commit: string;
+  ts: number;
 }
 
 export interface Asset {

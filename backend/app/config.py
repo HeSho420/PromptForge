@@ -89,6 +89,15 @@ class Settings:
     lan_peers: str = field(
         default_factory=lambda: os.environ.get("PROMPTFORGE_PEER_HOSTS", "")
     )
+    # When a LAN peer announces a newer PromptForge, update this install
+    # automatically. The peer is only the messenger: the update itself is
+    # the ordinary git fast-forward from this install's own remote, with
+    # dependency refresh and rollback-on-broken-start — no code ever
+    # crosses the LAN. Applies only when the queue is idle.
+    peer_auto_update: bool = field(
+        default_factory=lambda: os.environ.get(
+            "PROMPTFORGE_PEER_AUTO_UPDATE", "1") not in ("0", "false", "no")
+    )
     # How many times a failing workflow may be sent back to the LLM for repair.
     workflow_max_repairs: int = field(
         default_factory=lambda: int(os.environ.get("PROMPTFORGE_WORKFLOW_REPAIRS", "2"))

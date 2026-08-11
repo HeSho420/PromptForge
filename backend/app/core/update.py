@@ -50,6 +50,8 @@ class UpdateError(RuntimeError):
 class UpdateManager:
     def __init__(self, repo_root: Path):
         self.root = Path(repo_root)
+        self._version_cached = False
+        self._version_value: dict[str, Any] | None = None
 
     # ------------------------------------------------------------------ git
     def _git(self, *args: str, timeout: int = GIT_TIMEOUT_S) -> str:
@@ -84,6 +86,28 @@ class UpdateManager:
 
     def _branch(self) -> str:
         return self._git("rev-parse", "--abbrev-ref", "HEAD")
+
+    def version(self) -> dict[str, Any] | None:
+        """This install's version identity: the git commit it runs, as
+        {"commit": short sha, "ts": committer unix time}, or None when
+        this is not a git clone.
+
+        The committer timestamp is what makes versions COMPARABLE across
+        machines without any ordering service: on a fast-forward-only
+        branch a later commit always carries a later timestamp, and the
+        same commit carries the same timestamp everywhere. Cached for the
+        process lifetime — HEAD only changes through an update, and an
+        update restarts the process."""
+        if self._version_cached:
+            return self._version_value
+        try:
+            sha = self._git("rev-parse", "--short", "HEAD")
+            ts = int(self._git("show", "-s", "--format=%ct", "HEAD"))
+            self._version_value = {"commit": sha, "ts": ts}
+        except Exception:  # noqa: BLE001 — not a repo, or no git binary
+            self._version_value = None
+        self._version_cached = True
+        return self._version_value
 
     # --------------------------------------------------------------- status
     def status(self, fetch: bool = True) -> dict[str, Any]:

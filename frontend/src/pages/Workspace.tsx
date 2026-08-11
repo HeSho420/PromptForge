@@ -1,5 +1,6 @@
 import { useRef, useState, type ReactNode } from "react";
 import { api } from "../api";
+import { QueueDock } from "../components/QueueDock";
 import { Avatar } from "./Avatar";
 import { Forge } from "./Forge";
 import { Motion } from "./Motion";
@@ -181,6 +182,10 @@ export function Workspace() {
           other option, but its roving tabindex takes the non-active modes
           out of the Tab order — the wrong trade for primary navigation, and
           the panels were never wired up as tabpanels to begin with. */}
+      {/* The queue, always in reach: what runs, what waits, and a one-line
+          way to cue up the next task without leaving this page. */}
+      <QueueDock />
+
       <nav className="ws-modes" role="group" aria-label="What to do">
         {MODES.map((m) => (
           <button

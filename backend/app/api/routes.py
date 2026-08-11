@@ -232,27 +232,23 @@ def create_app(services: Services | None = None) -> Flask:
 
     @api.get("/peers")
     def peers():
-        """Other PromptForge machines discovered on the local network."""
-        entries = []
-        for p in services.peers.peers_list():
-            entry = p.to_dict()
-            try:
-                info = services.peers.add_peer(p.host, p.port,
-                                               timeout=2.0,
-                                               pin=False) or {}
-                entry["idle"] = info.get("idle")
-                entry["stats"] = info.get("stats")
-                entry["comfy"] = info.get("comfy")
-                entry["comfy_env"] = info.get("comfy_env")
-                entry["reachable"] = bool(info)
-            except Exception:  # noqa: BLE001
-                entry["reachable"] = False
-            entries.append(entry)
+        """Other PromptForge machines discovered on the local network.
+
+        Answered from the peer status cache — the status loop probes in
+        the background, so this endpoint never blocks on the network
+        (the old version probed every peer serially per UI poll: three
+        quiet peers made this answer take six seconds)."""
         return jsonify({
             "share": services.settings.lan_share,
             "render": services.settings.lan_render,
             "port": getattr(services.peers, "http_port", None),
-            "peers": entries})
+            "auto_update": services.settings.peer_auto_update,
+            "version": services.updates.version(),
+            "name": services.peers.name,
+            # Full detail is fine HERE: this endpoint serves the local UI
+            # only. The trimmed, prompt-free variant is what peers get.
+            "queue": services.queue.snapshot(),
+            "peers": services.peers.peers_status()})
 
     def _take_device(payload: dict, body: dict) -> None:
         """The render-device the user picked by hand ('local', or a peer's

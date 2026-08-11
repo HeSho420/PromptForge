@@ -9,6 +9,7 @@ import base64
 import copy
 import io
 import json
+import logging
 import os
 import re
 import shutil
@@ -91,7 +92,7 @@ from .llm import (
 from .model_intel import ModelIntel
 from .model_scout import ModelScout
 from .model_search import ModelIndex, ModelSearch
-from .peers import PeerService
+from .peers import Peer, PeerService
 from .registry import DownloadError, ModelDownloader, ModelInfo, ModelRegistry
 from .safety import SafetyFilter, SafetyRuleStore, consent_verdict
 from .storage import AssetStore
@@ -1053,11 +1054,18 @@ class Services:
         self.peers = PeerService(
             self.registry, comfy_url=self.settings.comfyui_url,
             share=self.settings.lan_share, render=self.settings.lan_render,
-            busy_check=self.queue.busy,
+            # busy_local, not busy: a job PINNED to a remote machine is
+            # waiting for that machine, not for this GPU — counting it
+            # here made two machines pinned at each other refuse each
+            # other's renders forever (a confirmed livelock).
+            busy_check=self.queue.busy_local,
             static_hosts=[h for h in self.settings.lan_peers.split(",")
                           if h.strip()],
             stats_provider=self._machine_stats,
-            env_provider=self._comfy_env_report)
+            env_provider=self._comfy_env_report,
+            queue_provider=self._queue_public_snapshot,
+            version_provider=self._version_info,
+            auto_update=self.settings.peer_auto_update)
         # Sockets only open for real rendering setups: the mock backend is
         # what every test fixture uses, and hundreds of tests each opening
         # LAN listeners would fight over the ports for nothing.
@@ -1084,6 +1092,18 @@ class Services:
         # dependencies, and restarts into the new version.
         self.updates = UpdateManager(PROJECT_ROOT)
         self.queue.register("update", self._handle_update)
+        # Version identities cross the LAN so machines can compare; when a
+        # peer runs newer code, THIS machine triggers its own normal git
+        # update — the peer is only the messenger, code never crosses.
+        self._auto_update_seen: set[str] = set()
+        self._auto_update_cooldown: dict[str, float] = {}
+        # Single-flight: the hook does a git fetch, and it is invoked from
+        # threads that must never block (the peer status pool, request
+        # threads via add_peer, the delegation wrap). It therefore runs on
+        # its own thread, at most one at a time — which also serializes
+        # its check-then-act guards.
+        self._auto_update_flight = threading.Lock()
+        self.peers.on_newer_peer = self._newer_peer_async
 
         for model in DEFAULT_MODELS:
             existing = self.registry.get(model.name)
@@ -1211,7 +1231,24 @@ class Services:
         self._comfy_main = client
 
     def _handle_update(self, job: Job) -> dict[str, Any]:
-        """Pull what was pushed, refresh what changed, restart into it."""
+        """Pull what was pushed, refresh what changed, restart into it.
+
+        An AUTO-triggered update (payload carries the peer-announced
+        commit) steps aside if any work arrived between its idle check
+        and this moment — applying would restart the app underneath that
+        work. A user-clicked update keeps its meaning: the user chose to
+        restart now."""
+        commit = str((job.payload or {}).get("commit") or "")
+        if commit and self.queue.other_work(job.id):
+            self._auto_update_seen.discard(commit)
+            job.log("info", "Work arrived while this update waited — "
+                            "stepping aside; the update retries by "
+                            "itself once the queue is idle")
+            return {"deferred": True, "commit": commit}
+        if commit:
+            # Counted BEFORE apply: a restart-into-rollback must still
+            # register as a failed attempt on this machine.
+            self._bump_auto_update_attempts(commit)
         try:
             return self.updates.apply(job)
         except UpdateError as exc:
@@ -1316,6 +1353,170 @@ class Services:
             stats.update(ram_used_gb=ram[0], ram_total_gb=ram[1])
         self._stats_cache = (time.time(), stats)
         return stats
+
+    def _queue_public_snapshot(self) -> dict[str, Any]:
+        """The queue picture a PEER may see: depth, pause state, and the
+        running job's type/timing plus its stage KEYWORD only. Stage lines
+        read '[stage] render — step 1/2: …' where the tail can carry the
+        user's words — everything from the dash on is cut, so what crosses
+        the LAN is 'render', never the prompt."""
+        snap = self.queue.snapshot()
+        running = snap.get("running")
+        if running:
+            stage = (running.get("stage") or "").split("—")[0].strip()
+            snap["running"] = {
+                "type": running.get("type"),
+                "attempts": running.get("attempts"),
+                "started_at": running.get("started_at"),
+                "stage": stage or None,
+            }
+        return snap
+
+    def _version_info(self) -> dict[str, Any] | None:
+        """This install's version identity for peers to compare against.
+        None when this is not a git clone — such installs neither trigger
+        nor receive automatic peer updates."""
+        updates = getattr(self, "updates", None)
+        return updates.version() if updates is not None else None
+
+    def _newer_peer_async(self, peer, info: dict[str, Any]) -> None:
+        """Run the update check on its own thread, one at a time.
+
+        The callers (status pool, request threads, the delegation wrap)
+        must never block on the git fetch inside; the single-flight lock
+        also serializes the guards so two peers announcing in the same
+        tick cannot double-enqueue."""
+        if not self._auto_update_flight.acquire(blocking=False):
+            return
+
+        def run() -> None:
+            try:
+                self._maybe_update_from_peer(peer, info)
+            except Exception:  # noqa: BLE001 — a check must never crash
+                logging.getLogger("promptforge.services").debug(
+                    "auto-update check failed", exc_info=True)
+            finally:
+                self._auto_update_flight.release()
+
+        threading.Thread(target=run, daemon=True,
+                         name="pf-auto-update-check").start()
+
+    # After this many failed apply attempts on one commit, automatic
+    # updating for it stops (persisted across restarts): a push that
+    # breaks only THIS machine would otherwise loop update → broken boot
+    # → rollback → update, forever.
+    AUTO_UPDATE_MAX_ATTEMPTS = 2
+
+    def _auto_update_attempts(self) -> dict[str, int]:
+        try:
+            raw = json.loads((self.settings.data_dir
+                              / "auto-update.json").read_text())
+            return {str(k): int(v) for k, v in raw.items()
+                    if isinstance(v, int | float)}
+        except (OSError, ValueError, AttributeError):
+            return {}
+
+    def _bump_auto_update_attempts(self, commit: str) -> None:
+        state = self._auto_update_attempts()
+        state[commit] = state.get(commit, 0) + 1
+        try:
+            (self.settings.data_dir / "auto-update.json").write_text(
+                json.dumps(state))
+        except OSError:
+            pass
+
+    def _maybe_update_from_peer(self, peer, info: dict[str, Any]) -> None:
+        """A LAN peer runs newer code than this install: catch up.
+
+        Called (via the single-flight wrapper) by the peer status loop.
+        The peer only tells us a newer version EXISTS — the update itself
+        is the ordinary, visible git job: fast-forward from this
+        install's own remote, dependency refresh, restart with automatic
+        rollback. Every guard errs toward doing nothing: a wrong 'no'
+        costs a manual update, a wrong 'yes' restarts the app under
+        someone's work."""
+        if not self.settings.peer_auto_update:
+            return
+        theirs = (info.get("version") or {})
+        commit = str(theirs.get("commit") or "")
+        if not commit or commit in self._auto_update_seen:
+            return
+        now = time.time()
+        if now < self._auto_update_cooldown.get(commit, 0.0):
+            return
+        if not self.updates.is_repo():
+            return
+        # Never restart the app under running or queued work; the status
+        # loop re-fires on its next tick once the queue drains (the seen
+        # set is only marked once the version is actually dealt with).
+        if self.queue.busy():
+            return
+        # One update job at a time, ever.
+        if any(j.type == "update" and j.state.value in
+               ("pending", "running", "retrying")
+               for j in self.queue.list()):
+            return
+        # The peer announcing a commit does not mean OUR remote has it —
+        # a dev machine runs local commits it never pushed, and pulling
+        # would find nothing. Fetch first and only queue a job that will
+        # actually change something; a fetch that fails (offline) retries
+        # after a cooldown instead of hammering every status tick.
+        status = self.updates.status(fetch=True)
+        if status.get("error"):
+            # Say so ONCE (the key outlives its expiry, so this event
+            # cannot repeat), then retry quietly on a long cooldown —
+            # offline is normal life for a LAN pair.
+            if commit not in self._auto_update_cooldown:
+                self.events.log(
+                    "info",
+                    f"'{peer.name}' runs newer code ({commit}) but the "
+                    "update source could not be checked "
+                    f"({str(status['error'])[:80]}) — retrying every "
+                    "15 minutes")
+            self._auto_update_cooldown[commit] = now + 900
+            return
+        if not status.get("behind"):
+            self._auto_update_seen.add(commit)
+            self.events.log(
+                "info",
+                f"'{peer.name}' runs {commit}, which is not on the "
+                "update source yet (unpushed work?) — nothing to pull, "
+                "leaving this install as it is")
+            return
+        if status.get("dirty"):
+            # apply() would refuse a dirty checkout anyway — say it here
+            # as one honest event instead of a guaranteed-red failed job.
+            self._auto_update_seen.add(commit)
+            self.events.log(
+                "info",
+                f"An update to {commit} is available, but this install "
+                "has locally edited files — not updating automatically. "
+                "Commit, stash or restore them, then update from "
+                "Settings.")
+            return
+        if (self._auto_update_attempts().get(commit, 0)
+                >= self.AUTO_UPDATE_MAX_ATTEMPTS):
+            # Two applies of this commit already ended in rollback on
+            # THIS machine (persisted across restarts — the in-memory
+            # sets die with the process, the broken-push loop must not
+            # revive with them). Stop trying; the person decides.
+            self._auto_update_seen.add(commit)
+            self.events.log(
+                "error",
+                f"Updating to {commit} failed {self.AUTO_UPDATE_MAX_ATTEMPTS} "
+                "time(s) on this machine and was rolled back — automatic "
+                "updating for it is paused. Update by hand from Settings "
+                "when the cause is fixed.")
+            return
+        self._auto_update_seen.add(commit)
+        self.events.log(
+            "info",
+            f"'{peer.name}' is running a newer PromptForge ({commit}) — "
+            "updating this machine automatically (pulled from the normal "
+            "update source, not from the peer)")
+        self.queue.enqueue("update", {"reason": f"peer '{peer.name}' "
+                                                f"announced {commit}",
+                                      "commit": commit})
 
     def _peer_model_url(self, name: str) -> str | None:
         model = self.registry.get(name)
@@ -1432,26 +1633,71 @@ class Services:
         Two ways in: the user picked a device by hand (payload.device
         carries its host or name — honoured even when this machine is
         free), or automatic delegation found an idle peer while this
-        machine was busy. Either way, an unreachable peer means the job
-        simply renders here, and says so."""
+        machine was busy. The promise differs:
+
+          hand-picked  the user said WHERE. If that machine cannot take
+                       the job — gone, no ComfyUI, refusing renders —
+                       the job FAILS with the reason, loudly: quietly
+                       rendering on a machine the user did not pick looks
+                       like success and is the one outcome they cannot
+                       see. A machine that is merely BUSY is different —
+                       "not yet" is not "cannot" — so the job waits at
+                       the front of the queue until it frees up.
+
+          automatic    the user said "whatever is fastest" — no reachable
+                       idle peer simply means the job renders here."""
         target = (job.payload or {}).get("device")
-        peer = None
+        peer: Peer | None = None
         if target and target not in ("auto", "local"):
             found = self.peers.find_peer(target)
-            if found is not None and self.peers.add_peer(
-                    found.host, found.port, timeout=3.0):
-                peer = found
-                job.log("info", f"[peer] rendering on '{peer.name}' "
-                                f"({peer.host}) — chosen by hand")
-            else:
-                job.log("info", f"[peer] '{target}' is not reachable — "
-                                "rendering on this machine instead")
+            info = (self.peers.add_peer(found.host, found.port,
+                                        timeout=3.0)
+                    if found is not None else None)
+            problem: str | None = None
+            if found is None or not info:
+                problem = (f"'{target}' is not reachable on the network. "
+                           "Check that the machine is on, PromptForge is "
+                           "running there, and the firewall allows it "
+                           "(allow-lan.ps1 on both machines).")
+            elif not info.get("render"):
+                problem = (f"'{found.name}' does not accept renders — "
+                           "turn on render sharing in its Settings → "
+                           "Network.")
+            elif not (info.get("comfy") or {}).get("up"):
+                problem = (f"'{found.name}' cannot render right now: its "
+                           "ComfyUI is not running. Launch PromptForge "
+                           "there (the launcher starts ComfyUI) or run "
+                           "doctor.ps1 on that machine.")
+            elif not info.get("idle"):
+                # Busy is temporary: hold the job at the front of the
+                # queue and re-check in a few seconds. The pause also
+                # stops this loop from hammering the peer with probes.
+                self.queue.requeue_front(
+                    job, f"[peer] '{found.name}' is busy with its own "
+                         "work — waiting for it (pick Render: auto to "
+                         "use whichever machine frees up first)")
+                time.sleep(3.0)
+                return
+            if problem is not None or found is None:
+                msg = (f"This job was pinned to '{target}' and was NOT "
+                       f"rendered: {problem}")
+                self.events.log("error", msg)
+                self.queue.fail_job(job, msg)
+                return
+            peer = found
+            job.log("info", f"[peer] rendering on '{found.name}' "
+                            f"({found.host}) — chosen by hand")
+            self.events.log("info", f"'{job.type}' renders on "
+                                    f"'{found.name}' — chosen by hand")
         elif target != "local":
             peer = self.peers.best_idle_peer()
             if peer is not None:
                 job.log("info", f"[peer] this machine is busy and "
                                 f"'{peer.name}' ({peer.host}) is idle — "
                                 "its GPU renders this job")
+                self.events.log("info", f"This machine is busy — "
+                                        f"'{job.type}' renders on idle "
+                                        f"'{peer.name}' instead")
         if peer is None:
             execute(job)
             return
@@ -6179,14 +6425,29 @@ class Services:
                 "This build runs mock renders only — real rendering and "
                 "reconstruction need the ComfyUI backend.")
         # A DELEGATED job talks to another machine's ComfyUI. That machine
-        # is not ours to restart: if the peer stops answering, drop the
-        # binding and carry on with the local checks below — the job simply
-        # finishes on this machine instead.
+        # is not ours to restart: if the peer stops answering, what happens
+        # next depends on the promise. A job the user PINNED to that
+        # machine fails loudly — rendering it here would be doing the one
+        # thing they said not to do, invisibly. An auto-delegated job
+        # drops the binding and carries on with the local checks below —
+        # it simply finishes on this machine instead, and says so.
         if getattr(self._comfy_tls, "client", None) is not None:
             if self.comfy.is_up():
                 return
+            device = str((job.payload or {}).get("device") or "")
+            if device and device not in ("auto", "local"):
+                msg = (f"'{device}' stopped answering mid-render. Nothing "
+                       "was rendered on this machine. Check that the "
+                       "other PC is on and PromptForge is running there, "
+                       "then press Retry — or set Render: this PC to run "
+                       "the job locally.")
+                self.events.log("error", msg)
+                raise PermanentError(msg)
             job.log("info", "[peer] the delegated machine stopped "
                             "answering — continuing on this machine")
+            self.events.log("info", "A delegated render's peer stopped "
+                                    "answering mid-job — continuing on "
+                                    "this machine")
             self._comfy_tls.client = None
         # health() is an OPTIONAL capability, probed the same way free_memory()
         # is. The adapter boundary here is duck-typed and every fake in the
@@ -8557,6 +8818,11 @@ class Services:
             job.log("info", "[stage] scene — reading the geometry of the "
                             "photograph")
             layers.append(("front", self._mesh_one_layer(job, image)))
+        except PermanentError:
+            # A job pinned to a peer that died mid-render must fail NOW,
+            # loudly — swallowing it here kept the job visibly running
+            # against a dead binding for whole retry rounds.
+            raise
         except Exception as exc:  # noqa: BLE001
             job.log("error", f"Scene reconstruction failed: {exc}")
             self._diagnose_and_record(job, "scene3d", "", str(exc))
@@ -9086,6 +9352,8 @@ class Services:
                         try:
                             self._require_comfy(job)
                             orbit_mask = self._subject_matte(source_image)
+                        except PermanentError:
+                            raise   # pinned peer died mid-render: fail NOW
                         except Exception:  # noqa: BLE001
                             orbit_mask = None
                 if orbit_mask is None and \

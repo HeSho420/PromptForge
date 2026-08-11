@@ -1,5 +1,13 @@
 import { Fragment, useCallback, useEffect, useRef, useState } from "react";
-import { api, pollJob, usePolling } from "../api";
+import {
+  api,
+  getRenderDevice,
+  onRenderDevice,
+  pollJob,
+  setRenderDevice,
+  usePolling,
+} from "../api";
+import type { PeerStatus } from "../api";
 import { BeforeAfter, JobList, revealOnLoad } from "../components/parts";
 import { Pipeline } from "../components/Pipeline";
 import type {
@@ -8,6 +16,7 @@ import type {
   Job,
   RepoCandidate,
   SafetyRule,
+  VersionInfo,
   WeightFile,
 } from "../types";
 
@@ -1242,28 +1251,179 @@ function SafetyRules() {
 
 /* -------- Network: peers on the LAN (model transfer + delegation) -------- */
 
+/** "2m 10s" since an ISO timestamp; clamped at zero when clocks disagree. */
+function elapsedSince(iso: string | null | undefined): string | null {
+  if (!iso) return null;
+  const ms = Date.now() - new Date(iso).getTime();
+  if (!Number.isFinite(ms)) return null;
+  const s = Math.max(0, Math.floor(ms / 1000));
+  const m = Math.floor(s / 60);
+  const h = Math.floor(m / 60);
+  if (h > 0) return `${h}h ${m % 60}m`;
+  if (m > 0) return `${m}m ${s % 60}s`;
+  return `${s}s`;
+}
+
+function fmtUptime(secs: number | null | undefined): string | null {
+  if (secs == null) return null;
+  const m = Math.floor(secs / 60);
+  const h = Math.floor(m / 60);
+  const d = Math.floor(h / 24);
+  if (d > 0) return `${d}d ${h % 24}h`;
+  if (h > 0) return `${h}h ${m % 60}m`;
+  return `${Math.max(1, m)}m`;
+}
+
+/** One line saying what the peer is DOING right now, plus how urgent
+ *  that is to look at. */
+function peerActivity(p: PeerStatus): {
+  text: string;
+  tone: "ok" | "warn" | "err";
+} {
+  if (!p.reachable) {
+    return {
+      text:
+        `offline — last answered ${Math.round(p.seen_ago_s)}s ago` +
+        (p.last_error ? ` (${p.last_error})` : ""),
+      tone: "err",
+    };
+  }
+  const q = p.queue;
+  const r = q?.running;
+  if (r) {
+    const bits = [
+      r.type,
+      r.stage ? `${r.stage} stage` : null,
+      elapsedSince(r.started_at),
+    ].filter(Boolean);
+    const wait = q && q.pending > 0 ? ` · ${q.pending} waiting` : "";
+    return { text: `working: ${bits.join(" · ")}${wait}`, tone: "ok" };
+  }
+  if (q?.paused) return { text: "its queue is paused", tone: "warn" };
+  if (q && q.pending > 0)
+    return { text: `${q.pending} job(s) queued`, tone: "ok" };
+  if (p.comfy && !p.comfy.up)
+    return {
+      text: "idle — but its ComfyUI is not running, so it cannot render",
+      tone: "warn",
+    };
+  return { text: "idle — ready to take renders", tone: "ok" };
+}
+
+/** How the peer's version relates to this install's, in plain words. */
+function versionNote(
+  mine: VersionInfo | null | undefined,
+  p: PeerStatus,
+  myAutoUpdate: boolean,
+): { text: string; tone: "ok" | "warn" } | null {
+  const theirs = p.version;
+  if (!theirs) return null;
+  if (!mine) return { text: `runs ${theirs.commit}`, tone: "ok" };
+  if (theirs.commit === mine.commit)
+    return { text: `same version (${mine.commit})`, tone: "ok" };
+  if (theirs.ts > mine.ts)
+    return {
+      text:
+        `runs newer code (${theirs.commit}) — ` +
+        (myAutoUpdate
+          ? "this PC updates itself when its queue is idle"
+          : "auto-update is off here; install it from Settings → Updates"),
+      tone: "warn",
+    };
+  return {
+    text:
+      `runs older code (${theirs.commit}) — ` +
+      (p.auto_update === false
+        ? "its auto-update is off; update it from its own Settings page"
+        : "it catches up automatically when idle"),
+    tone: "warn",
+  };
+}
+
+/** Labelled utilisation bar, the rail's gpu-bar reused at card size. */
+function MiniBar({
+  label,
+  pct,
+  text,
+  hot,
+}: {
+  label: string;
+  pct: number;
+  text: string;
+  hot?: boolean;
+}) {
+  const clamped = Math.max(0, Math.min(100, Math.round(pct)));
+  return (
+    <div
+      style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 170 }}
+    >
+      <span className="dim" style={{ fontSize: 11, width: 36 }}>
+        {label}
+      </span>
+      <div className="gpu-bar" style={{ flex: 1 }}>
+        <div style={{ width: `${clamped}%` }} className={hot ? "hot" : ""} />
+      </div>
+      <span
+        className="mono"
+        style={{ fontSize: 11, minWidth: 62, textAlign: "right" }}
+      >
+        {text}
+      </span>
+    </div>
+  );
+}
+
+/** GPU-utilisation history as a small polyline — "how is it performing"
+ *  at a glance, accumulated from this page's own polls. */
+function Sparkline({ points }: { points: number[] }) {
+  if (points.length < 2) return null;
+  const w = 120;
+  const h = 26;
+  const step = w / (points.length - 1);
+  const line = points
+    .map((p, i) => {
+      const y = h - (Math.max(0, Math.min(100, p)) / 100) * (h - 2) - 1;
+      return `${(i * step).toFixed(1)},${y.toFixed(1)}`;
+    })
+    .join(" ");
+  return (
+    <svg
+      width={w}
+      height={h}
+      aria-hidden
+      style={{ opacity: 0.85, flexShrink: 0 }}
+    >
+      <polyline
+        points={line}
+        fill="none"
+        stroke="var(--ok)"
+        strokeWidth="1.5"
+      />
+    </svg>
+  );
+}
+
 function NetworkPanel() {
-  const [data, setData] = useState<Awaited<
-    ReturnType<typeof api.peers>
-  > | null>(null);
+  const { data, refresh } = usePolling(api.peers, 5000);
   const [host, setHost] = useState("");
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState<string | null>(null);
-
-  const refresh = async () => {
-    try {
-      setData(await api.peers());
-    } catch {
-      /* the panel simply stays as it was */
-    }
-  };
+  const [device, setDevice] = useState(getRenderDevice());
+  // The rail's picker and this page's "Render here" buttons are the same
+  // setting — follow changes made anywhere.
+  useEffect(() => onRenderDevice(setDevice), []);
+  // GPU-utilisation history per peer host, fed by the poll above.
+  const histRef = useRef<Map<string, number[]>>(new Map());
 
   useEffect(() => {
-    void refresh();
-    const t = window.setInterval(() => void refresh(), 10_000);
-    return () => window.clearInterval(t);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+    for (const p of data?.peers ?? []) {
+      const util = p.stats?.gpu_util_pct;
+      if (util == null || !p.reachable) continue;
+      const hist = histRef.current.get(p.host) ?? [];
+      hist.push(util);
+      histRef.current.set(p.host, hist.slice(-40));
+    }
+  }, [data]);
 
   const connect = async () => {
     const target = host.trim();
@@ -1276,12 +1436,68 @@ function NetworkPanel() {
       setNote(`Connected to '${r.name}' — models now copy between the two
         machines, and renders delegate when one is busy and the other idle.`);
       setHost("");
-      await refresh();
+      refresh();
     } catch (e) {
       setNote((e as Error).message);
     } finally {
       setBusy(false);
     }
+  };
+
+  const pushModels = async (p: PeerStatus) => {
+    if (
+      !window.confirm(
+        `Send every model on this machine to '${p.name}'? It downloads ` +
+          "what it is missing over your network (checksum-verified) — " +
+          "that can be many gigabytes of disk on the other machine.",
+      )
+    )
+      return;
+    setBusy(true);
+    setNote(null);
+    try {
+      const r = await api.pushModels(p.host, p.port);
+      setNote(
+        `Offered ${r.offered} model(s) to ${p.name}: it queued ` +
+          `${r.queued.length} download(s) (watch its Queue page) and ` +
+          `already had ${r.already.length}.`,
+      );
+    } catch (e) {
+      setNote((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const fetchModels = async (p: PeerStatus) => {
+    if (
+      !window.confirm(
+        `Ask '${p.name}' for its models? THIS machine downloads every ` +
+          "model it is missing over your network (checksum-verified) — " +
+          "that can be many gigabytes of disk here.",
+      )
+    )
+      return;
+    setBusy(true);
+    setNote(null);
+    try {
+      const r = await api.fetchModels(p.host, p.port);
+      setNote(
+        `${p.name} offered ${r.offered} model(s): queued ` +
+          `${r.queued.length} download(s) here (watch the Queue page); ` +
+          `${r.already.length} already on this machine.`,
+      );
+    } catch (e) {
+      setNote((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const pickDevice = (h: string) => {
+    const next = device === h ? "auto" : h;
+    setDevice(next);
+    setRenderDevice(next);
   };
 
   const peers = data?.peers ?? [];
@@ -1291,135 +1507,172 @@ function NetworkPanel() {
       <p className="dim" style={{ margin: 0, fontSize: 12.5, maxWidth: "64ch" }}>
         PromptForge machines on your network help each other automatically:
         model downloads copy from a peer that already has the file
-        (checksum-verified), and when this machine&apos;s queue is busy a
-        whole render job runs on an idle peer&apos;s GPU. Only the model
-        library is ever shared — never photos or projects.
+        (checksum-verified), renders delegate to whichever machine is
+        idle, and when one install updates, the others catch up by
+        themselves. Only the model library is ever shared — never photos,
+        prompts or projects.
       </p>
       {data && (
         <div className="dim" style={{ fontSize: 12.5 }}>
-          This machine: sharing {data.share ? "on" : "off"}, accepting
-          renders {data.render ? "on" : "off"}, listening on port {data.port}.
+          This machine ({data.name}): sharing {data.share ? "on" : "off"},
+          accepting renders {data.render ? "on" : "off"}, auto-update{" "}
+          {data.auto_update ? "on" : "off"}, port {data.port}
+          {data.version ? ` · version ${data.version.commit}` : ""}.
         </div>
       )}
       {peers.length > 0 ? (
-        <ul style={{ margin: 0, paddingLeft: 18, fontSize: 13 }}>
-          {peers.map((p) => (
-            <li
-              key={`${p.host}:${p.port}`}
-              style={{ marginBottom: 6 }}
-            >
-              <strong>{p.name}</strong> — {p.host}:{p.port}{" "}
-              {p.reachable === false
-                ? "(not answering)"
-                : p.comfy && !p.comfy.up
-                  ? "(⚠ its ComfyUI is not running — it cannot render; run doctor.ps1 there, or relaunch and watch for the ComfyUI VERIFIED line)"
-                  : p.idle
-                    ? "(idle — can take renders)"
-                    : "(busy)"}
-              {p.comfy_env?.python ? (
-                <span className="dim">
-                  {" "}
-                  · its ComfyUI env: Python {p.comfy_env.python},{" "}
-                  {p.comfy_env.torch
-                    ? `torch ${p.comfy_env.torch}${
-                        p.comfy_env.gpu_visible === false
-                          ? " (GPU not visible!)"
-                          : ""
-                      }`
-                    : "no torch installed"}
-                </span>
-              ) : null}
-              {p.comfy?.up && p.comfy.device === "cpu"
-                ? " ⚠ CPU-only rendering"
-                : ""}
-              {p.static ? " · pinned" : ""}
-              {p.stats?.vram_total_mb ? (
-                <span className="dim">
-                  {" "}
-                  · {p.stats.gpu_name ?? "GPU"}:{" "}
-                  {((p.stats.vram_used_mb ?? 0) / 1024).toFixed(1)}/
-                  {Math.round(p.stats.vram_total_mb / 1024)} GB VRAM
-                  {p.stats.ram_total_gb
-                    ? `, ${Math.round(p.stats.ram_used_gb ?? 0)}/${Math.round(
-                        p.stats.ram_total_gb,
-                      )} GB RAM`
+        <div className="stack" style={{ gap: 10 }}>
+          {peers.map((p) => {
+            const act = peerActivity(p);
+            const ver = versionNote(
+              data?.version,
+              p,
+              data?.auto_update ?? true,
+            );
+            const hist = histRef.current.get(p.host) ?? [];
+            const stats = p.stats;
+            const vramPct =
+              stats?.vram_used_mb != null && stats?.vram_total_mb
+                ? (stats.vram_used_mb / stats.vram_total_mb) * 100
+                : null;
+            const ramPct =
+              stats?.ram_used_gb != null && stats?.ram_total_gb
+                ? (stats.ram_used_gb / stats.ram_total_gb) * 100
+                : null;
+            return (
+              <div
+                key={`${p.host}:${p.port}`}
+                className="panel stack"
+                style={{ gap: 6, padding: 12, opacity: p.reachable ? 1 : 0.75 }}
+              >
+                <div className="row" style={{ gap: 8 }}>
+                  <span
+                    className={`dot ${p.reachable ? "good" : "bad"}`}
+                    aria-hidden
+                  />
+                  <strong>{p.name}</strong>
+                  <span className="dim mono" style={{ fontSize: 12 }}>
+                    {p.host}:{p.port}
+                  </span>
+                  {p.latency_ms != null && p.reachable && (
+                    <span className="dim mono" style={{ fontSize: 11 }}>
+                      {p.latency_ms} ms
+                    </span>
+                  )}
+                  {p.static && (
+                    <span className="dim" style={{ fontSize: 11 }}>
+                      · pinned
+                    </span>
+                  )}
+                  {fmtUptime(p.uptime_s) && p.reachable && (
+                    <span className="dim" style={{ fontSize: 11 }}>
+                      · up {fmtUptime(p.uptime_s)}
+                    </span>
+                  )}
+                  <span style={{ flex: 1 }} />
+                  <button
+                    type="button"
+                    className={`btn small${device === p.host ? " primary" : " ghost"}`}
+                    disabled={!p.reachable}
+                    onClick={() => pickDevice(p.host)}
+                    title="Send every new render to this machine (click again to go back to Auto)"
+                  >
+                    {device === p.host ? "★ Renders here" : "Render here"}
+                  </button>
+                </div>
+                <div
+                  style={{
+                    fontSize: 12.5,
+                    color:
+                      act.tone === "err"
+                        ? "var(--err)"
+                        : act.tone === "warn"
+                          ? "var(--safelight, var(--text))"
+                          : "var(--text)",
+                  }}
+                >
+                  {act.text}
+                </div>
+                {p.reachable && stats?.gpu_name && (
+                  <div className="row" style={{ gap: 12, alignItems: "center" }}>
+                    <div className="stack" style={{ gap: 4, flex: 1, minWidth: 200 }}>
+                      {stats.gpu_util_pct != null && (
+                        <MiniBar
+                          label="GPU"
+                          pct={stats.gpu_util_pct}
+                          text={`${stats.gpu_util_pct}%`}
+                        />
+                      )}
+                      {vramPct != null && (
+                        <MiniBar
+                          label="VRAM"
+                          pct={vramPct}
+                          hot={vramPct > 88}
+                          text={`${((stats.vram_used_mb ?? 0) / 1024).toFixed(1)}/${Math.round((stats.vram_total_mb ?? 0) / 1024)}G`}
+                        />
+                      )}
+                      {ramPct != null && (
+                        <MiniBar
+                          label="RAM"
+                          pct={ramPct}
+                          hot={ramPct > 90}
+                          text={`${Math.round(stats.ram_used_gb ?? 0)}/${Math.round(stats.ram_total_gb ?? 0)}G`}
+                        />
+                      )}
+                    </div>
+                    <Sparkline points={hist} />
+                  </div>
+                )}
+                <div className="dim" style={{ fontSize: 12 }}>
+                  {stats?.gpu_name ? `${stats.gpu_name} · ` : ""}
+                  {p.comfy?.up
+                    ? `ComfyUI up (${p.comfy.device ?? "?"})`
+                    : "ComfyUI down"}
+                  {p.comfy?.up && p.comfy.device === "cpu"
+                    ? " ⚠ CPU-only rendering"
                     : ""}
-                </span>
-              ) : null}{" "}
-              <button
-                type="button"
-                className="btn"
-                style={{ fontSize: 11, padding: "2px 8px" }}
-                disabled={busy || p.reachable === false}
-                onClick={() =>
-                  void (async () => {
-                    if (
-                      !window.confirm(
-                        `Send every model on this machine to '${p.name}'? ` +
-                          "It downloads what it is missing over your " +
-                          "network (checksum-verified) — that can be many " +
-                          "gigabytes of disk on the other machine.",
-                      )
-                    )
-                      return;
-                    setBusy(true);
-                    setNote(null);
-                    try {
-                      const r = await api.pushModels(p.host, p.port);
-                      setNote(
-                        `Offered ${r.offered} model(s) to ${p.name}: it queued ` +
-                          `${r.queued.length} download(s) (watch its Queue ` +
-                          `page) and already had ${r.already.length}.`,
-                      );
-                    } catch (e) {
-                      setNote((e as Error).message);
-                    } finally {
-                      setBusy(false);
-                    }
-                  })()
-                }
-              >
-                Send all models
-              </button>{" "}
-              <button
-                type="button"
-                className="btn"
-                style={{ fontSize: 11, padding: "2px 8px" }}
-                disabled={busy || p.reachable === false}
-                onClick={() =>
-                  void (async () => {
-                    if (
-                      !window.confirm(
-                        `Ask '${p.name}' for its models? THIS machine ` +
-                          "downloads every model it is missing over your " +
-                          "network (checksum-verified) — that can be many " +
-                          "gigabytes of disk here.",
-                      )
-                    )
-                      return;
-                    setBusy(true);
-                    setNote(null);
-                    try {
-                      const r = await api.fetchModels(p.host, p.port);
-                      setNote(
-                        `${p.name} offered ${r.offered} model(s): queued ` +
-                          `${r.queued.length} download(s) here (watch the ` +
-                          `Queue page); ${r.already.length} already on ` +
-                          `this machine.`,
-                      );
-                    } catch (e) {
-                      setNote((e as Error).message);
-                    } finally {
-                      setBusy(false);
-                    }
-                  })()
-                }
-              >
-                Ask for its models
-              </button>
-            </li>
-          ))}
-        </ul>
+                  {p.comfy_env?.python
+                    ? ` · env: Python ${p.comfy_env.python}, ${
+                        p.comfy_env.torch
+                          ? `torch ${p.comfy_env.torch}${
+                              p.comfy_env.gpu_visible === false
+                                ? " (GPU not visible!)"
+                                : ""
+                            }`
+                          : "no torch installed"
+                      }`
+                    : ""}
+                </div>
+                {ver && (
+                  <div
+                    className={ver.tone === "warn" ? "" : "dim"}
+                    style={{ fontSize: 12 }}
+                  >
+                    {ver.text}
+                  </div>
+                )}
+                <div className="row" style={{ gap: 8 }}>
+                  <button
+                    type="button"
+                    className="btn small ghost"
+                    disabled={busy || !p.reachable}
+                    onClick={() => void pushModels(p)}
+                  >
+                    Send all models
+                  </button>
+                  <button
+                    type="button"
+                    className="btn small ghost"
+                    disabled={busy || !p.reachable}
+                    onClick={() => void fetchModels(p)}
+                  >
+                    Ask for its models
+                  </button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
       ) : (
         <div className="notice info" style={{ fontSize: 12.5 }}>
           No other PromptForge found yet. On BOTH machines: run{" "}

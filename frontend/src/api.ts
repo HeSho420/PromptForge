@@ -10,11 +10,49 @@ import type {
   Job,
   MaskPreview,
   ModelInfo,
+  QueueSnapshot,
   QueueState,
   RepoCandidate,
   SafetyRule,
+  VersionInfo,
   WeightFile,
 } from "./types";
+
+/** One discovered PromptForge machine, as /api/peers reports it. */
+export interface PeerStatus {
+  name: string;
+  host: string;
+  port: number;
+  static: boolean;
+  seen_ago_s: number;
+  reachable: boolean;
+  latency_ms: number | null;
+  last_error: string | null;
+  info_age_s: number | null;
+  idle?: boolean | null;
+  stats?: {
+    gpu_name?: string;
+    gpu_util_pct?: number;
+    vram_used_mb?: number;
+    vram_total_mb?: number;
+    ram_used_gb?: number;
+    ram_total_gb?: number;
+  } | null;
+  comfy?: {
+    up: boolean;
+    device?: string | null;
+    gpu?: string | null;
+  } | null;
+  comfy_env?: {
+    python?: string;
+    torch?: string | null;
+    gpu_visible?: boolean;
+  } | null;
+  version?: VersionInfo | null;
+  queue?: QueueSnapshot | null;
+  uptime_s?: number | null;
+  auto_update?: boolean;
+}
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const resp = await fetch(path, init);
@@ -37,13 +75,24 @@ const json = (data: unknown): RequestInit => ({
 
 /* The render device picked in the rail: "auto" (default), "local", or a
    peer's host. Injected into every job-launching request body, so one
-   picker governs Studio, Forge, video, motion and avatars alike. */
+   picker governs Studio, Forge, video, motion and avatars alike. Multiple
+   surfaces can change it (the rail select, a peer card's "Render here"),
+   so changes are broadcast — every picker shows the same truth. */
 let renderDevice = localStorage.getItem("pf-device") || "auto";
+const deviceListeners = new Set<(d: string) => void>();
 export const setRenderDevice = (d: string) => {
   renderDevice = d;
   localStorage.setItem("pf-device", d);
+  deviceListeners.forEach((fn) => fn(d));
 };
 export const getRenderDevice = () => renderDevice;
+/** Subscribe to render-device changes; returns the unsubscribe. */
+export const onRenderDevice = (fn: (d: string) => void): (() => void) => {
+  deviceListeners.add(fn);
+  return () => {
+    deviceListeners.delete(fn);
+  };
+};
 const jsonJob = (data: Record<string, unknown>): RequestInit =>
   json(renderDevice === "auto" ? data : { ...data, device: renderDevice });
 
@@ -140,33 +189,11 @@ export const api = {
       share: boolean;
       render: boolean;
       port: number | null;
-      peers: {
-        name: string;
-        host: string;
-        port: number;
-        static: boolean;
-        reachable?: boolean;
-        idle?: boolean | null;
-        stats?: {
-          gpu_name?: string;
-          gpu_util_pct?: number;
-          vram_used_mb?: number;
-          vram_total_mb?: number;
-          ram_used_gb?: number;
-          ram_total_gb?: number;
-        } | null;
-        comfy?: {
-          up: boolean;
-          device?: string | null;
-          gpu?: string | null;
-        } | null;
-        comfy_env?: {
-          python?: string;
-          torch?: string | null;
-          gpu_visible?: boolean;
-        } | null;
-        seen_ago_s: number;
-      }[];
+      auto_update: boolean;
+      version: VersionInfo | null;
+      name: string;
+      queue: QueueSnapshot;
+      peers: PeerStatus[];
     }>("/api/peers"),
   probePeer: (host: string, port?: number) =>
     request<{

@@ -1,6 +1,12 @@
 import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
-import { api, getRenderDevice, setRenderDevice, usePolling } from "./api";
+import {
+  api,
+  getRenderDevice,
+  onRenderDevice,
+  setRenderDevice,
+  usePolling,
+} from "./api";
 import { Behind } from "./pages/Behind";
 import { Gallery, Models, Queue, Settings } from "./pages/other";
 import { Workspace } from "./pages/Workspace";
@@ -44,6 +50,8 @@ function GpuMeter() {
 function PeerChip() {
   const { data } = usePolling(api.peers, 8000);
   const [device, setDevice] = useState(getRenderDevice());
+  // Other surfaces (a peer card's "Render here") share this setting.
+  useEffect(() => onRenderDevice(setDevice), []);
   const peers = data?.peers ?? [];
   const connected = peers.filter((p) => p.reachable !== false);
   useEffect(() => {
@@ -107,7 +115,16 @@ function PeerChip() {
                         vram,
                         ram,
                         p.comfy?.device === "cpu" ? "⚠ CPU render" : "",
-                        p.idle ? "idle" : "busy",
+                        // What it is DOING beats a bare "busy": the job
+                        // type and stage cross the LAN, the prompt never.
+                        p.queue?.running
+                          ? `doing ${p.queue.running.type}` +
+                            (p.queue.running.stage
+                              ? ` (${p.queue.running.stage})`
+                              : "")
+                          : p.idle
+                            ? "idle"
+                            : "busy",
                       ]
                         .filter(Boolean)
                         .join(" · ") || (p.idle ? "idle" : "busy")}

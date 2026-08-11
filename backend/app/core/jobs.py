@@ -68,10 +68,23 @@ class Job:
     created_at: str = field(default_factory=_now)
     updated_at: str = field(default_factory=_now)
     cancel_requested: bool = False
+    # When the CURRENT attempt started running — distinct from created_at,
+    # which includes however long the job waited behind the queue. The UI's
+    # elapsed/ETA math needs the render clock, not the wait clock.
+    started_at: str | None = None
 
     def log(self, level: str, message: str) -> None:
         self.logs.append({"t": _now(), "level": level, "msg": message})
         self.updated_at = _now()
+
+    def stage(self) -> str | None:
+        """The newest '[stage] …' log line, without the marker — what the
+        job is DOING right now, in the words the pipeline logged."""
+        for entry in reversed(self.logs):
+            msg = entry.get("msg", "")
+            if msg.startswith("[stage] "):
+                return msg[len("[stage] "):]
+        return None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -79,6 +92,7 @@ class Job:
             "attempts": self.attempts, "payload": self.payload,
             "result": self.result, "error": self.error, "logs": self.logs,
             "created_at": self.created_at, "updated_at": self.updated_at,
+            "started_at": self.started_at,
         }
 
 
@@ -103,6 +117,13 @@ class JobQueue:
         self._stop = threading.Event()
         self._worker: threading.Thread | None = None
         self._helper: threading.Thread | None = None
+        # Jobs the helper worker has taken out of _pending but not yet
+        # started executing (it does network probes in that gap, so the
+        # gap is SECONDS long). Without this set, busy() reads False in
+        # that window — measured consequence: the peer auto-update saw an
+        # "idle" queue and restarted the app under a job that was seconds
+        # from rendering.
+        self._claimed: set[str] = set()
         self._load_history()
 
     def _load_history(self) -> None:
@@ -169,11 +190,87 @@ class JobQueue:
             helper.join(timeout=timeout)
 
     def busy(self) -> bool:
-        """Anything running or waiting? The peer service answers delegation
-        offers with this — an idle machine is one whose queue is empty."""
+        """Anything running, waiting, or claimed by the helper worker?"""
         with self._lock:
-            return bool(self._pending) or any(
+            return bool(self._pending) or bool(self._claimed) or any(
                 j.state is JobState.RUNNING for j in self._jobs.values())
+
+    def busy_local(self) -> bool:
+        """Busy with THIS machine's own work — what a peer needs to know.
+
+        Jobs pinned to a REMOTE device wait for that machine, not for
+        this one's GPU, so they must not make this machine refuse
+        incoming renders: two machines pinned at each other would
+        otherwise each wait for the other's "busy" forever (confirmed by
+        review — a true livelock, escapable only by cancelling)."""
+        with self._lock:
+            if any(j.state is JobState.RUNNING
+                   for j in self._jobs.values()):
+                return True
+            for jid in list(self._pending) + list(self._claimed):
+                job = self._jobs.get(jid)
+                if job is not None and not self._forced_peer(job):
+                    return True
+            return False
+
+    def other_work(self, exclude_id: str) -> bool:
+        """Anything pending, claimed, or running BESIDES the given job?
+        The auto-triggered update job asks this before restarting the
+        app: work that arrived after its idle check must win."""
+        with self._lock:
+            if self._pending or self._claimed:
+                return True
+            return any(j.state is JobState.RUNNING and j.id != exclude_id
+                       for j in self._jobs.values())
+
+    def snapshot(self) -> dict[str, Any]:
+        """A small live picture of the queue: depth, pause state, and what
+        is running right now. This is what a peer's Network view (and the
+        local queue dock) renders — job ids and types, never payloads."""
+        with self._lock:
+            running = next((j for j in self._jobs.values()
+                            if j.state is JobState.RUNNING), None)
+            return {
+                "pending": len(self._pending),
+                "paused": self._paused,
+                "running": None if running is None else {
+                    "id": running.id,
+                    "type": running.type,
+                    "attempts": running.attempts,
+                    "started_at": running.started_at,
+                    "stage": running.stage(),
+                },
+            }
+
+    def fail_job(self, job: Job, message: str) -> None:
+        """Fail a job from OUTSIDE its handler — the delegation wrap uses
+        this when the machine the user pinned cannot take the job, where
+        raising would kill the worker thread instead of the job. A cancel
+        that won the race stays a cancel: the user's verdict outranks
+        this one."""
+        with self._lock:
+            if job.state is JobState.CANCELLED or job.cancel_requested:
+                return
+            job.error = message
+            job.log("error", message)
+        self._finish(job, JobState.FAILED)
+
+    def requeue_front(self, job: Job, note: str | None = None) -> None:
+        """Put a job the helper worker took back at the FRONT of the
+        queue, still pending. Used when its pinned machine is only
+        momentarily unable (busy with its own work): the job must WAIT
+        for that machine — not fail, not lose its turn, and not silently
+        run somewhere else. The note is logged once, not per retry."""
+        with self._cv:
+            if job.state is JobState.CANCELLED or job.cancel_requested:
+                return
+            job.state = JobState.PENDING
+            if note and (not job.logs
+                         or job.logs[-1].get("msg") != note):
+                job.log("info", note)
+            if job.id not in self._pending:
+                self._pending.appendleft(job.id)
+            self._cv.notify_all()
 
     def register(self, job_type: str, handler: Handler) -> None:
         self._handlers[job_type] = handler
@@ -384,8 +481,16 @@ class JobQueue:
             if job is None:
                 self._pending.remove(jid)
                 continue
-            if helper_alive and self._forced_peer(job):
-                continue
+            if self._forced_peer(job):
+                if helper_alive:
+                    continue
+                # The peer worker is off (LAN rendering disabled), so the
+                # pinned machine cannot be reached from here. Running
+                # locally beats starving the job — but SAY so: silence
+                # here would look like the other machine rendered it.
+                job.log("info", f"[peer] '{self._forced_peer(job)}' was "
+                                "requested, but peer rendering is off on "
+                                "this machine — rendering locally")
             self._pending.remove(jid)
             return jid
         return None
@@ -403,10 +508,12 @@ class JobQueue:
                         continue
                     if (j.payload or {}).get("device") == "local":
                         continue      # pinned to this machine by hand
+                    if self._paused:
+                        continue      # paused means paused — pinned too
                     if self._forced_peer(j):
                         candidate, forced = jid, True
                         break
-                    if running and not self._paused:
+                    if running:
                         candidate = jid
                         break
             if candidate is None:
@@ -430,16 +537,32 @@ class JobQueue:
                     self._pending.remove(candidate)
                 except ValueError:
                     continue      # the main worker got there first — fine
-            job = self.get(candidate)
-            if job is None or job.state is JobState.CANCELLED:
-                continue
-            self._helper_wrap(self._execute, job)
+                # Claimed: out of _pending, not yet RUNNING. busy() counts
+                # this window so nothing (the auto-updater above all)
+                # mistakes a job mid-dispatch for an idle queue.
+                self._claimed.add(candidate)
+            try:
+                job = self.get(candidate)
+                if job is None or job.state is JobState.CANCELLED:
+                    continue
+                try:
+                    self._helper_wrap(self._execute, job)
+                except Exception as exc:  # noqa: BLE001
+                    # A wrap that raises must kill the JOB, never this
+                    # thread: a dead helper leaves the claimed job a
+                    # zombie and silently un-delegates every later one.
+                    self.fail_job(job, "Internal delegation error: "
+                                       f"{str(exc)[:200]}")
+            finally:
+                with self._lock:
+                    self._claimed.discard(candidate)
 
     def _execute(self, job: Job) -> None:
         handler = self._handlers[job.type]
         while True:
             job.state = JobState.RUNNING
             job.attempts += 1
+            job.started_at = _now()
             job.log("info", f"Attempt {job.attempts} started")
             self._persist(job)
             try:

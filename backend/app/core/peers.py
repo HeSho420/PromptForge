@@ -20,8 +20,18 @@ Two capabilities, one subsystem, both stdlib-only:
 Privacy boundary, deliberately hard: the main app keeps listening on
 127.0.0.1 only. What this LAN listener serves is the MODEL library (public
 weights, path-checked under models_dir) and a ComfyUI proxy — never
-assets, photos, jobs or settings. Discovery is a tiny UDP beacon; peers
-vanish from the list when their beacons stop.
+assets, photos, prompts or settings. The one deliberate extension: the
+info endpoint describes what this machine is DOING — job type, a
+code-authored stage keyword ("render", "verify"), queue depth, timings —
+because the owner watching from their other PC needs exactly that. Prompt
+text and payloads never cross; the stage keyword is cut BEFORE the "—"
+where prompt-derived words can appear.
+
+Discovery is a tiny UDP beacon plus an active TCP scanner; a status loop
+keeps a live health picture of every known peer (latency, last error,
+what it is doing) so the UI answers instantly instead of probing serially
+on every poll. Peers that answered once are remembered on disk and
+re-probed after a restart — two machines reconnect by themselves.
 """
 from __future__ import annotations
 
@@ -45,6 +55,11 @@ log = logging.getLogger("promptforge.peers")
 BEACON_INTERVAL_S = 6.0
 PEER_STALE_S = 25.0
 HTTP_TIMEOUT_S = 10.0
+STATUS_INTERVAL_S = 4.0      # how often the status loop refreshes peers
+STATUS_FRESH_S = 12.0        # cached info younger than this needs no probe
+OFFLINE_AFTER_FAILS = 2      # consecutive failed probes before "offline"
+BACKOFF_AFTER_FAILS = 4      # then probe every Nth tick, not every tick
+BACKOFF_EVERY_TICKS = 6
 
 
 class Peer:
@@ -56,15 +71,50 @@ class Peer:
         self.port = port
         self.static = static      # added by hand/env: never pruned
         self.last_seen = time.time()
+        self.first_seen = time.time()
+        # Live health picture, maintained by the status loop (and by any
+        # add_peer probe): the last /pf-peer/info payload, when it arrived,
+        # how long it took, and the current failure streak. The UI and the
+        # delegation chooser read THIS instead of touching the network.
+        self.info: dict[str, Any] | None = None
+        self.info_at: float = 0.0
+        self.latency_ms: float | None = None
+        self.fails: int = 0
+        self.last_error: str | None = None
 
     @property
     def base(self) -> str:
         return f"http://{self.host}:{self.port}"
 
+    @property
+    def reachable(self) -> bool:
+        return self.fails < OFFLINE_AFTER_FAILS
+
     def to_dict(self) -> dict[str, Any]:
         return {"name": self.name, "host": self.host, "port": self.port,
                 "static": self.static,
                 "seen_ago_s": round(time.time() - self.last_seen, 1)}
+
+    def status_dict(self) -> dict[str, Any]:
+        """Everything the UI shows about this peer, answered from cache —
+        no network round-trip hides inside this call."""
+        info = self.info or {}
+        return {
+            **self.to_dict(),
+            "reachable": self.reachable,
+            "latency_ms": self.latency_ms,
+            "last_error": self.last_error,
+            "info_age_s": (round(time.time() - self.info_at, 1)
+                           if self.info_at else None),
+            "idle": info.get("idle"),
+            "stats": info.get("stats"),
+            "comfy": info.get("comfy"),
+            "comfy_env": info.get("comfy_env"),
+            "version": info.get("version"),
+            "queue": info.get("queue"),
+            "uptime_s": info.get("uptime_s"),
+            "auto_update": info.get("auto_update"),
+        }
 
 
 class _PeerHandler(BaseHTTPRequestHandler):
@@ -111,7 +161,10 @@ class PeerService:
                  loopback_only: bool = False,
                  static_hosts: list[str] | None = None,
                  stats_provider: Callable[[], dict] | None = None,
-                 env_provider: Callable[[], dict] | None = None):
+                 env_provider: Callable[[], dict] | None = None,
+                 queue_provider: Callable[[], dict] | None = None,
+                 version_provider: Callable[[], dict | None] | None = None,
+                 auto_update: bool = True):
         self.registry = registry
         self.comfy_url = comfy_url.rstrip("/")
         self.share = share
@@ -140,15 +193,36 @@ class PeerService:
         # Injected by Services: ComfyUI's venv facts (python/torch/GPU),
         # readable even while ComfyUI is down — remote WHY, not just THAT.
         self.env_provider = env_provider
+        # Injected by Services: a prompt-free picture of this machine's
+        # queue (depth + running job type/stage/timing) so the owner's
+        # other PC can SHOW what this one is doing.
+        self.queue_provider = queue_provider
+        # Injected by Services: this install's version identity (git short
+        # sha + commit timestamp). Peers compare it to their own; the newer
+        # side triggers the other's normal git update — code itself never
+        # crosses the LAN.
+        self.version_provider = version_provider
+        # Injected by Services: called (peer, its info) when the status
+        # loop sees a peer running a NEWER version than this install.
+        self.on_newer_peer: Callable[[Peer, dict], None] | None = None
+        # Advertised so the OTHER machine's UI can say honestly whether
+        # this one will catch up by itself or needs a manual update.
+        self.auto_update = auto_update
+        self._started_at = time.time()
         # Every address that ever answered as a PromptForge: the scanner
         # keeps re-probing these, so a peer that reboots comes back on its
         # own without waiting for a beacon to make it through.
         self.known_hosts: set[tuple[str, int]] = set()
+        # ...and they survive restarts: the same file is re-probed at the
+        # next start(), so two machines reconnect without rediscovery.
+        self._hosts_file = Path(registry.models_dir).parent / "peers.json"
+        self._load_hosts()
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._threads: list[threading.Thread] = []
         self._httpd: ThreadingHTTPServer | None = None
         self._index_cache: dict[str, tuple[float, list[dict]]] = {}
+        self._status_tick = 0
 
     # ------------------------------------------------------------------ life
     def start(self) -> None:
@@ -156,7 +230,7 @@ class PeerService:
             return
         self._stop.clear()
         self._start_http()
-        workers = [self._beacon_tx, self._beacon_rx]
+        workers = [self._beacon_tx, self._beacon_rx, self._status_loop]
         if not self.loopback_only:
             workers.append(self._scanner)
         for target in workers:
@@ -165,14 +239,21 @@ class PeerService:
             t.start()
             self._threads.append(t)
         # Hand-configured peers (PROMPTFORGE_PEER_HOSTS): probed over plain
-        # HTTP, so they work even where UDP broadcasts never arrive.
+        # HTTP, so they work even where UDP broadcasts never arrive. Peers
+        # remembered from earlier runs are probed the same way — they were
+        # real once, and a restart must not orphan the pair.
+        remembered = [(h, p) for (h, p) in sorted(self.known_hosts)]
         for entry in self.static_hosts:
             host, _, port = entry.strip().partition(":")
             if host:
-                threading.Thread(
-                    target=self.add_peer,
-                    args=(host, int(port) if port.isdigit() else 8765),
-                    daemon=True, name="pf-peer-static").start()
+                remembered.append(
+                    (host, int(port) if port.isdigit() else 8765))
+        for rhost, rport in dict.fromkeys(remembered):
+            threading.Thread(
+                target=self.add_peer, args=(rhost, rport),
+                kwargs={"pin": any(e.strip().partition(":")[0] == rhost
+                                   for e in self.static_hosts)},
+                daemon=True, name="pf-peer-reconnect").start()
         log.info("peer service up: http :%s, beacon :%s (share=%s render=%s)",
                  self.http_port, self.udp_port, self.share, self.render)
 
@@ -231,10 +312,20 @@ class PeerService:
                     except Exception:  # noqa: BLE001
                         pass
 
+        class Server(ThreadingHTTPServer):
+            # allow_reuse_address (the BaseServer default) lets a SECOND
+            # server bind an already-taken port on Windows — measured
+            # live: a test install silently double-bound the real
+            # install's :8765 and requests landed on whichever process
+            # accepted first. With reuse off the second bind raises and
+            # the port range below moves on to :8766, which is the whole
+            # point of having a range.
+            allow_reuse_address = False
+
         last_error: Exception | None = None
         for port in range(self.http_port, self.http_port + 10):
             try:
-                self._httpd = ThreadingHTTPServer((bind_host, port), Handler)
+                self._httpd = Server((bind_host, port), Handler)
                 self._httpd.daemon_threads = True
                 self.http_port = port
                 break
@@ -315,6 +406,20 @@ class PeerService:
                    if self.env_provider is not None else None)
             comfy = self._background_cached("comfy", self._comfy_status,
                                             5.0)
+            # Version identity: the first call may run git, so it goes
+            # through the background cache too — this endpoint must answer
+            # inside the discovery probes' short timeouts, always.
+            version = (self._background_cached(
+                "version", self.version_provider, 3600.0)
+                if self.version_provider is not None else None)
+            # The queue picture is an in-memory read — served live. A
+            # broken provider must not take the whole endpoint down.
+            queue = None
+            if self.queue_provider is not None:
+                try:
+                    queue = self.queue_provider()
+                except Exception:  # noqa: BLE001 — absent beats broken
+                    queue = None
             req._json(200, {"app": "promptforge", "name": self.name,
                             "token": self.token, "share": self.share,
                             "render": self.render,
@@ -322,7 +427,12 @@ class PeerService:
                             "comfy": comfy or {"up": False, "device": None,
                                                "gpu": None},
                             "comfy_env": env,
-                            "stats": stats})
+                            "stats": stats,
+                            "version": version,
+                            "queue": queue,
+                            "auto_update": self.auto_update,
+                            "uptime_s": round(
+                                time.time() - self._started_at, 1)})
             return
         if path == "/pf-peer/models":
             if not self.share:
@@ -708,7 +818,9 @@ class PeerService:
         re-probed first, so a rebooted peer reconnects by itself."""
         while not self._stop.is_set():
             try:
-                for host, port in list(self.known_hosts):
+                with self._lock:
+                    remembered = list(self.known_hosts)
+                for host, port in remembered:
                     self.add_peer(host, port, timeout=2.0, pin=False)
                 reachable = bool(self.peers_list())
                 if not reachable:
@@ -741,11 +853,119 @@ class PeerService:
                           and now - p.last_seen > PEER_STALE_S]:
                 del self.peers[token]
 
+    # ---------------------------------------------------------------- status
+    def _status_loop(self) -> None:
+        """Keep a live health picture of every known peer.
+
+        ONE place probes; everyone else reads cache. Before this loop the
+        API route re-probed every peer serially on every UI poll (three
+        quiet peers made the Network page block for six seconds), and the
+        delegation gate did the same every few seconds. Now each peer is
+        probed at most once per tick, in parallel, and a peer that keeps
+        failing is probed at a slower rhythm instead of hammered."""
+        while not self._stop.is_set():
+            self._status_tick += 1
+            tick = self._status_tick
+            targets = [p for p in self.peers_list()
+                       if p.fails < BACKOFF_AFTER_FAILS
+                       or tick % BACKOFF_EVERY_TICKS == 0]
+            if targets:
+                from concurrent.futures import ThreadPoolExecutor
+                with ThreadPoolExecutor(
+                        max_workers=min(8, len(targets))) as pool:
+                    list(pool.map(self._probe_peer, targets))
+            self._stop.wait(STATUS_INTERVAL_S)
+
+    def _probe_peer(self, peer: Peer) -> None:
+        t0 = time.time()
+        try:
+            info = self._peer_json(peer, "/pf-peer/info", timeout=3.0)
+            if not isinstance(info, dict) \
+                    or info.get("app") != "promptforge":
+                raise ValueError("did not answer as a PromptForge")
+        except Exception as exc:  # noqa: BLE001 — recorded, never fatal
+            with self._lock:
+                peer.fails += 1
+                peer.last_error = str(exc)[:160]
+            return
+        with self._lock:
+            peer.info = info
+            peer.info_at = time.time()
+            peer.latency_ms = round((peer.info_at - t0) * 1000.0, 1)
+            peer.fails = 0
+            peer.last_error = None
+            # An answering peer is ALIVE even where UDP beacons never
+            # arrive: HTTP keeps it in the list, prune only kills silence.
+            peer.last_seen = peer.info_at
+        self._maybe_notify_newer(peer, info)
+
+    def _maybe_notify_newer(self, peer: Peer, info: dict) -> None:
+        """Fire on_newer_peer when a peer runs newer code than this side.
+
+        Fired on EVERY tick the difference persists — deliberately: the
+        hook's own guards may decline transiently (queue busy) and must
+        get another chance once the reason passes. The hook is cheap and
+        idempotent; it only ever TRIGGERS this install's normal git
+        update — deciding and fetching stay on the trusted path. Both
+        sides run this symmetrically, so whichever machine updates first
+        drags the other along within a status tick."""
+        hook = self.on_newer_peer
+        if hook is None or self.version_provider is None:
+            return
+        try:
+            mine = self.version_provider()
+            theirs = info.get("version")
+            if not (isinstance(mine, dict) and isinstance(theirs, dict)):
+                return
+            mine_ts, theirs_ts = mine.get("ts"), theirs.get("ts")
+            if not (isinstance(mine_ts, int | float)
+                    and isinstance(theirs_ts, int | float)):
+                return
+            if theirs_ts <= mine_ts \
+                    or theirs.get("commit") == mine.get("commit"):
+                return
+            hook(peer, info)
+        except Exception:  # noqa: BLE001 — the status loop must survive
+            log.debug("newer-version hook failed", exc_info=True)
+
+    # ------------------------------------------------------- remembered hosts
+    def _load_hosts(self) -> None:
+        try:
+            raw = json.loads(self._hosts_file.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return   # first run, or a corrupt file — rediscovery still works
+        for e in raw if isinstance(raw, list) else []:
+            if not isinstance(e, dict):
+                continue
+            host = str(e.get("host") or "").strip()
+            port = e.get("port")
+            if host and isinstance(port, int) and 0 < port < 65536:
+                self.known_hosts.add((host, port))
+
+    def _save_hosts(self, snapshot: list[tuple[str, int]]) -> None:
+        """Write a SNAPSHOT taken under the lock — iterating the live set
+        here raced concurrent add_peer calls (scanner + request threads +
+        reconnect threads) into 'set changed size during iteration'."""
+        try:
+            self._hosts_file.parent.mkdir(parents=True, exist_ok=True)
+            self._hosts_file.write_text(
+                json.dumps([{"host": h, "port": p}
+                            for h, p in snapshot][:64]),
+                encoding="utf-8")
+        except OSError:
+            pass   # remembering peers is a convenience, never a failure
+
     # ---------------------------------------------------------------- client
     def peers_list(self) -> list[Peer]:
         self._prune()
         with self._lock:
             return list(self.peers.values())
+
+    def peers_status(self) -> list[dict[str, Any]]:
+        """What the UI shows — answered entirely from the status cache."""
+        self._prune()
+        with self._lock:
+            return [p.status_dict() for p in self.peers.values()]
 
     def add_peer(self, host: str, port: int = 8765,
                  timeout: float = 5.0,
@@ -757,6 +977,7 @@ class PeerService:
         HAND (or from the environment) is pinned and never pruned; one the
         scanner found is not, so it disappears when it really goes away
         and reappears when the scanner sees it again."""
+        t0 = time.time()
         try:
             with urllib.request.urlopen(
                     f"http://{host}:{int(port)}/pf-peer/info",
@@ -765,17 +986,24 @@ class PeerService:
         except Exception as exc:  # noqa: BLE001
             log.info("peer probe %s:%s failed: %s", host, port, exc)
             return None
+        latency_ms = round((time.time() - t0) * 1000.0, 1)
         if info.get("app") != "promptforge":
             return None
         if info.get("token") == self.token:
             return {"self": True, **info}
-        self.known_hosts.add((host, int(port)))
+        snapshot: list[tuple[str, int]] | None = None
+        with self._lock:
+            if (host, int(port)) not in self.known_hosts:
+                self.known_hosts.add((host, int(port)))
+                snapshot = sorted(self.known_hosts)
+        if snapshot is not None:
+            self._save_hosts(snapshot)
         with self._lock:
             peer = self.peers.get(info["token"])
             if peer is None:
-                self.peers[info["token"]] = Peer(
-                    info["token"], str(info.get("name") or host),
-                    host, int(port), static=pin)
+                peer = Peer(info["token"], str(info.get("name") or host),
+                            host, int(port), static=pin)
+                self.peers[info["token"]] = peer
                 log.info("peer '%s' connected at %s:%s",
                          info.get("name"), host, port)
             else:
@@ -783,11 +1011,21 @@ class PeerService:
                 peer.host = host
                 peer.port = int(port)
                 peer.last_seen = time.time()
+            # The probe just fetched a full info payload — cache it, so
+            # a hand-connected peer shows its whole picture immediately
+            # instead of waiting for the next status tick.
+            peer.info = info
+            peer.info_at = time.time()
+            peer.latency_ms = latency_ms
+            peer.fails = 0
+            peer.last_error = None
+        self._maybe_notify_newer(peer, info)
         return info
 
-    def _peer_json(self, peer: Peer, path: str) -> Any:
+    def _peer_json(self, peer: Peer, path: str,
+                   timeout: float = HTTP_TIMEOUT_S) -> Any:
         with urllib.request.urlopen(peer.base + path,
-                                    timeout=HTTP_TIMEOUT_S) as resp:
+                                    timeout=timeout) as resp:
             return json.loads(resp.read().decode())
 
     def find_model_url(self, name: str, sha256: str | None) -> str | None:
@@ -820,13 +1058,21 @@ class PeerService:
 
         A peer with no ComfyUI cannot help however idle it is, and one
         rendering on CPU is a last resort only — delegating a GPU job to
-        it would take longer than waiting for this machine."""
+        it would take longer than waiting for this machine. Answered from
+        the status cache when it is fresh: the delegation gate asks every
+        few seconds, and probing every peer serially on each ask was
+        seconds of network time bought for nothing."""
         cpu_fallback: Peer | None = None
         for peer in self.peers_list():
-            try:
-                info = self._peer_json(peer, "/pf-peer/info")
-            except Exception:  # noqa: BLE001
-                continue
+            info = (peer.info
+                    if peer.info is not None
+                    and time.time() - peer.info_at < STATUS_FRESH_S
+                    else None)
+            if info is None:
+                try:
+                    info = self._peer_json(peer, "/pf-peer/info")
+                except Exception:  # noqa: BLE001
+                    continue
             if not (info.get("render") and info.get("idle")):
                 continue
             comfy = info.get("comfy") or {}
