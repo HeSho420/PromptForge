@@ -1321,12 +1321,24 @@ function versionNote(
   if (!mine) return { text: `runs ${theirs.commit}`, tone: "ok" };
   if (theirs.commit === mine.commit)
     return { text: `same version (${mine.commit})`, tone: "ok" };
+  if (theirs.ts === mine.ts)
+    // Same commit time, different commits: an amend/rebase twin. The
+    // backend (correctly) refuses to pick a direction, so saying
+    // "catches up automatically" would be a standing lie.
+    return {
+      text:
+        `runs different code of the same age (${theirs.commit}) — ` +
+        "auto-update cannot pick a direction here; update by hand if " +
+        "they should match",
+      tone: "warn",
+    };
   if (theirs.ts > mine.ts)
     return {
       text:
         `runs newer code (${theirs.commit}) — ` +
         (myAutoUpdate
-          ? "this PC updates itself when its queue is idle"
+          ? "this PC updates itself when idle (once that version is " +
+            "published to the update source)"
           : "auto-update is off here; install it from Settings → Updates"),
       tone: "warn",
     };
@@ -1708,14 +1720,23 @@ function NetworkPanel() {
                           text={`${stats.gpu_util_pct}%`}
                         />
                       )}
-                      {vramPct != null && (
+                      {vramPct != null ? (
                         <MiniBar
                           label="VRAM"
                           pct={vramPct}
                           hot={vramPct > 88}
                           text={`${((stats.vram_used_mb ?? 0) / 1024).toFixed(1)}/${Math.round((stats.vram_total_mb ?? 0) / 1024)}G`}
                         />
-                      )}
+                      ) : stats?.vram_total_mb ? (
+                        // AMD/Intel peers report the total only (live use is
+                        // an NVIDIA-tool thing) — still better than silence.
+                        <MiniBar
+                          label="VRAM"
+                          pct={0}
+                          hot={false}
+                          text={`${Math.round((stats.vram_total_mb ?? 0) / 1024)}G`}
+                        />
+                      ) : null}
                       {ramPct != null && (
                         <MiniBar
                           label="RAM"

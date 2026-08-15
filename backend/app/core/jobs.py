@@ -161,6 +161,51 @@ class JobQueue:
         self._worker = threading.Thread(target=self._run, name="pf-worker", daemon=True)
         self._worker.start()
 
+    # Job types that fetch bytes rather than render pixels. They run on
+    # their own worker lane so a multi-GB download never makes a render
+    # wait, and they do not count as "busy" anywhere busy-ness gates
+    # rendering (peer 409s, delegation, the idle checks).
+    DOWNLOAD_TYPES = frozenset({"model_download", "node_pack"})
+
+    def start_downloader(self) -> None:
+        """A dedicated worker for DOWNLOAD_TYPES: fetching and rendering
+        proceed side by side. One lane on purpose — parallel downloads
+        would only split the same wire."""
+        dl = getattr(self, "_downloader", None)
+        if dl is not None and dl.is_alive():
+            return
+        self._downloader = threading.Thread(target=self._run_downloader,
+                                            name="pf-worker-dl", daemon=True)
+        self._downloader.start()
+
+    def _run_downloader(self) -> None:
+        while not self._stop.is_set():
+            candidate: str | None = None
+            with self._lock:
+                if not self._paused:
+                    for jid in self._pending:
+                        j = self._jobs.get(jid)
+                        if j is not None and j.type in self.DOWNLOAD_TYPES:
+                            candidate = jid
+                            break
+            if candidate is None:
+                self._stop.wait(1.5)
+                continue
+            with self._cv:
+                try:
+                    self._pending.remove(candidate)
+                except ValueError:
+                    continue      # another worker got there first — fine
+                self._claimed.add(candidate)
+            try:
+                job = self.get(candidate)
+                if job is None or job.state is JobState.CANCELLED:
+                    continue
+                self._execute(job)
+            finally:
+                with self._lock:
+                    self._claimed.discard(candidate)
+
     def start_helper(self, gate, wrap, types: set[str] | frozenset[str]) -> None:
         """A SECOND worker that exists to hand work to an idle network peer.
 
@@ -188,23 +233,41 @@ class JobQueue:
         helper = getattr(self, "_helper", None)
         if helper is not None:
             helper.join(timeout=timeout)
+        dl = getattr(self, "_downloader", None)
+        if dl is not None:
+            dl.join(timeout=timeout)
 
     def busy(self) -> bool:
-        """Anything running, waiting, or claimed by the helper worker?"""
+        """Any RENDER work running, waiting, or claimed? Downloads are
+        deliberately excluded: a machine copying a checkpoint must still
+        accept renders (its own and its peers') — that is the whole point
+        of the download lane."""
         with self._lock:
-            return bool(self._pending) or bool(self._claimed) or any(
-                j.state is JobState.RUNNING for j in self._jobs.values())
+            # Unknown ids count as busy (conservative): a claim whose job
+            # record is not visible yet must not read as an idle queue.
+            for jid in self._pending:
+                j = self._jobs.get(jid)
+                if j is None or j.type not in self.DOWNLOAD_TYPES:
+                    return True
+            for jid in self._claimed:
+                j = self._jobs.get(jid)
+                if j is None or j.type not in self.DOWNLOAD_TYPES:
+                    return True
+            return any(j.state is JobState.RUNNING
+                       and j.type not in self.DOWNLOAD_TYPES
+                       for j in self._jobs.values())
 
     def busy_local(self) -> bool:
         """Busy with THIS machine's own work — what a peer needs to know.
 
-        Jobs pinned to a REMOTE device wait for that machine, not for
-        this one's GPU, so they must not make this machine refuse
+        Jobs pinned to a REMOTE device use that machine, not this one's
+        GPU — whether they are still waiting or already RUNNING through
+        the delegation proxy — so they must not make this machine refuse
         incoming renders: two machines pinned at each other would
-        otherwise each wait for the other's "busy" forever (confirmed by
-        review — a true livelock, escapable only by cancelling)."""
+        otherwise livelock (waiting case) or needlessly serialize
+        (running case) on each other's false "busy"."""
         with self._lock:
-            if any(j.state is JobState.RUNNING
+            if any(j.state is JobState.RUNNING and not self._forced_peer(j)
                    for j in self._jobs.values()):
                 return True
             for jid in list(self._pending) + list(self._claimed):
@@ -476,10 +539,16 @@ class JobQueue:
         gone). If the peer worker is not running, the main worker takes
         them anyway rather than let them starve."""
         helper_alive = self._helper is not None and self._helper.is_alive()
+        dl = getattr(self, "_downloader", None)
+        dl_alive = dl is not None and dl.is_alive()
         for jid in list(self._pending):
             job = self._jobs.get(jid)
             if job is None:
                 self._pending.remove(jid)
+                continue
+            # Download jobs belong to the download lane so renders never
+            # queue behind them; with the lane off they run here as before.
+            if dl_alive and job.type in self.DOWNLOAD_TYPES:
                 continue
             if self._forced_peer(job):
                 if helper_alive:
@@ -500,7 +569,11 @@ class JobQueue:
             candidate: str | None = None
             forced = False
             with self._lock:
+                # A running DOWNLOAD is not render pressure — delegating a
+                # render to a peer because a checkpoint is copying would
+                # leave this machine's own GPU idle.
                 running = any(j.state is JobState.RUNNING
+                              and j.type not in self.DOWNLOAD_TYPES
                               for j in self._jobs.values())
                 for jid in self._pending:
                     j = self._jobs.get(jid)

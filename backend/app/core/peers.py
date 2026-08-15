@@ -463,11 +463,15 @@ class PeerService:
 
     # Operational logs another machine of the SAME OWNER may read to
     # diagnose this one remotely. A fixed whitelist, never a directory
-    # walk: install/crash logs only, no jobs, no prompts-carrying app DBs.
+    # walk: install/crash logs only, no jobs, no prompts-carrying app
+    # DBs. Two of these are PASS-THROUGH streams PromptForge does not
+    # author (ComfyUI's stdout/stderr can echo node inputs), so serving
+    # is additionally limited to machines that are themselves paired
+    # PromptForge peers — not any curious device on the LAN.
     LOG_WHITELIST = frozenset({
         "comfyui.log", "comfyui-err.log", "comfyui-repair.log",
         "comfyui-install.log", "directml-install.log",
-        "torch-cuda-repair.log", "sage-install.log",
+        "torch-cuda-repair.log", "sage-install.log", "xformers-install.log",
         "sam-install.log", "backend-live.log", "backend-live-err.log",
         "doctor-report.txt", "launch.log",
     })
@@ -475,6 +479,17 @@ class PeerService:
     def _serve_log(self, req: _PeerHandler, name: str) -> None:
         if not self.share:
             req._json(403, {"error": "sharing is off"})
+            return
+        # Only machines this install already KNOWS as PromptForge peers
+        # (plus loopback pairs) may read logs: the files can carry
+        # pass-through text this app does not author, and "shows up in
+        # my peer list" is the closest thing a LAN protocol without
+        # secrets has to "is my other machine".
+        source = req.client_address[0]
+        allowed = {p.host for p in self.peers_list()} | {"127.0.0.1"}
+        if source not in allowed:
+            req._json(403, {"error": "logs are readable by paired "
+                                     "PromptForge machines only"})
             return
         if name not in self.LOG_WHITELIST:
             req._json(404, {"error": "not a shareable log"})
@@ -743,6 +758,10 @@ class PeerService:
             try:
                 sock.bind(("", port))
                 bound = True
+                # The startup line prints the BASE port; on a machine
+                # running two installs the actual bound port differs, and
+                # the honest number is the one that helps debugging.
+                log.info("peer discovery listening on udp :%s", port)
                 break
             except OSError:
                 continue
@@ -904,6 +923,10 @@ class PeerService:
             # An answering peer is ALIVE even where UDP beacons never
             # arrive: HTTP keeps it in the list, prune only kills silence.
             peer.last_seen = peer.info_at
+        # A verified answer is exactly what the reconnect memory is for —
+        # beacon-discovered peers never pass through add_peer, and
+        # without this line they were forgotten at every restart.
+        self._remember_host(peer.host, peer.port)
         self._maybe_notify_newer(peer, info)
 
     def _maybe_notify_newer(self, peer: Peer, info: dict) -> None:

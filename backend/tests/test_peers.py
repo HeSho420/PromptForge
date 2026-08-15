@@ -688,6 +688,93 @@ class HostileRequests(unittest.TestCase):
                 svc.stop()
 
 
+class DownloadLane(unittest.TestCase):
+    """Downloads must never block renders: DOWNLOAD_TYPES run on their own
+    worker while the main worker keeps taking render jobs, and a running
+    download does not read as 'busy' anywhere busy-ness gates rendering."""
+
+    class _Db:
+        def query(self, *_a):
+            return []
+
+        def execute(self, *_a):
+            return None
+
+    def test_a_render_finishes_while_a_download_is_still_running(self):
+        q = JobQueue(self._Db())
+        dl_started = threading.Event()
+        release_dl = threading.Event()
+        render_done = threading.Event()
+
+        def dl_handler(_job):
+            dl_started.set()
+            release_dl.wait(timeout=20)
+            return {"ok": True}
+
+        def render_handler(_job):
+            render_done.set()
+            return {"ok": True}
+
+        q.register("model_download", dl_handler)
+        q.register("image_edit", render_handler)
+        q.start()
+        q.start_downloader()
+        try:
+            q.enqueue("model_download", {})
+            self.assertTrue(dl_started.wait(timeout=10),
+                            "the download lane never took the job")
+            q.enqueue("image_edit", {})
+            self.assertTrue(render_done.wait(timeout=10),
+                            "the render waited behind the download")
+            self.assertFalse(release_dl.is_set())
+        finally:
+            release_dl.set()
+            q.stop()
+
+    def test_a_running_download_is_not_render_busy(self):
+        q = JobQueue(self._Db())
+        started = threading.Event()
+        release = threading.Event()
+
+        def dl_handler(_job):
+            started.set()
+            release.wait(timeout=20)
+            return {"ok": True}
+
+        q.register("model_download", dl_handler)
+        q.start()
+        q.start_downloader()
+        try:
+            q.enqueue("model_download", {})
+            self.assertTrue(started.wait(timeout=10))
+            self.assertFalse(
+                q.busy(),
+                "a machine copying a model must still accept renders")
+        finally:
+            release.set()
+            q.stop()
+
+
+class SelfHealingDependencies(unittest.TestCase):
+    """A missing node pack or Ollama model heals itself instead of being a
+    dead end the user must fix by hand."""
+
+    def test_pack_check_queues_an_install_on_real_setups(self):
+        src = inspect.getsource(Services._pack_active)
+        self.assertIn('self.queue.enqueue("node_pack"', src)
+        self.assertIn('inpaint_backend != "mock"', src)
+        self.assertIn('== "absent"', src)   # never blind-reinstall 'broken'
+
+    def test_missing_ollama_models_trigger_a_background_pull(self):
+        from app.core import critic as critic_mod
+        from app.core import llm as llm_mod
+        self.assertTrue(callable(llm_mod.ollama_autopull))
+        self.assertIn("ollama_autopull",
+                      inspect.getsource(llm_mod.LocalLLM.complete))
+        self.assertIn("ollama_autopull",
+                      inspect.getsource(critic_mod.ImageCritic._vision))
+
+
 class DeviceRouting(unittest.TestCase):
     """The picker's contract: forced jobs go through the peer wrap even
     when the gate says no; 'local' jobs never leave this machine."""
@@ -961,6 +1048,43 @@ class RemoteLogReading(unittest.TestCase):
                 svc.stop()
 
 
+class ProbeRemembersHosts(unittest.TestCase):
+    """Beacon-discovered peers never pass through add_peer — the status
+    probe's verified answer must feed the on-disk reconnect memory too,
+    or the primary discovery path is forgotten at every restart."""
+
+    def test_a_successful_status_probe_lands_in_the_hosts_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            teller = PeerService(
+                FakeRegistry(Path(tmp) / "t"), share=True, render=True,
+                comfy_url="http://127.0.0.1:9",
+                http_port=BASE_HTTP + 86, udp_port=BASE_UDP + 86,
+                name="teller4", loopback_only=True)
+            teller.start()
+            try:
+                reg_dir = Path(tmp) / "w"
+                reg_dir.mkdir(parents=True)
+                watcher = PeerService(
+                    FakeRegistry(reg_dir), share=True, render=True,
+                    http_port=BASE_HTTP + 87, udp_port=BASE_UDP + 87,
+                    name="watcher", loopback_only=True)
+                from app.core.peers import Peer
+                peer = Peer("tok-x", "teller4", "127.0.0.1",
+                            teller.http_port)
+                watcher.peers["tok-x"] = peer   # as if a beacon landed
+                watcher._probe_peer(peer)
+                self.assertIn(("127.0.0.1", teller.http_port),
+                              watcher.known_hosts)
+                self.assertTrue((reg_dir.parent / "peers.json").exists())
+            finally:
+                teller.stop()
+
+    def test_log_serving_is_gated_to_known_peer_addresses(self):
+        src = inspect.getsource(PeerService._serve_log)
+        self.assertIn("client_address", src)
+        self.assertIn("paired", src)
+
+
 class MonitorRestartNagCap(unittest.TestCase):
     """A PC where ComfyUI cannot start must not get two error events
     every 30 seconds forever. Behavioral: the REAL monitor loop runs
@@ -1129,6 +1253,7 @@ class AutoUpdatePropagation(unittest.TestCase):
                 if existing_update else [])
             return SimpleNamespace(
                 settings=SimpleNamespace(peer_auto_update=auto),
+                _monitor_stop=SimpleNamespace(is_set=lambda: False),
                 updates=SimpleNamespace(is_repo=lambda: is_repo,
                                         status=lambda fetch=True: remote),
                 queue=SimpleNamespace(
@@ -1266,6 +1391,26 @@ class AutoUpdatePropagation(unittest.TestCase):
         self.assertFalse(q.busy_local())             # LAN view: GPU free
         q.enqueue("t", {})                           # a real local job
         self.assertTrue(q.busy_local())
+
+    def test_busy_local_ignores_a_remote_pinned_job_while_it_RUNS(self):
+        """The delegated job renders on the OTHER machine's GPU — while
+        it runs through the proxy, this machine must still accept
+        renders, or mutually-pinned machines serialize for nothing."""
+        from app.core.jobs import Job, JobState
+
+        class _Db:
+            def query(self, *_a):
+                return []
+
+            def execute(self, *_a):
+                return None
+        q = JobQueue(_Db())
+        q.register("t", lambda j: {"ok": True})
+        job = Job(id="jr", type="t", payload={"device": "192.168.1.99"},
+                  state=JobState.RUNNING)
+        q._jobs[job.id] = job
+        self.assertTrue(q.busy())          # it IS work, locally speaking
+        self.assertFalse(q.busy_local())   # but not this machine's GPU
 
     def test_newer_peer_hook_runs_off_thread_single_flight(self):
         """The hook does a git fetch; its callers (status pool, request
@@ -1442,6 +1587,8 @@ class HonestHandPickedDelegation(unittest.TestCase):
         tls.client = object()
         events: list[tuple[str, str]] = []
         fake = SimpleNamespace(comfy=DeadComfy(), _comfy_tls=tls,
+                               peers=SimpleNamespace(
+                                   find_peer=lambda _d: None),
                                events=SimpleNamespace(
                                    log=lambda lv, m: events.append((lv, m))))
         job = Job(id="jx", type="t", payload={"device": "rig-2"})
@@ -1479,6 +1626,47 @@ class HonestHandPickedDelegation(unittest.TestCase):
         self.assertIsNone(getattr(tls, "client", None))
         self.assertTrue(any("continuing on this machine" in e["msg"]
                             for e in job.logs))
+
+    def test_a_peer_that_turns_busy_mid_render_is_waited_for(self):
+        """A 409-ing proxy used to read as 'stopped answering' and fail
+        the pinned job permanently — but the peer is up and merely busy,
+        and busy means WAIT, mid-render exactly like at dispatch."""
+        import threading as _threading
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        from app.core.jobs import Job
+        from app.core.peers import Peer
+        from app.core.services import Services
+
+        calls = {"n": 0}
+
+        class BusyThenFree:
+            offline = False
+
+            def is_up(self):
+                calls["n"] += 1
+                return calls["n"] >= 3   # the proxy answers again later
+
+        tls = _threading.local()
+        tls.client = object()
+        peer = Peer("tok", "rig-2", "192.168.1.50", 8765)
+        busy_info = {"render": True, "idle": False,
+                     "comfy": {"up": True, "device": "cuda", "gpu": "RTX"}}
+        fake = SimpleNamespace(
+            comfy=BusyThenFree(), _comfy_tls=tls,
+            events=SimpleNamespace(log=lambda *_a: None),
+            peers=SimpleNamespace(
+                find_peer=lambda _t: peer,
+                add_peer=lambda h, p, timeout=3.0, pin=True: busy_info))
+        job = Job(id="jw", type="t", payload={"device": "rig-2"})
+        with patch("app.core.services.time.sleep", lambda _s: None):
+            Services._require_comfy(fake, job)   # waits, then returns
+        self.assertTrue(any("waiting for it" in e["msg"]
+                            for e in job.logs))
+        self.assertTrue(any("free again" in e["msg"] for e in job.logs))
+        # The binding survives: the SAME peer resumes the render.
+        self.assertIsNotNone(getattr(tls, "client", None))
 
     def test_fail_job_never_overwrites_a_cancel(self):
         from app.core.jobs import Job, JobState

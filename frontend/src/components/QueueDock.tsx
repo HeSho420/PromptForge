@@ -27,6 +27,25 @@ function lastStage(job: Job): string | null {
   return null;
 }
 
+/** WHERE the job renders, read from the delegation log lines — covers
+ *  auto-delegation too, which payload.device never shows. A manual
+ *  Retry is a boundary: lines from before it belong to a previous run
+ *  (a retried job may run locally and write no new [peer] line at all). */
+function renderSite(job: Job): string | null {
+  for (let i = job.logs.length - 1; i >= 0; i--) {
+    const m = job.logs[i]?.msg ?? "";
+    if (m === "Manually re-queued") return null;
+    if (!m.startsWith("[peer] ")) continue;
+    if (/stopped answering|continuing on this machine|rendering locally/.test(m))
+      return null;
+    const hand = m.match(/^\[peer\] rendering on '([^']+)'/);
+    if (hand) return hand[1];
+    const auto = m.match(/^\[peer\] this machine is busy and '([^']+)'/);
+    if (auto) return auto[1];
+  }
+  return null;
+}
+
 function elapsed(iso: string | null | undefined): string | null {
   if (!iso) return null;
   const ms = Date.now() - new Date(iso).getTime();
@@ -205,8 +224,16 @@ export function QueueDock() {
         <ul className="qdock-list">
           {active.map((j, i) => {
             const stage = lastStage(j);
-            const device = typeof j.payload?.device === "string" ? j.payload.device : null;
+            const pinned = typeof j.payload?.device === "string" ? j.payload.device : null;
             const isRunning = j.state === "running" || j.state === "retrying";
+            // Pinned target if set; otherwise where delegation actually
+            // sent it (auto-delegated jobs carry no device field).
+            const device =
+              pinned && pinned !== "auto"
+                ? pinned
+                : isRunning
+                  ? renderSite(j)
+                  : null;
             return (
               <li key={j.id} className="qdock-row">
                 <span
@@ -225,8 +252,8 @@ export function QueueDock() {
                     {elapsed(j.started_at ?? j.created_at)}
                   </span>
                 )}
-                {device && device !== "auto" && (
-                  <span className="qdock-device" title="Render device for this job">
+                {device && (
+                  <span className="qdock-device" title="Where this job renders">
                     → {device === "local" ? "this PC" : device}
                   </span>
                 )}

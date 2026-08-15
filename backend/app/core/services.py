@@ -70,6 +70,7 @@ from . import video as video_io
 from .critic import CriticUnavailable, Critique, ImageCritic
 from .db import Database
 from .experience import ExperienceStore
+from .hardware import _probe_gpu_registry as hw_gpu_registry  # noqa: E501
 from .hardware import (
     available_commit_gb,
     max_auto_download_bytes,
@@ -1037,6 +1038,7 @@ class Services:
         self._monitor: threading.Thread | None = None
         # Better-inpaint-model downloads already queued this session.
         self._inpaint_staged: set[str] = set()
+        self._packs_queued: set[str] = set()
         # Scene graphs, cached per asset (built once, reused every step).
         self._scene_cache: dict[str, dict[str, Any]] = {}
         # Pending LLM-authored workflow candidates awaiting approval (in-memory
@@ -1174,6 +1176,11 @@ class Services:
 
     def start(self) -> None:
         self.queue.start()
+        # Downloads get their own lane on real setups: a multi-GB model
+        # fetch must never make a render wait behind it. (Mock fixtures
+        # keep the single-worker behaviour their assertions rely on.)
+        if self.settings.inpaint_backend != "mock":
+            self.queue.start_downloader()
         # The peer worker only ever takes a job when this machine is BUSY
         # and a discovered peer is idle — otherwise it sleeps.
         if (self.settings.lan_render
@@ -1335,17 +1342,17 @@ class Services:
         except Exception:  # noqa: BLE001 — no NVIDIA GPU is not an error
             pass
         if "gpu_name" not in stats:
-            # AMD/Intel machines have no nvidia-smi; at least NAME the GPU
-            # so the other machine's Network view is not blank about it.
+            # AMD/Intel machines have no nvidia-smi. The display-class
+            # registry has both the NAME and the real VRAM total (the
+            # driver writes qwMemorySize there) — no subprocess, no '0 GB
+            # VRAM' for a perfectly good Radeon or Arc. Live utilisation
+            # is NVIDIA-only; total still lets peers size delegation.
             try:
-                ps = subprocess.run(
-                    ["powershell", "-NoProfile", "-Command",
-                     "(Get-CimInstance Win32_VideoController | "
-                     "Select-Object -First 1 -ExpandProperty Name)"],
-                    capture_output=True, text=True, timeout=6)
-                name = (ps.stdout or "").strip()
+                name, vram_gb = hw_gpu_registry()
                 if name:
                     stats["gpu_name"] = name
+                if vram_gb > 0:
+                    stats["vram_total_mb"] = int(vram_gb * 1024)
             except Exception:  # noqa: BLE001
                 pass
         ram = hw_ram_stats()
@@ -1436,6 +1443,12 @@ class Services:
         costs a manual update, a wrong 'yes' restarts the app under
         someone's work."""
         if not self.settings.peer_auto_update:
+            return
+        # Shutdown sets the monitor flag before the queue stops: a
+        # version notice landing in that window must not enqueue into a
+        # stopping queue (the orphaned row rehydrates as a spurious red
+        # "interrupted" job at the next boot).
+        if self._monitor_stop.is_set():
             return
         theirs = (info.get("version") or {})
         commit = str(theirs.get("commit") or "")
@@ -3491,12 +3504,32 @@ class Services:
 
     def _pack_active(self, slug: str) -> bool:
         """Is a curated node pack live in ComfyUI right now? (Probed, cached
-        — never assumed from disk.)"""
+        — never assumed from disk.)
+
+        Self-healing: when the pack a request needs is missing ENTIRELY,
+        auto-install is on and this is a real (non-mock) setup, a visible
+        install job is queued once per session — the same policy models
+        already follow. 'broken' installs are never reinstalled blindly."""
         try:
-            return any(p["name"] == slug and p["status"] == "active"
-                       for p in self.node_pack_report())
+            report = self.node_pack_report()
         except Exception:  # noqa: BLE001 — unknown means "don't route there"
             return False
+        status = next((p["status"] for p in report if p["name"] == slug), None)
+        if status == "active":
+            return True
+        if (status == "absent"
+                and self.settings.auto_install
+                and self.settings.inpaint_backend != "mock"
+                and slug in node_packs.KNOWN_PACKS
+                and slug not in self._packs_queued):
+            self._packs_queued.add(slug)
+            try:
+                self.queue.enqueue("node_pack", {"pack": slug})
+                self.events.log("info", f"Auto-installing node pack "
+                                        f"'{slug}' — a request needs it")
+            except Exception:  # noqa: BLE001 — queueing is best-effort
+                pass
+        return False
 
     def _template_runnable(self, task: str) -> tuple[bool, str]:
         """Can this machine run the task's template RIGHT NOW — template
@@ -6481,6 +6514,37 @@ class Services:
                 return
             device = str((job.payload or {}).get("device") or "")
             if device and device not in ("auto", "local"):
+                # "Down" through the proxy is AMBIGUOUS: the peer answers
+                # 409 while busy with its own work, and is_up() reads
+                # that as down. Ask the peer itself which it is — busy
+                # means WAIT (the same promise the wrap makes), dead
+                # means fail loudly.
+                peer = self.peers.find_peer(device)
+                info = (self.peers.add_peer(peer.host, peer.port,
+                                            timeout=3.0)
+                        if peer is not None else None)
+                if (info and info.get("render")
+                        and (info.get("comfy") or {}).get("up")
+                        and not info.get("idle")):
+                    job.log("info", f"[peer] '{device}' got busy with "
+                                    "its own work mid-render — waiting "
+                                    "for it")
+                    deadline = time.time() + 15 * 60
+                    while time.time() < deadline:
+                        if job.cancel_requested:
+                            raise TransientError(
+                                f"cancelled while waiting for '{device}'")
+                        time.sleep(3.0)
+                        if self.comfy.is_up():
+                            job.log("info", f"[peer] '{device}' is free "
+                                            "again — continuing")
+                            return
+                    msg = (f"'{device}' stayed busy with its own work "
+                           "for 15 minutes. Nothing was rendered on this "
+                           "machine. Retry when it is free, or set "
+                           "Render: this PC.")
+                    self.events.log("error", msg)
+                    raise PermanentError(msg)
                 msg = (f"'{device}' stopped answering mid-render. Nothing "
                        "was rendered on this machine. Check that the "
                        "other PC is on and PromptForge is running there, "
