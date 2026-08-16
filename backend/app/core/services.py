@@ -986,6 +986,8 @@ class Services:
             saved = json.loads(self._settings_file.read_text())
             if saved.get("civitai_token"):
                 self.settings.civitai_token = str(saved["civitai_token"])
+            if "lan_combine" in saved:
+                self.settings.lan_combine = bool(saved["lan_combine"])
         except (OSError, json.JSONDecodeError, AttributeError):
             pass
         self.db = Database(self.settings.db_path)
@@ -1052,6 +1054,12 @@ class Services:
         # Better-inpaint-model downloads already queued this session.
         self._inpaint_staged: set[str] = set()
         self._packs_queued: set[str] = set()
+        # Combine mode: peers currently carrying one of OUR delegated jobs.
+        # Reserved by _delegate_wrap for the render's duration so parallel
+        # delegation workers never double-book a machine in the seconds
+        # before its own busy signal flips.
+        self._reserved_peers: set[str] = set()
+        self._reserve_lock = threading.Lock()
         # Scene graphs, cached per asset (built once, reused every step).
         self._scene_cache: dict[str, dict[str, Any]] = {}
         # Pending LLM-authored workflow candidates awaiting approval (in-memory
@@ -1169,6 +1177,34 @@ class Services:
         except (OSError, json.JSONDecodeError):
             pass  # applies for this run even if persisting failed
 
+    # Parallel delegation workers in combine mode: one job per idle peer,
+    # a small fixed pool — more workers than machines just idle-poll.
+    COMBINE_WORKERS = 3
+
+    def set_lan_combine(self, on: bool) -> None:
+        """Toggle combine mode at runtime and persist it. Turning it ON
+        tops up the delegation workers immediately; turning it OFF lets
+        the extra workers idle (eager() reads the live setting, so they
+        stop taking beyond-head jobs at once)."""
+        self.settings.lan_combine = bool(on)
+        if (on and self.settings.lan_render
+                and self.settings.inpaint_backend != "mock"):
+            self.queue.start_helper(
+                gate=self._peer_gate, wrap=self._delegate_wrap,
+                types=self._DELEGATABLE, workers=self.COMBINE_WORKERS,
+                eager=lambda: self.settings.lan_combine)
+        self.events.log("info", "Combine mode "
+                        + ("ON — the queue spreads across every connected "
+                           "device" if on else "off — one helper again"))
+        try:
+            data = {}
+            if self._settings_file.exists():
+                data = json.loads(self._settings_file.read_text())
+            data["lan_combine"] = bool(on)
+            self._settings_file.write_text(json.dumps(data))
+        except (OSError, json.JSONDecodeError):
+            pass  # applies for this run even if persisting failed
+
     def _build_llm(self) -> LLMClient:
         local = LocalLLM(self.settings.llm_url, self.settings.llm_model)
         api = (ClaudeLLM(self.settings.llm_api_model)
@@ -1195,12 +1231,17 @@ class Services:
         if self.settings.inpaint_backend != "mock":
             self.queue.start_downloader()
         # The peer worker only ever takes a job when this machine is BUSY
-        # and a discovered peer is idle — otherwise it sleeps.
+        # and a discovered peer is idle — otherwise it sleeps. Combine
+        # mode runs several workers so the whole queue spreads across
+        # every connected device at once.
         if (self.settings.lan_render
                 and self.settings.inpaint_backend != "mock"):
-            self.queue.start_helper(gate=self._peer_gate,
-                                    wrap=self._delegate_wrap,
-                                    types=self._DELEGATABLE)
+            self.queue.start_helper(
+                gate=self._peer_gate, wrap=self._delegate_wrap,
+                types=self._DELEGATABLE,
+                workers=self.COMBINE_WORKERS
+                if self.settings.lan_combine else 1,
+                eager=lambda: self.settings.lan_combine)
         # Reclaim disk for images deleted in previous sessions.
         try:
             purged = self.store.purge_trash()
@@ -1651,7 +1692,9 @@ class Services:
         return {"peer": peer_name, "offered": len(entries), **result}
 
     def _peer_gate(self) -> bool:
-        return self.peers.best_idle_peer() is not None
+        with self._reserve_lock:
+            taken = frozenset(self._reserved_peers)
+        return self.peers.best_idle_peer(exclude=taken) is not None
 
     def _delegate_wrap(self, execute, job) -> None:
         """Run one job with its ComfyUI traffic bound to another machine.
@@ -1716,23 +1759,32 @@ class Services:
             self.events.log("info", f"'{job.type}' renders on "
                                     f"'{found.name}' — chosen by hand")
         elif target != "local":
-            peer = self.peers.best_idle_peer()
+            with self._reserve_lock:
+                taken = frozenset(self._reserved_peers)
+            peer = self.peers.best_idle_peer(exclude=taken)
             if peer is not None:
-                job.log("info", f"[peer] this machine is busy and "
-                                f"'{peer.name}' ({peer.host}) is idle — "
-                                "its GPU renders this job")
-                self.events.log("info", f"This machine is busy — "
-                                        f"'{job.type}' renders on idle "
-                                        f"'{peer.name}' instead")
+                verb = ("combine mode" if self.settings.lan_combine
+                        else "this machine is busy")
+                job.log("info", f"[peer] {verb} — '{peer.name}' "
+                                f"({peer.host}) is idle, its GPU renders "
+                                "this job")
+                self.events.log("info", f"'{job.type}' renders on idle "
+                                        f"'{peer.name}' ({verb})")
         if peer is None:
             execute(job)
             return
+        # Reserve for the render's duration: combine mode runs several of
+        # these wraps in parallel and each peer must carry ONE of our jobs.
+        with self._reserve_lock:
+            self._reserved_peers.add(peer.host)
         self._comfy_tls.client = ComfyUIClient(
             f"{peer.base}/pf-peer/comfy")
         try:
             execute(job)
         finally:
             self._comfy_tls.client = None
+            with self._reserve_lock:
+                self._reserved_peers.discard(peer.host)
 
     # -- health monitoring --------------------------------------------------------
     MONITOR_INTERVAL_S = 15

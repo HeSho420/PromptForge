@@ -732,14 +732,22 @@ def create_app(services: Services | None = None) -> Flask:
     @api.get("/settings")
     def get_settings():
         # Never echo the token itself â€” only whether one is configured.
-        return jsonify({"civitai_token_set": bool(services.settings.civitai_token)})
+        return jsonify({
+            "civitai_token_set": bool(services.settings.civitai_token),
+            "lan_combine": bool(services.settings.lan_combine),
+        })
 
     @api.post("/settings")
     def update_settings():
         body = request.get_json(silent=True) or {}
         if "civitai_token" in body:
             services.set_civitai_token(str(body["civitai_token"]))
-        return jsonify({"civitai_token_set": bool(services.settings.civitai_token)})
+        if "lan_combine" in body:
+            services.set_lan_combine(bool(body["lan_combine"]))
+        return jsonify({
+            "civitai_token_set": bool(services.settings.civitai_token),
+            "lan_combine": bool(services.settings.lan_combine),
+        })
 
     # -- "Improve the LLM": discover + approve new workflows ----------------------
     @api.post("/workflows/discover")

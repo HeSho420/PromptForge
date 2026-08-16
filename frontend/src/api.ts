@@ -325,9 +325,11 @@ export const api = {
     request<{ gpu: { name: string; util_pct: number; vram_used_mb: number;
                      vram_total_mb: number } | null }>("/api/system"),
   getSettings: () =>
-    request<{ civitai_token_set: boolean }>("/api/settings", { cache: "no-store" }),
-  setSettings: (s: { civitai_token: string }) =>
-    request<{ civitai_token_set: boolean }>("/api/settings", json(s)),
+    request<{ civitai_token_set: boolean; lan_combine: boolean }>(
+      "/api/settings", { cache: "no-store" }),
+  setSettings: (s: { civitai_token?: string; lan_combine?: boolean }) =>
+    request<{ civitai_token_set: boolean; lan_combine: boolean }>(
+      "/api/settings", json(s)),
 
   // Safety rules — always fetched fresh (no-store) so the UI never shows a
   // stale ruleset; the backend also sends Cache-Control: no-store.

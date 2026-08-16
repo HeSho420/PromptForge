@@ -779,6 +779,68 @@ class SelfHealingDependencies(unittest.TestCase):
                       inspect.getsource(critic_mod.ImageCritic._vision))
 
 
+class CombineMode(unittest.TestCase):
+    """Combine mode spreads the queue across every connected device: N
+    delegation workers run side by side, each peer is reserved while it
+    carries one of our jobs, and jobs behind the queue head go out even
+    while this machine is idle."""
+
+    class _Db:
+        def query(self, *_a):
+            return []
+
+        def execute(self, *_a):
+            return None
+
+    def test_two_delegation_workers_carry_jobs_at_the_same_time(self):
+        q = JobQueue(self._Db())
+        # Both wraps must be INSIDE simultaneously or the barrier breaks —
+        # a single sequential helper cannot pass this test.
+        both = threading.Barrier(2, timeout=15)
+        release_head = threading.Event()
+        done: list[str] = []
+
+        def handler(job):
+            # The queue head renders "locally" and takes a while — that is
+            # the situation combine mode exists for.
+            if (job.payload or {}).get("head"):
+                release_head.wait(timeout=30)
+            return {"ok": True}
+
+        def wrap(execute, job):
+            both.wait()
+            execute(job)
+            done.append(job.id)
+
+        q.register("t", handler)
+        q.start()
+        q.start_helper(gate=lambda: True, wrap=wrap, types={"t"},
+                       workers=2, eager=lambda: True)
+        try:
+            q.enqueue("t", {"head": True})  # main worker, long render
+            q.enqueue("t", {})              # spread across the helpers
+            q.enqueue("t", {})
+            deadline = time.time() + 25
+            while len(done) < 2 and time.time() < deadline:
+                time.sleep(0.1)
+            self.assertGreaterEqual(
+                len(done), 2,
+                "two delegation workers should carry jobs concurrently")
+        finally:
+            release_head.set()
+            q.stop()
+
+    def test_reservation_and_eager_wiring(self):
+        src = inspect.getsource(Services._delegate_wrap)
+        self.assertIn("_reserved_peers.add", src)      # book the peer
+        self.assertIn("_reserved_peers.discard", src)  # and release it
+        self.assertIn("best_idle_peer(exclude=", src)  # never double-book
+        self.assertIn("exclude", inspect.getsource(Services._peer_gate))
+        helper = inspect.getsource(JobQueue._run_helper)
+        # Eager mode takes jobs BEHIND the head — the head stays local.
+        self.assertIn("eligible_seen >= 2", helper)
+
+
 class DeviceRouting(unittest.TestCase):
     """The picker's contract: forced jobs go through the peer wrap even
     when the gate says no; 'local' jobs never leave this machine."""
@@ -1461,11 +1523,15 @@ class HonestHandPickedDelegation(unittest.TestCase):
             peers=SimpleNamespace(
                 find_peer=lambda t: find_result,
                 add_peer=lambda h, p, timeout=3.0, pin=True: info,
-                best_idle_peer=lambda: None),
+                best_idle_peer=lambda exclude=frozenset(): None),
             events=SimpleNamespace(
                 log=lambda lvl, msg: events.append((lvl, msg))),
             queue=queue,
             _comfy_tls=_threading.local(),
+            # Combine-mode plumbing the wrap now uses on every path.
+            _reserved_peers=set(),
+            _reserve_lock=_threading.Lock(),
+            settings=SimpleNamespace(lan_combine=False),
         ), events
 
     def test_unreachable_pinned_device_fails_the_job_without_running(self):

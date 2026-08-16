@@ -1526,6 +1526,26 @@ function NetworkPanel() {
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState<string | null>(null);
   const [device, setDevice] = useState(getRenderDevice());
+  // Combine mode: the whole queue spreads across every connected PC.
+  const [combine, setCombine] = useState<boolean | null>(null);
+  useEffect(() => {
+    void api
+      .getSettings()
+      .then((s) => setCombine(s.lan_combine))
+      .catch(() => setCombine(null));
+  }, []);
+  const toggleCombine = async () => {
+    if (combine === null) return;
+    const next = !combine;
+    setCombine(next); // optimistic — the checkbox must feel instant
+    try {
+      const s = await api.setSettings({ lan_combine: next });
+      setCombine(s.lan_combine);
+    } catch (e) {
+      setCombine(!next);
+      setNote((e as Error).message);
+    }
+  };
   // The rail's picker and this page's "Render here" buttons are the same
   // setting — follow changes made anywhere.
   useEffect(() => onRenderDevice(setDevice), []);
@@ -1636,6 +1656,27 @@ function NetworkPanel() {
           {data.auto_update ? "on" : "off"}, port {data.port}
           {data.version ? ` · version ${data.version.commit}` : ""}.
         </div>
+      )}
+      {combine !== null && (
+        <label
+          className="row"
+          style={{ gap: 8, fontSize: 12.5, alignItems: "center",
+                   cursor: "pointer", userSelect: "none" }}
+          title="With combine mode on, queued work spreads across every
+ connected PC at once: this machine keeps the front of the queue and the
+ jobs behind it go straight out to whichever machines are idle — each
+ machine carries one job at a time."
+        >
+          <input
+            type="checkbox"
+            checked={combine}
+            onChange={() => void toggleCombine()}
+          />
+          <span>
+            <b>Combine mode</b> — spread the queue across all connected
+            devices{combine ? " (on)" : ""}
+          </span>
+        </label>
       )}
       {peers.length > 0 ? (
         <div className="stack" style={{ gap: 10 }}>

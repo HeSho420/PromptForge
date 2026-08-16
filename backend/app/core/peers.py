@@ -1106,7 +1106,8 @@ class PeerService:
                 continue
         return None
 
-    def best_idle_peer(self) -> Peer | None:
+    def best_idle_peer(self,
+                       exclude: frozenset[str] = frozenset()) -> Peer | None:
         """An idle peer that can actually RENDER, or None.
 
         A peer with no ComfyUI cannot help however idle it is, and one
@@ -1114,9 +1115,16 @@ class PeerService:
         it would take longer than waiting for this machine. Answered from
         the status cache when it is fresh: the delegation gate asks every
         few seconds, and probing every peer serially on each ask was
-        seconds of network time bought for nothing."""
+        seconds of network time bought for nothing.
+
+        `exclude` skips hosts by name/address — combine mode runs several
+        delegation workers at once and reserves each chosen peer, so two
+        workers can never double-book the same machine in the window
+        before its own busy signal flips."""
         cpu_fallback: Peer | None = None
         for peer in self.peers_list():
+            if peer.host in exclude or peer.name in exclude:
+                continue
             info = (peer.info
                     if peer.info is not None
                     and time.time() - peer.info_at < STATUS_FRESH_S

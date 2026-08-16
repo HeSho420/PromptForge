@@ -210,23 +210,40 @@ class JobQueue:
                 with self._lock:
                     self._claimed.discard(candidate)
 
-    def start_helper(self, gate, wrap, types: set[str] | frozenset[str]) -> None:
-        """A SECOND worker that exists to hand work to an idle network peer.
+    def start_helper(self, gate, wrap, types: set[str] | frozenset[str],
+                     workers: int = 1, eager=None) -> None:
+        """Worker(s) that hand work to idle network peers.
 
-        It takes a pending job only when the main worker is already busy,
+        A helper takes a pending job when the main worker is already busy,
         the job's type is delegatable, and `gate()` — a network probe, so
         never called under the queue lock — confirms a peer can carry it.
         The job then runs through `wrap(execute, job)`, which binds its
-        render traffic to the peer and falls back to local on failure."""
-        helper = getattr(self, "_helper", None)
-        if helper is not None and helper.is_alive():
-            return
+        render traffic to the peer and falls back to local on failure.
+
+        Combine mode: `workers` > 1 runs that many helpers side by side
+        (the wrap reserves each peer, so no machine is double-booked), and
+        `eager()` True lets helpers take jobs BEHIND the queue head even
+        while this machine is idle — the head stays for the main worker,
+        the rest spreads across every connected device. Idempotent and
+        top-up-able: calling again with a higher count adds workers."""
         self._helper_gate = gate
         self._helper_wrap = wrap
         self._helper_types = set(types)
-        self._helper = threading.Thread(target=self._run_helper,
-                                        name="pf-worker-peer", daemon=True)
-        self._helper.start()
+        self._helper_eager = eager
+        helpers = [t for t in getattr(self, "_helpers", []) if t.is_alive()]
+        for i in range(len(helpers), max(1, workers)):
+            t = threading.Thread(target=self._run_helper,
+                                 name=f"pf-worker-peer-{i}", daemon=True)
+            t.start()
+            helpers.append(t)
+        self._helpers = helpers
+        # The single-helper attribute stays as the canonical "is the peer
+        # lane on?" handle for _pick_main and the tests.
+        self._helper = helpers[0]
+
+    def _helper_alive(self) -> bool:
+        return any(t.is_alive() for t in getattr(self, "_helpers", [])
+                   ) or (self._helper is not None and self._helper.is_alive())
 
     def stop(self, timeout: float = 5.0) -> None:
         self._stop.set()
@@ -234,8 +251,8 @@ class JobQueue:
             self._cv.notify_all()  # wake the worker
         if self._worker:
             self._worker.join(timeout=timeout)
-        helper = getattr(self, "_helper", None)
-        if helper is not None:
+        for helper in (getattr(self, "_helpers", None)
+                       or ([self._helper] if self._helper else [])):
             helper.join(timeout=timeout)
         dl = getattr(self, "_downloader", None)
         if dl is not None:
@@ -547,7 +564,7 @@ class JobQueue:
         which also handles their fall-back-to-local when the peer is
         gone). If the peer worker is not running, the main worker takes
         them anyway rather than let them starve."""
-        helper_alive = self._helper is not None and self._helper.is_alive()
+        helper_alive = self._helper_alive()
         dl = getattr(self, "_downloader", None)
         dl_alive = dl is not None and dl.is_alive()
         for jid in list(self._pending):
@@ -577,6 +594,11 @@ class JobQueue:
         while not self._stop.is_set():
             candidate: str | None = None
             forced = False
+            eager_fn = getattr(self, "_helper_eager", None)
+            try:
+                eager = bool(eager_fn()) if eager_fn else False
+            except Exception:  # noqa: BLE001 — a broken probe means "no"
+                eager = False
             with self._lock:
                 # A running DOWNLOAD is not render pressure — delegating a
                 # render to a peer because a checkpoint is copying would
@@ -584,6 +606,7 @@ class JobQueue:
                 running = any(j.state is JobState.RUNNING
                               and j.type not in self.DOWNLOAD_TYPES
                               for j in self._jobs.values())
+                eligible_seen = 0
                 for jid in self._pending:
                     j = self._jobs.get(jid)
                     if j is None or j.type not in self._helper_types:
@@ -595,7 +618,15 @@ class JobQueue:
                     if self._forced_peer(j):
                         candidate, forced = jid, True
                         break
+                    eligible_seen += 1
                     if running:
+                        candidate = jid
+                        break
+                    # Combine mode: this machine is FREE, so the head of
+                    # the queue belongs to the main worker — but everything
+                    # behind it may spread across the other devices now
+                    # instead of waiting its turn.
+                    if eager and eligible_seen >= 2:
                         candidate = jid
                         break
             if candidate is None:

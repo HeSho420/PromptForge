@@ -84,6 +84,15 @@ class Settings:
         default_factory=lambda: os.environ.get(
             "PROMPTFORGE_LAN_RENDER", "1") not in ("0", "false", "no")
     )
+    # Combine mode: spread the queue across EVERY connected machine at
+    # once — several delegation workers run in parallel (one job per idle
+    # peer, each peer reserved so it is never double-booked), and jobs
+    # behind the head of the queue go out even while THIS machine is
+    # still free. Off = the classic one-helper behaviour.
+    lan_combine: bool = field(
+        default_factory=lambda: os.environ.get(
+            "PROMPTFORGE_LAN_COMBINE", "0") in ("1", "true", "yes")
+    )
     # Peers connected by address ("host" or "host:port", comma-separated) —
     # for networks where UDP discovery broadcasts never arrive.
     lan_peers: str = field(
