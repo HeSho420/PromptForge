@@ -771,6 +771,19 @@ class _Attempt:
         whole requirement anyway. A scorecard number and a checklist share are
         different scales entirely, so across sources accuracy is not consulted
         at all — that comparison would be noise dressed as a decision."""
+        # Wreckage veto, before any fidelity comparison: a render the judge
+        # scores as ruined (<=2/10) never displaces a plausible one (>=3),
+        # whatever its checklist says. Vision probes answer "met"
+        # alarmingly often on pure noise — measured live: a 3D-mesh
+        # checkpoint hijacked the model rung and its realism-1/10 output
+        # beat a realism-5/10 image on a hallucinated 100% checklist.
+        # (Deliberately un-photoreal requests — flat cartoons — still score
+        # above this floor; 2/10 is wreckage, not style.)
+        wreck_new = self.crit.score if self.crit else None
+        wreck_old = other.crit.score if other.crit else None
+        if (wreck_new is not None and wreck_new <= 2
+                and wreck_old is not None and wreck_old >= 3):
+            return False
         if self.source() == "checklist" == other.source():
             new_gaps, old_gaps = len(self.missing()), len(other.missing())
             if new_gaps != old_gaps:
@@ -3585,7 +3598,7 @@ class Services:
         inpainting of the padded margins). Deterministic — no LLM roundtrip;
         None keeps the template's default."""
         try:
-            installed = self.comfy.installed_checkpoints()
+            installed = self._image_checkpoints()
         except Exception:  # noqa: BLE001 — ComfyUI down / fake without the API
             return None
         inpaintable = [c for c in installed if "inpaint" in c.lower()]
@@ -4102,7 +4115,7 @@ class Services:
         resolution and an SDXL load on top of BiRefNet is what pushes an
         8 GB card into offloading."""
         try:
-            installed = self.comfy.installed_checkpoints()
+            installed = self._image_checkpoints()
         except Exception:  # noqa: BLE001 — keep the template default
             return None
         paint = [c for c in installed
@@ -4489,7 +4502,7 @@ class Services:
         community checkpoint happens to sort first is both worse at the job
         and a surprising thing to read in a log for an innocuous edit."""
         try:
-            installed = self.comfy.installed_checkpoints()
+            installed = self._image_checkpoints()
         except Exception:  # noqa: BLE001 — keep the template default
             return None
         plain = [c for c in installed if not self._NOT_A_GENERATOR.search(c)]
@@ -4708,7 +4721,7 @@ class Services:
         entry = self.registry.get("juggernaut-xl-inpaint")
         wanted = Path((entry.meta or {}).get("file") or "").name if entry else ""
         try:
-            installed = self.comfy.installed_checkpoints()
+            installed = self._image_checkpoints()
         except Exception:  # noqa: BLE001 — keep the template default
             return None
         if wanted and wanted in installed:
@@ -5003,10 +5016,29 @@ class Services:
             lines.append(f"- {m.name} ({state}): {usage}")
         return "Model guide (when to use which):\n" + "\n".join(lines)
 
+    # Files that live in ComfyUI's checkpoints folder but are NOT prompt-
+    # renderable image checkpoints (no CLIP/text encoder inside): 3D mesh
+    # DiTs, image-to-video latents, identity encoders. Loading one through
+    # CheckpointLoaderSimple yields clip=None and CLIPTextEncode dies -
+    # measured live when the adherence ladder's model rung picked a
+    # Hunyuan3D mesh model and a garbage render nearly shipped.
+    _NON_IMAGE_CKPT = re.compile(
+        r"hunyuan3d|sv3d|stable[_-]?video|(^|[^a-z])svd([^a-z]|$)"
+        r"|photomaker|animatediff", re.IGNORECASE)
+
+    def _image_checkpoints(self) -> list[str]:
+        """ComfyUI's loadable checkpoints MINUS everything that cannot take
+        a text prompt - the only list any model choice may draw from."""
+        try:
+            ckpts = self.comfy.installed_checkpoints()
+        except Exception:  # noqa: BLE001 - callers all handle empty
+            return []
+        return [c for c in ckpts if not self._NON_IMAGE_CKPT.search(c)]
+
     def workflow_context(self) -> str | None:
         """Live inventory for the LLM planner; None when ComfyUI is down."""
         try:
-            ckpts = self.comfy.installed_checkpoints()
+            ckpts = self._image_checkpoints()
         except Exception:
             return None
         if not ckpts:
@@ -5145,7 +5177,7 @@ class Services:
 
     def _ensure_checkpoint(self, job: Job) -> list[str]:
         """Return ComfyUI's loadable checkpoints; auto-install one if none."""
-        ckpts = self.comfy.installed_checkpoints()
+        ckpts = self._image_checkpoints()
         if ckpts:
             return ckpts
         if not self.settings.auto_install:
@@ -5180,7 +5212,7 @@ class Services:
 
         self.downloader.download(name, progress)
         job.log("info", f"Model '{name}' downloaded.")
-        ckpts = self.comfy.installed_checkpoints()
+        ckpts = self._image_checkpoints()
         if not ckpts:
             raise PermanentError(
                 f"'{name}' was downloaded, but ComfyUI cannot see it. Point "
@@ -5346,7 +5378,7 @@ class Services:
         model declaring 8.0 GB on an 8.0 GB card (D8) — a retry that costs
         more than the render it retries and thrashes the whole machine."""
         try:
-            installed = sorted(self.comfy.installed_checkpoints(),
+            installed = sorted(self._image_checkpoints(),
                                key=self._inpaint_rank)
         except Exception:  # noqa: BLE001 — no inventory: keep the recipe
             installed = []
@@ -5465,7 +5497,7 @@ class Services:
         latent-mask template (which lets ANY model inpaint).
         Returns (variant, checkpoint) — (None, None) keeps template defaults."""
         try:
-            ckpts = self.comfy.installed_checkpoints()
+            ckpts = self._image_checkpoints()
         except Exception:  # noqa: BLE001 — ComfyUI hiccup: template default
             ckpts = []
         if not ckpts:
@@ -7192,7 +7224,7 @@ class Services:
                     force_search=forced, log=self._scout_log(job))
                 job.log("info", f"Model choice: {decision.note}")
                 if decision.downloaded:
-                    ckpts = self.comfy.installed_checkpoints() or ckpts
+                    ckpts = self._image_checkpoints() or ckpts
                 chosen = decision.checkpoint
                 model_note = decision.note
             context = self._plan_context(job, task, prompt, chosen, ckpts,

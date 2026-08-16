@@ -313,6 +313,38 @@ class AttemptComparisonTests(unittest.TestCase):
         self.assertFalse(pretty.beats(on_prompt))
         self.assertTrue(on_prompt.beats(pretty))
 
+    def test_wreckage_never_beats_a_plausible_image(self):
+        """Measured live: a 3D-mesh checkpoint hijacked the model rung, its
+        garbage output got a hallucinated 100% checklist and realism 1/10,
+        and it displaced a realism-5/10 image. Ruined (<=2) never beats
+        plausible (>=3), whatever the checklist claims."""
+        good = self._attempt(missing=["a red car"], realism=5.0)
+        garbage = self._attempt(missing=[], realism=1.0)
+        self.assertFalse(garbage.beats(good))
+        # A flat-cartoon request scoring 3 is style, not wreckage — the
+        # fidelity ordering still applies above the floor.
+        cartoon = self._attempt(missing=[], realism=3.0)
+        self.assertTrue(cartoon.beats(good))
+
+    def test_non_image_checkpoints_are_filtered_from_model_choices(self):
+        """The mesh/video files that share ComfyUI's checkpoints folder
+        have no CLIP — loading one for a prompt dies at CLIPTextEncode."""
+        rx = Services._NON_IMAGE_CKPT
+        for bad in ("hunyuan3d-dit-v2-mv-turbo_fp16.safetensors",
+                    "sv3d_u.safetensors", "svd_xt.safetensors",
+                    "stable_video_diffusion.safetensors",
+                    "photomaker-v1.bin"):
+            self.assertIsNotNone(rx.search(bad), bad)
+        for ok in ("sd_xl_base_1.0.safetensors",
+                   "epicrealism_v10-inpainting.safetensors",
+                   "realisticVisionV60B1_v51HyperVAE.safetensors",
+                   "v1-5-pruned-emaonly.safetensors"):
+            self.assertIsNone(rx.search(ok), ok)
+        import inspect
+        src = inspect.getsource(Services._choose_inpaint)
+        self.assertIn("_image_checkpoints", src)
+        self.assertNotIn("comfy.installed_checkpoints", src)
+
     def test_realism_only_decides_when_the_request_is_equally_met(self):
         worse = self._attempt(missing=[], realism=6.0)
         better = self._attempt(missing=[], realism=8.0)
