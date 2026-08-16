@@ -164,8 +164,12 @@ class JobQueue:
     # Job types that fetch bytes rather than render pixels. They run on
     # their own worker lane so a multi-GB download never makes a render
     # wait, and they do not count as "busy" anywhere busy-ness gates
-    # rendering (peer 409s, delegation, the idle checks).
-    DOWNLOAD_TYPES = frozenset({"model_download", "node_pack"})
+    # rendering (peer 409s, delegation, the idle checks). node_pack stays
+    # OFF this lane on purpose: its handler restarts ComfyUI to register
+    # the new nodes, and doing that concurrently with a render would kill
+    # the render mid-flight — pack installs are rare and brief, the
+    # multi-GB model fetches are what the lane exists for.
+    DOWNLOAD_TYPES = frozenset({"model_download"})
 
     def start_downloader(self) -> None:
         """A dedicated worker for DOWNLOAD_TYPES: fetching and rendering
@@ -265,14 +269,19 @@ class JobQueue:
         the delegation proxy — so they must not make this machine refuse
         incoming renders: two machines pinned at each other would
         otherwise livelock (waiting case) or needlessly serialize
-        (running case) on each other's false "busy"."""
+        (running case) on each other's false "busy". Downloads are
+        excluded for the same reason as in busy(): this is the method the
+        peer gates consult (the 409 and the "idle" field), and a machine
+        copying a checkpoint must still accept renders."""
         with self._lock:
             if any(j.state is JobState.RUNNING and not self._forced_peer(j)
+                   and j.type not in self.DOWNLOAD_TYPES
                    for j in self._jobs.values()):
                 return True
             for jid in list(self._pending) + list(self._claimed):
                 job = self._jobs.get(jid)
-                if job is not None and not self._forced_peer(job):
+                if (job is not None and not self._forced_peer(job)
+                        and job.type not in self.DOWNLOAD_TYPES):
                     return True
             return False
 

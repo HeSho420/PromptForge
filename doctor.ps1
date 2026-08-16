@@ -63,11 +63,36 @@ try {
             if ($n -match "Radeon.+(RX\s?90\d0|RX\s?7900|RX\s?7800|RX\s?7700|8[89]0M|860M|80[456]0S)") { $gpuMode = "rocm" }
         }
         if ($gpuMode -ne "rocm") {
+            # Arc before the generic AMD catch-all: a Ryzen iGPU next to an
+            # Arc card must not force the frozen DirectML stack.
+            foreach ($n in $gpus) { if ($n -match "Intel.+Arc") { $gpuMode = "xpu" } }
+        }
+        if ($gpuMode -notin @("rocm", "xpu")) {
             foreach ($n in $gpus) { if ($n -match "Radeon|AMD") { $gpuMode = "directml" } }
         }
     }
 } catch {}
-Say "OK" "GPU: $gpuName -> mode '$gpuMode'"
+# VRAM from the display-class registry when nvidia-smi is absent - the same
+# probe the launcher and backend use, so '0 GB' can only mean truly none.
+$vramGb = 0.0
+try {
+    $mb = (& nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>$null | Select-Object -First 1)
+    if ($LASTEXITCODE -eq 0 -and $mb) { $vramGb = [math]::Round([double]("$mb".Trim()) / 1024, 1) }
+} catch {}
+if ($vramGb -le 0) {
+    try {
+        $cls = "HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}"
+        $best = [long]0
+        Get-ChildItem $cls -ErrorAction SilentlyContinue |
+            Where-Object { $_.PSChildName -match '^\d{4}$' } |
+            ForEach-Object {
+                $v = (Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue)."HardwareInformation.qwMemorySize"
+                if ($v -and [long]$v -gt $best) { $best = [long]$v }
+            }
+        if ($best -gt 0) { $vramGb = [math]::Round($best / 1GB, 1) }
+    } catch {}
+}
+Say "OK" "GPU: $gpuName ($vramGb GB VRAM) -> mode '$gpuMode'"
 if ($gpuMode -eq "directml") {
     Say "OK" "this Radeon is outside AMD's classic ROCm wheel list - it renders through DirectML (or a ROCm-SDK torch when one is installed)"
 }
@@ -117,6 +142,10 @@ if (-not $comfyDir) {
                     if ($dml -match "dev-ok") { Say "OK" "DirectML device opens - Radeon renders on the GPU" }
                     else { Say "FIX" "torch-directml missing or its device will not open - run launch.ps1 (it swaps the stack in); if it keeps failing, share data\logs\directml-install.log" }
                 }
+            } elseif ($gpuMode -eq "xpu") {
+                $xp = (& $cpy -c "import torch;print(int(torch.xpu.is_available()))" 2>$null | Out-String).Trim()
+                if ($xp -eq "1") { Say "OK" "torch sees the Intel GPU (XPU)" }
+                else { Say "FIX" "torch CANNOT see the Intel GPU - run launch.ps1 (installs the XPU build); if it persists, update the Intel Arc driver" }
             } elseif ($gpuMode -ne "cpu") {
                 if ($torchLine.Count -gt 1 -and $torchLine[1] -eq "1") {
                     Say "OK" "torch sees the GPU"

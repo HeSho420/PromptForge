@@ -97,6 +97,16 @@ class ImageCritic:
         try:
             data = self._post(f"{self.native_url}/api/chat", payload, self.timeout_s)
             return data["message"]["content"]
+        except urllib.error.HTTPError as exc:
+            # Vision model not pulled: heal it in the background instead of
+            # leaving quality checks silently off forever on fresh machines.
+            if exc.code == 404:
+                from .llm import ollama_autopull
+                if ollama_autopull(self.model):
+                    raise CriticUnavailable(
+                        f"Critic model '{self.model}' is downloading in the "
+                        "background — checks resume when it lands") from exc
+            raise CriticUnavailable(f"Critic model unavailable: {exc}") from exc
         except (urllib.error.URLError, OSError, TimeoutError, KeyError,
                 TypeError, json.JSONDecodeError) as exc:
             raise CriticUnavailable(f"Critic model unavailable: {exc}") from exc

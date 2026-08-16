@@ -27,6 +27,19 @@ New-Item -ItemType Directory -Force $logDir | Out-Null
 # per launch; stopped before the long-running server so it stays small.
 try { Start-Transcript -Path (Join-Path $logDir "launch.log") -Force | Out-Null } catch {}
 
+# Last-resort net: whatever still escapes ends as ONE readable message, the
+# transcript path, and a window that stays open - never a raw stack trace.
+trap {
+    Write-Host ""
+    Write-Host "  [X] PromptForge hit a problem it could not fix by itself:" -ForegroundColor Red
+    Write-Host ("      " + $_.Exception.Message) -ForegroundColor Yellow
+    Write-Host "      Details: $logDir\launch.log" -ForegroundColor DarkGray
+    Write-Host "      Run launch.bat again - most problems self-repair on the next try." -ForegroundColor Yellow
+    try { Stop-Transcript | Out-Null } catch {}
+    try { Read-Host "  Press Enter to close" | Out-Null } catch {}
+    exit 1
+}
+
 # Fresh installs (Node, Ollama) may not be on this session's PATH yet.
 $env:Path = [Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' +
             [Environment]::GetEnvironmentVariable('Path', 'User') + ';' + $env:Path
@@ -52,32 +65,106 @@ function Wait-Http($url, $seconds, $proc) {
 }
 
 function Get-GpuMode {
-    # The full AMD ladder, learned on a real RX 6700 XT:
-    #   cuda      working NVIDIA driver
-    #   rocm      Radeon on AMD's ROCm-on-Windows support list (RDNA3/4)
+    # One mode per machine, best hardware first:
+    #   cuda      NVIDIA (nvidia-smi answers, or the adapter is present -
+    #             the CUDA build self-heals the moment the driver works)
+    #   rocm      Radeon on AMD's ROCm-wheel list (RDNA3/4)
     #   directml  any OTHER Radeon - torch-directml gives real GPU
     #             rendering on every DX12 AMD card (RDNA2 included)
+    #   xpu       Intel Arc (discrete or Core Ultra) - native torch XPU
     #   cpu       nothing usable
+    # Memoized: callers hit this ~15 times per launch and CIM is not free.
+    if ($script:pfGpuMode) { return $script:pfGpuMode }
+    $mode = $null
+    # nvidia-smi must actually ANSWER: a stale exe left in System32 after a
+    # GPU swap must not force the CUDA path on a non-NVIDIA machine.
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
     try {
         $smi = Get-Command nvidia-smi -ErrorAction SilentlyContinue
         if (-not $smi -and (Test-Path "$env:SystemRoot\System32\nvidia-smi.exe")) {
             $smi = @{ Source = "$env:SystemRoot\System32\nvidia-smi.exe" }
         }
-        if ($smi) { return "cuda" }
-    } catch {}
-    try {
-        $gpus = @(Get-CimInstance Win32_VideoController -ErrorAction Stop |
-                  ForEach-Object { $_.Name } | Where-Object { $_ })
-    } catch { $gpus = @() }
-    foreach ($n in $gpus) {
-        if ($n -match "Radeon.+(RX\s?90\d0|RX\s?7900|RX\s?7800|RX\s?7700|8[89]0M|860M|80[456]0S)") {
-            return "rocm"
+        if ($smi) {
+            $ans = (& $smi.Source --query-gpu=name --format=csv,noheader 2>$null |
+                    Out-String).Trim()
+            if ($LASTEXITCODE -eq 0 -and $ans) { $mode = "cuda" }
         }
+    } catch {}
+    $ErrorActionPreference = $prev
+    if (-not $mode) {
+        try {
+            $gpus = @(Get-CimInstance Win32_VideoController -ErrorAction Stop |
+                      ForEach-Object { $_.Name } | Where-Object { $_ })
+        } catch { $gpus = @() }
+        foreach ($n in $gpus) {
+            # NVIDIA adapter with a broken driver: still choose cuda - the
+            # CUDA torch renders on CPU until the driver is fixed, then the
+            # GPU starts working with NO reinstall (Repair-CudaTorch also
+            # force-repairs a CPU-only torch on these machines).
+            if ($n -match "NVIDIA|GeForce|Quadro|RTX \d") { $mode = "cuda"; break }
+        }
+        if (-not $mode) {
+            foreach ($n in $gpus) {
+                if ($n -match "Radeon.+(RX\s?90\d0|RX\s?7900|RX\s?7800|RX\s?7700|8[89]0M|860M|80[456]0S)") {
+                    $mode = "rocm"; break
+                }
+            }
+        }
+        if (-not $mode) {
+            # Intel Arc (A/B-series discrete and the Arc iGPU in Core
+            # Ultra) has native torch XPU wheels on Windows - current
+            # torch, current ComfyUI. Checked BEFORE the generic AMD
+            # catch-all: a Ryzen desktop iGPU enumerates as 'AMD
+            # Radeon(TM) Graphics', and an Arc card next to it must win
+            # over the frozen DirectML stack. Older Iris Xe/UHD iGPUs
+            # are NOT covered by XPU - those stay on CPU.
+            foreach ($n in $gpus) {
+                if ($n -match "Intel.+Arc") { $mode = "xpu"; break }
+            }
+        }
+        if (-not $mode) {
+            foreach ($n in $gpus) {
+                if ($n -match "Radeon|AMD") { $mode = "directml"; break }
+            }
+        }
+        if (-not $mode) { $mode = "cpu" }
     }
-    foreach ($n in $gpus) {
-        if ($n -match "Radeon|AMD") { return "directml" }
+    $script:pfGpuMode = $mode
+    return $mode
+}
+
+function Get-GpuVramGb {
+    # Real VRAM regardless of vendor. nvidia-smi first (authoritative);
+    # otherwise the display-class registry key the driver itself writes
+    # (HardwareInformation.qwMemorySize) - WMI's AdapterRAM is a 32-bit
+    # relic that caps at 4 GB. This is what stops '0 GB VRAM' appearing on
+    # machines with a perfectly good AMD or Intel card.
+    if ($script:pfVramGb -ne $null) { return $script:pfVramGb }
+    $gb = 0.0
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        $mb = (& nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>$null |
+               Select-Object -First 1)
+        if ($LASTEXITCODE -eq 0 -and $mb) { $gb = [math]::Round([double]("$mb".Trim()) / 1024, 1) }
+    } catch {}
+    $ErrorActionPreference = $prev
+    if ($gb -le 0) {
+        try {
+            $cls = "HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}"
+            $best = [long]0
+            Get-ChildItem $cls -ErrorAction SilentlyContinue |
+                Where-Object { $_.PSChildName -match '^\d{4}$' } |
+                ForEach-Object {
+                    $v = (Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue)."HardwareInformation.qwMemorySize"
+                    if ($v -and [long]$v -gt $best) { $best = [long]$v }
+                }
+            if ($best -gt 0) { $gb = [math]::Round($best / 1GB, 1) }
+        } catch {}
     }
-    return "cpu"
+    $script:pfVramGb = $gb
+    return $gb
 }
 
 # AMD ROCm-on-Windows wheels - same list as installer.ps1, Python 3.12 only.
@@ -112,6 +199,11 @@ function Get-TorchPipLines([string]$pipPath, [string]$logPath) {
         return ("& '$pipPath' install --retries 10 --timeout 300 torch==2.4.1 torchvision==0.19.1 torchaudio==2.4.1 *> '$logPath'; " +
                 "& '$pipPath' install --retries 10 --timeout 300 torch-directml *>> '$logPath'; ")
     }
+    if ($mode -eq "xpu") {
+        # Intel Arc: native torch XPU wheels (torch.xpu device).
+        return ("& '$pipPath' install --retries 10 --timeout 300 torch torchvision " +
+                "--index-url https://download.pytorch.org/whl/xpu *> '$logPath'; ")
+    }
     return ("& '$pipPath' install --retries 10 --timeout 180 torch torchvision *> '$logPath'; ")
 }
 
@@ -129,6 +221,51 @@ function Get-PyVersion([string]$py) {
     return $v
 }
 
+function Update-SessionPath {
+    $env:Path = [Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' +
+                [Environment]::GetEnvironmentVariable('Path', 'User') + ';' + $env:Path
+}
+
+function Install-PythonDirect([string]$version = "3.12.10") {
+    # winget is missing or broken on plenty of machines (LTSC, old Win10,
+    # corporate images). python.org's own silent installer needs nothing:
+    # per-user, no admin, adds the py launcher. Returns $true on success.
+    $url = "https://www.python.org/ftp/python/$version/python-$version-amd64.exe"
+    $setup = Join-Path $env:TEMP "pf-python-setup.exe"
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        Write-Host "  Downloading Python $version from python.org (one time)..." -ForegroundColor Yellow
+        [Net.ServicePointManager]::SecurityProtocol =
+            [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+        Invoke-WebRequest -UseBasicParsing -TimeoutSec 300 -Uri $url -OutFile $setup
+        if ((Get-Item $setup).Length -lt 10MB) { return $false }
+        $p = Start-Process -PassThru -Wait $setup -ArgumentList `
+            "/quiet", "InstallAllUsers=0", "PrependPath=1", "Include_launcher=1", "Include_test=0"
+        Update-SessionPath
+        return ($p.ExitCode -eq 0)
+    } catch {
+        return $false
+    } finally {
+        Remove-Item $setup -Force -ErrorAction SilentlyContinue
+        $ErrorActionPreference = $prev
+    }
+}
+
+function Install-Tool([string]$wingetId, [string]$label) {
+    # Quiet winget install + PATH refresh; $false when winget is absent or
+    # the install failed - callers always have a fallback or degrade path.
+    if (-not (Get-Command winget -ErrorAction SilentlyContinue)) { return $false }
+    Write-Host "  Installing $label (one time)..." -ForegroundColor Yellow
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    winget install --id $wingetId -e --source winget --accept-package-agreements `
+        --accept-source-agreements --disable-interactivity 2>&1 | Out-Null
+    $ErrorActionPreference = $prev
+    Update-SessionPath
+    return $true
+}
+
 function Get-Python312 {
     # AMD's ROCm-on-Windows torch wheels exist for Python 3.12 ONLY, so on
     # AMD machines every venv must be 3.12. Returns @("py","-3.12") when
@@ -141,10 +278,20 @@ function Get-Python312 {
     if ($have -eq "1") { return @("py", "-3.12") }
     if (Get-Command winget -ErrorAction SilentlyContinue) {
         Write-Host "  Installing Python 3.12 (required for AMD GPU rendering)..." -ForegroundColor Yellow
+        $prev = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
         winget install Python.Python.3.12 --source winget --accept-package-agreements `
-            --accept-source-agreements --disable-interactivity | Out-Null
-        $env:Path = [Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' +
-                    [Environment]::GetEnvironmentVariable('Path', 'User') + ';' + $env:Path
+            --accept-source-agreements --disable-interactivity 2>&1 | Out-Null
+        $ErrorActionPreference = $prev
+        Update-SessionPath
+        $prev = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
+        try { $have = (& py -3.12 -c "print(1)" 2>$null | Out-String).Trim() } catch {}
+        $ErrorActionPreference = $prev
+        if ($have -eq "1") { return @("py", "-3.12") }
+    }
+    # winget missing or failed: python.org's own silent installer.
+    if (Install-PythonDirect) {
         $prev = $ErrorActionPreference
         $ErrorActionPreference = "Continue"
         try { $have = (& py -3.12 -c "print(1)" 2>$null | Out-String).Trim() } catch {}
@@ -181,6 +328,12 @@ function Test-PyImport([string]$py, [string]$mods) {
 Write-Host ""
 Write-Host "  == PromptForge ==" -ForegroundColor Cyan
 Write-Host ""
+
+# git powers the update channel and the most reliable ComfyUI download
+# (schannel TLS). Best effort - everything has a git-less fallback.
+if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
+    Install-Tool "Git.Git" "git (updates + reliable downloads)" | Out-Null
+}
 
 # --- 0. Updates pushed through git -----------------------------------------------
 # Push to the repository and every install picks it up here on next launch.
@@ -239,7 +392,9 @@ $python = Join-Path $root "backend\.venv\Scripts\python.exe"
 # with any other version can NEVER install them — measured as a machine
 # that quietly ran the mock renderer. Rebuild wrong-version venvs.
 $gpuModeEarly = Get-GpuMode
-if ($gpuModeEarly -eq "rocm" -and (Test-Path $python)) {
+# rocm AND directml: both AMD GPU stacks are Python-3.12-only (ROCm wheels
+# are cp312; torch-directml is frozen at torch 2.4.1 which stops at 3.12).
+if ($gpuModeEarly -in @("rocm", "directml") -and (Test-Path $python)) {
     $backendVer = Get-PyVersion $python
     if ($backendVer -and $backendVer -ne "3.12") {
         Write-Host "  This AMD machine needs Python 3.12 for GPU work (environment is $backendVer) - rebuilding..." -ForegroundColor Yellow
@@ -249,7 +404,7 @@ if ($gpuModeEarly -eq "rocm" -and (Test-Path $python)) {
 if (-not (Test-Path $python)) {
     Write-Host "  First run: creating the Python environment..."
     $made = $false
-    if ($gpuModeEarly -eq "rocm") {
+    if ($gpuModeEarly -in @("rocm", "directml")) {
         $pl = Get-Python312
         if ($pl) {
             & $pl[0] $pl[1] -m venv (Join-Path $root "backend\.venv")
@@ -262,13 +417,13 @@ if (-not (Test-Path $python)) {
         if (-not (Get-Command py -ErrorAction SilentlyContinue) -and
             -not (Get-Command python -ErrorAction SilentlyContinue)) {
             # A fresh clone on a fresh machine: install Python silently
-            # rather than sending the user to a website.
-            if (Get-Command winget -ErrorAction SilentlyContinue) {
-                Write-Host "  Installing Python 3.12 (one time)..." -ForegroundColor Yellow
-                winget install Python.Python.3.12 --source winget --accept-package-agreements `
-                    --accept-source-agreements --disable-interactivity | Out-Null
-                $env:Path = [Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' +
-                            [Environment]::GetEnvironmentVariable('Path', 'User') + ';' + $env:Path
+            # rather than sending the user to a website. winget first,
+            # python.org's own silent installer when winget is missing or
+            # fails - EVERY machine ends up with a working Python.
+            Install-Tool "Python.Python.3.12" "Python 3.12" | Out-Null
+            if (-not (Get-Command py -ErrorAction SilentlyContinue) -and
+                -not (Get-Command python -ErrorAction SilentlyContinue)) {
+                Install-PythonDirect | Out-Null
             }
         }
         if (Get-Command py -ErrorAction SilentlyContinue) {
@@ -276,7 +431,9 @@ if (-not (Test-Path $python)) {
         } elseif (Get-Command python -ErrorAction SilentlyContinue) {
             python -m venv (Join-Path $root "backend\.venv")
         } else {
-            throw "Python 3.12+ not found and winget could not install it. Install from python.org and re-run."
+            throw ("Python could not be installed automatically (winget and " +
+                   "the python.org download both failed - is this PC online?). " +
+                   "Install Python 3.12 from python.org, then run launch.bat again.")
         }
     }
 }
@@ -336,33 +493,42 @@ function Find-Ollama {
 }
 
 $ollamaExe = Find-Ollama
-if (-not $ollamaExe -and (Get-Command winget -ErrorAction SilentlyContinue)) {
-    # First run on a fresh machine: Ollama is the first dependency — the LLM
-    # it hosts decides what else this machine needs.
-    Write-Host "  Installing Ollama (local LLM host)..." -ForegroundColor Yellow
-    winget install Ollama.Ollama --source winget --accept-package-agreements `
-        --accept-source-agreements --disable-interactivity | Out-Null
-    $env:Path = [Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' +
-                [Environment]::GetEnvironmentVariable('Path', 'User') + ';' + $env:Path
+if (-not $ollamaExe) {
+    # First run on a fresh machine: winget first, then Ollama's own silent
+    # installer for machines where winget is missing or broken.
+    Install-Tool "Ollama.Ollama" "Ollama (local LLM host)" | Out-Null
     $ollamaExe = Find-Ollama
+    if (-not $ollamaExe) {
+        $prev = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
+        try {
+            Write-Host "  Downloading Ollama from ollama.com (one time)..." -ForegroundColor Yellow
+            $setup = Join-Path $env:TEMP "pf-ollama-setup.exe"
+            Invoke-WebRequest -UseBasicParsing -TimeoutSec 600 `
+                -Uri "https://ollama.com/download/OllamaSetup.exe" -OutFile $setup
+            if ((Get-Item $setup).Length -gt 50MB) {
+                Start-Process -Wait $setup -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART" | Out-Null
+            }
+            Remove-Item $setup -Force -ErrorAction SilentlyContinue
+        } catch {}
+        $ErrorActionPreference = $prev
+        Update-SessionPath
+        $ollamaExe = Find-Ollama
+    }
 }
 
 # Hardware-adaptive model choice: more VRAM/RAM -> bigger planning model.
-$vramGb = 0.0
-try {
-    $vramMb = (& nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>$null |
-               Select-Object -First 1)
-    if ($vramMb) { $vramGb = [math]::Round([double]$vramMb / 1024, 1) }
-} catch {}
+# Get-GpuVramGb reads the registry when nvidia-smi is absent, so AMD and
+# Intel machines size by their REAL VRAM instead of a false zero.
+$vramGb = Get-GpuVramGb
 $ramGb = [math]::Round((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1GB, 1)
 
 $llmModel = $env:PROMPTFORGE_LLM_MODEL
 if (-not $llmModel) {
-    if ($vramGb -ge 16) { $llmModel = "qwen2.5:14b" }
+    # 14b needs the GPU (Ollama/CUDA) or serious RAM to run at usable speed.
+    if ($vramGb -ge 16 -and ((Get-GpuMode) -eq "cuda" -or $ramGb -ge 32)) { $llmModel = "qwen2.5:14b" }
     elseif ($vramGb -ge 6 -and $ramGb -ge 12) { $llmModel = "qwen2.5:7b" }
     elseif ($ramGb -ge 32) { $llmModel = "qwen2.5:7b" }
-    # ^ AMD machines report 0 GB VRAM to nvidia-smi; a 64 GB box was
-    #   getting the 3B planner. Plenty of RAM runs the 7B on CPU fine.
     else { $llmModel = "qwen2.5:3b" }
     $env:PROMPTFORGE_LLM_MODEL = $llmModel   # backend inherits the choice
 }
@@ -537,6 +703,11 @@ function Repair-ComfyVenv($dir, $srcDir = $null) {
                 & $pip install --retries 10 --timeout 300 torch==2.4.1 torchvision==0.19.1 torchaudio==2.4.1 *> $repairLog
                 & $pip install --retries 10 --timeout 300 torch-directml *>> $repairLog
             }
+        } elseif ($mode -eq "xpu") {
+            # Intel Arc: torch's native XPU wheels; ComfyUI detects the
+            # torch.xpu device by itself, no flag needed.
+            & $pip install --retries 10 --timeout 300 torch torchvision torchaudio `
+                --index-url https://download.pytorch.org/whl/xpu *> $repairLog
         } else {
             & $pip install --retries 10 --timeout 180 torch torchvision torchaudio *> $repairLog
         }
@@ -598,6 +769,17 @@ function Repair-ComfyVenv($dir, $srcDir = $null) {
                 Where-Object { $_ -match "ERROR|error:|Could not|No matching|SSLError|CERTIFICATE" } |
                 Select-Object -First 4 | ForEach-Object { Write-Host "      | $_" -ForegroundColor DarkGray }
             Write-Host "      Full log: $logDir\directml-install.log - renders fall back to the CPU (slow, but real)." -ForegroundColor Yellow
+        }
+    } elseif ($mode -eq "xpu") {
+        $prevV = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
+        $xok = (& $venvPy -c "import torch; print(int(torch.xpu.is_available()))" 2>$null | Out-String).Trim()
+        $ErrorActionPreference = $prevV
+        if ($xok -eq "1") {
+            Write-Host "  [ok] Intel GPU visible to torch (XPU) - GPU rendering enabled" -ForegroundColor Green
+        } else {
+            Write-Host "  [!] XPU torch installed but the Intel GPU is not visible -" -ForegroundColor Yellow
+            Write-Host "      renders will use the CPU. Update the Intel Arc driver and relaunch." -ForegroundColor Yellow
         }
     }
     return $true
@@ -890,16 +1072,34 @@ function Optimize-ComfyPerf($dir) {
     if ((Get-GpuMode) -ne "cuda") { return }
     $venvPy = Join-Path $dir ".venv\Scripts\python.exe"
     if (-not (Test-Path $venvPy)) { return }
-    if (Test-PyImport $venvPy "sageattention") { return }
-    Write-Host "  Installing SageAttention (faster renders on NVIDIA)..." -ForegroundColor DarkGray
-    $log = Join-Path $logDir "sage-install.log"
     $pip = Join-Path $dir ".venv\Scripts\pip.exe"
-    $prev = $ErrorActionPreference
-    $ErrorActionPreference = "Continue"
-    & $pip install --retries 6 --timeout 120 triton-windows sageattention *> $log
-    $ErrorActionPreference = $prev
-    if (Test-PyImport $venvPy "sageattention") {
-        Write-Host "  [ok] SageAttention ready (+~11% render speed)" -ForegroundColor Green
+    if (-not (Test-PyImport $venvPy "sageattention")) {
+        Write-Host "  Installing SageAttention (faster renders on NVIDIA)..." -ForegroundColor DarkGray
+        $log = Join-Path $logDir "sage-install.log"
+        $prev = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
+        & $pip install --retries 6 --timeout 120 triton-windows sageattention *> $log
+        $ErrorActionPreference = $prev
+        if (Test-PyImport $venvPy "sageattention") {
+            Write-Host "  [ok] SageAttention ready (+~11% render speed)" -ForegroundColor Green
+        }
+    }
+    # xformers: attention fallback ComfyUI uses automatically when present.
+    # --no-deps is load-bearing - a bare 'pip install xformers' may pull a
+    # DIFFERENT torch and break the working CUDA stack. If the wheel does
+    # not match this torch, the import fails and it is removed again;
+    # either way the venv is never left worse than before.
+    if (-not (Test-PyImport $venvPy "xformers")) {
+        $log2 = Join-Path $logDir "xformers-install.log"
+        $prev = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
+        & $pip install --no-deps --retries 6 --timeout 180 xformers *> $log2
+        if (-not (Test-PyImport $venvPy "xformers, xformers.ops")) {
+            & $pip uninstall -y xformers *>> $log2
+        } else {
+            Write-Host "  [ok] xformers ready (extra attention backend)" -ForegroundColor Green
+        }
+        $ErrorActionPreference = $prev
     }
 }
 
@@ -971,10 +1171,11 @@ promptforge:
                     }
                 }
             }
-            if (-not $comfyUp -and (Get-GpuMode) -in @("rocm", "directml")) {
-                # The AMD stacks can crash on init even when installed;
-                # a CPU start still gives real renders on these machines.
-                Write-Host "  Retrying ComfyUI on the CPU (AMD GPU init failed - slow but real renders)..." -ForegroundColor Yellow
+            if (-not $comfyUp) {
+                # ANY GPU stack can crash on init (driver mismatch, broken
+                # update, OOM at model scan). A CPU start still gives real
+                # renders - always better than the mock, on every machine.
+                Write-Host "  Retrying ComfyUI on the CPU (GPU init failed - slow but real renders)..." -ForegroundColor Yellow
                 $p = Start-ComfyUI $comfyDir @("--cpu")
                 if ($p) {
                     $started += $p
@@ -1007,7 +1208,28 @@ if ($comfyUp) {
         Write-Host "  [ok] ComfyUI VERIFIED - test image rendered$devLine" -ForegroundColor Green
     } else {
         Write-Host "  [!!] ComfyUI answers but CANNOT RENDER: $($verify[1])" -ForegroundColor Red
-        Write-Host "       Renders fall back to the clearly-labeled mock. Logs: $logDir\comfyui-err.log" -ForegroundColor Yellow
+        # One more real-render attempt before any mock: when WE started this
+        # ComfyUI, restart it on the CPU - a GPU stack broken at render time
+        # (bad op, driver fault) usually still renders fine there.
+        if ($p -and -not $p.HasExited) {
+            Write-Host "  Restarting ComfyUI on the CPU (GPU render path is broken - slow but real renders)..." -ForegroundColor Yellow
+            try { Stop-Process -Id $p.Id -Force -Confirm:$false } catch {}
+            Start-Sleep -Seconds 2
+            $p = Start-ComfyUI $comfyDir @("--cpu")
+            if ($p) {
+                $started += $p
+                if (Wait-Http "http://127.0.0.1:8188/system_stats" 90 $p) {
+                    $verify = Test-ComfyRender "http://127.0.0.1:8188"
+                    if ($verify[0]) {
+                        $env:PROMPTFORGE_INPAINT_BACKEND = "comfyui"
+                        Write-Host "  [ok] ComfyUI VERIFIED on the CPU - real renders, no mock" -ForegroundColor Green
+                    }
+                }
+            }
+        }
+        if ($env:PROMPTFORGE_INPAINT_BACKEND -ne "comfyui") {
+            Write-Host "       Renders fall back to the clearly-labeled mock. Logs: $logDir\comfyui-err.log" -ForegroundColor Yellow
+        }
     }
 } else {
     Write-Host "  [--] ComfyUI not available - edits use the clearly-labeled mock renderer." -ForegroundColor Yellow
@@ -1015,7 +1237,7 @@ if ($comfyUp) {
     Write-Host "         1. Its download failed: $logDir\comfyui-install.log" -ForegroundColor DarkGray
     Write-Host "         2. Its Python packages failed to install: $logDir\comfyui-repair.log" -ForegroundColor DarkGray
     Write-Host "         3. It crashed on start: $logDir\comfyui-err.log" -ForegroundColor DarkGray
-    Write-Host "         4. No supported GPU stack (AMD cards need a ROCm-supported model + Python 3.12)" -ForegroundColor DarkGray
+    Write-Host "         4. No usable GPU stack (AMD needs Python 3.12; Intel needs an Arc-class GPU + driver)" -ForegroundColor DarkGray
     Get-Content (Join-Path $logDir "comfyui-err.log") -Tail 5 -ErrorAction SilentlyContinue |
         ForEach-Object { Write-Host "       | $_" -ForegroundColor DarkGray }
 }

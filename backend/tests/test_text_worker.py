@@ -92,18 +92,18 @@ class ServicesWiringTests(unittest.TestCase):
     the one-shot path had."""
 
     def setUp(self):
-        import shutil
-
         from app.config import Settings
         from app.core.services import Services
 
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
-        # comfyui_dir must exist and hold a "venv" for _comfy_python; point
-        # both at the backend's own interpreter via a fake layout.
+        # comfyui_dir must merely EXIST for the gate; the interpreter
+        # resolution is overridden below. (The previous fixture copied a
+        # bare python.exe into a fake venv — a copied exe only boots when
+        # it happens to find its DLLs, so the test passed or failed
+        # depending on the machine it ran on.)
         fake = Path(self.tmp.name) / "comfy"
         (fake / ".venv" / "Scripts").mkdir(parents=True)
-        shutil.copy(sys.executable, fake / ".venv" / "Scripts" / "python.exe")
         self.s = Services(Settings(
             data_dir=Path(self.tmp.name) / "data", inpaint_backend="mock",
             segment_backend="mock", critic_model="", first_run_setup=False,
@@ -111,8 +111,11 @@ class ServicesWiringTests(unittest.TestCase):
         self.addCleanup(self.s.stop)
         tool = Path(self.tmp.name) / "stub_tool.py"
         tool.write_text(STUB)
-        self.s._text_mask_worker = _TextMaskWorker(
-            str(fake / ".venv" / "Scripts" / "python.exe"), str(tool))
+        # The backend's own interpreter runs the stub (it has PIL); the
+        # injected worker's python matches, so _text_mask reuses it.
+        self.s._comfy_python = lambda _base: sys.executable
+        self.s._text_mask_worker = _TextMaskWorker(sys.executable, str(tool))
+        self.addCleanup(lambda: self.s._text_mask_worker.stop(force=True))
         self.image = Image.new("RGB", (64, 64), (30, 40, 50))
 
     def test_mock_mode_still_refuses_before_any_worker(self):

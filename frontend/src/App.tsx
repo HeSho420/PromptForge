@@ -90,7 +90,9 @@ function PeerChip() {
               ? `V ${(s.vram_used_mb / 1024).toFixed(1)}/${Math.round(
                   s.vram_total_mb / 1024,
                 )}G`
-              : "";
+              : s?.vram_total_mb
+                ? `V ${Math.round(s.vram_total_mb / 1024)}G`
+                : "";
           const ram =
             s?.ram_used_gb != null && s?.ram_total_gb
               ? `R ${Math.round(s.ram_used_gb)}/${Math.round(s.ram_total_gb)}G`

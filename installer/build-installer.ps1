@@ -72,7 +72,8 @@ $staging = Join-Path $env:TEMP ("pf-installer-staging-" + [Guid]::NewGuid().ToSt
 $app = Join-Path $staging "app"
 New-Item -ItemType Directory -Force $app | Out-Null
 try {
-    foreach ($f in @("launch.ps1", "setup.ps1", "README.md", "ROADMAP.md")) {
+    foreach ($f in @("launch.ps1", "launch.bat", "install.bat", "setup.ps1",
+                     "doctor.ps1", "allow-lan.ps1", "README.md", "ROADMAP.md")) {
         $p = Join-Path $root $f
         if (Test-Path $p) { Copy-Item $p (Join-Path $app $f) }
     }
@@ -90,6 +91,10 @@ try {
         Remove-Item -Recurse -Force
     Get-ChildItem $app -Recurse -File -Include "*.pyc" -ErrorAction SilentlyContinue |
         Remove-Item -Force
+
+    # install.bat (packed above) hands unpacked-zip starts to this script.
+    New-Item -ItemType Directory -Force (Join-Path $app "installer") | Out-Null
+    Copy-Item (Join-Path $PSScriptRoot "bootstrap.ps1") (Join-Path $app "installer\bootstrap.ps1")
 
     # The installer core sits at the zip root - the .bat starts it directly.
     Copy-Item (Join-Path $PSScriptRoot "installer.ps1") (Join-Path $staging "installer.ps1")

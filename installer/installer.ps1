@@ -23,6 +23,7 @@ param(
     [string]$InstallDir = "",
     [string]$Staging = "",
     [switch]$NoShortcut,
+    [switch]$NoLaunch,
     [switch]$AllowOneDrive,
     [switch]$UiSmokeTest
 )
@@ -57,7 +58,12 @@ $script:RocmTorchWheels = @(
     "torch-2.9.1%2Brocm7.2.1-cp312-cp312-win_amd64.whl",
     "torchvision-0.24.1%2Brocm7.2.1-cp312-cp312-win_amd64.whl",
     "torchaudio-2.9.1%2Brocm7.2.1-cp312-cp312-win_amd64.whl")
-$script:GpuMode = $null   # resolved once by Resolve-GpuMode: cuda | rocm | cpu
+$script:GpuMode = $null   # resolved once: cuda | rocm | directml | xpu | cpu
+$script:TorchXpuIndex = "https://download.pytorch.org/whl/xpu"
+# torch-directml is frozen at torch 2.4.1; ComfyUI releases newer than this
+# tag cannot even import on it (comfy-kitchen custom-op schema crash,
+# measured on a real 2.4.1 environment). Keep in sync with launch.ps1.
+$script:ComfyDmlTag = "v0.30.2"
 # Internal: PROMPTFORGE_SETUP_LIGHT=1 skips the multi-GB steps (torch, SAM,
 # ComfyUI, Ollama) so the file/venv plumbing can be tested quickly.
 $script:LightMode = ($env:PROMPTFORGE_SETUP_LIGHT -eq "1")
@@ -300,26 +306,26 @@ function Get-PyMinor([string]$exe) {
 }
 
 function Get-GpuMode {
-    # Which torch build fits this machine: cuda | rocm | cpu.
-    # nvidia-smi (not just the WMI name) proves a WORKING NVIDIA driver.
+    # Which torch build fits this machine: cuda | rocm | directml | xpu | cpu.
+    # Keep in sync with launch.ps1 (its self-repair uses the same ladder).
     if (Test-NvidiaGpu) { return "cuda" }
     try {
         $gpus = @(Get-CimInstance Win32_VideoController -ErrorAction Stop |
                   ForEach-Object { $_.Name } | Where-Object { $_ })
     } catch { $gpus = @() }
     foreach ($n in $gpus) {
-        if ($n -match "NVIDIA") {
-            Write-Log ("NVIDIA GPU present (" + $n + ") but its driver is not " +
-                       "working (no nvidia-smi) - using CPU rendering. Install " +
-                       "the GeForce driver and run the installer again for " +
-                       "GPU acceleration.") "warn"
-            return "cpu"
+        if ($n -match "NVIDIA|GeForce|Quadro|RTX \d") {
+            # Broken/absent driver: still install the CUDA build. It renders
+            # on CPU today and uses the GPU the moment the driver is fixed -
+            # no reinstall (launch.ps1 also self-repairs a CPU-only torch).
+            Write-Log ("NVIDIA GPU present (" + $n + ") but its driver is " +
+                       "not answering - installing the CUDA build anyway; " +
+                       "install the GeForce driver to enable the GPU.") "warn"
+            return "cuda"
         }
     }
     # ROCm on native Windows covers RX 9000, the high-end RX 7000 cards and
-    # Ryzen AI APU graphics (860M/880M/890M, 8040S/8050S/8060S). Older
-    # Radeons (RX 6000 and earlier) have no Windows ROCm - CPU wheels are
-    # the honest choice there.
+    # Ryzen AI APU graphics (860M/880M/890M, 8040S/8050S/8060S).
     $rocmPattern = "Radeon.+(RX\s?90\d0|RX\s?7900|RX\s?7800|RX\s?7700|8[89]0M|860M|80[456]0S)"
     foreach ($n in $gpus) {
         if ($n -match $rocmPattern) {
@@ -328,10 +334,25 @@ function Get-GpuMode {
         }
     }
     foreach ($n in $gpus) {
+        if ($n -match "Intel.+Arc") {
+            # Intel Arc (discrete or Core Ultra iGPU): native torch XPU -
+            # current torch, current ComfyUI. Checked BEFORE the generic
+            # AMD catch-all: a Ryzen desktop iGPU enumerates as 'AMD
+            # Radeon(TM) Graphics', and an Arc card next to it must win
+            # over the frozen DirectML stack. Older Iris Xe/UHD iGPUs
+            # are not covered and stay on CPU.
+            Write-Log ("Intel Arc GPU detected (" + $n + ") - using the " +
+                       "torch XPU stack")
+            return "xpu"
+        }
+    }
+    foreach ($n in $gpus) {
         if ($n -match "AMD|Radeon") {
-            Write-Log ("AMD GPU without Windows ROCm support (" + $n + ") - " +
-                       "using CPU rendering (works, slower)") "warn"
-            return "cpu"
+            # Every other DX12 Radeon (RX 6000/5000, Ryzen iGPUs) renders
+            # for real through torch-directml.
+            Write-Log ("AMD GPU without Windows ROCm wheels (" + $n + ") - " +
+                       "using the DirectML GPU stack")
+            return "directml"
         }
     }
     return "cpu"
@@ -355,15 +376,28 @@ function Install-RocmTorch([string]$venvPy) {
     return ($code -eq 0)
 }
 
+function Install-DirectmlTorch([string]$venvPy) {
+    # PINNED: torch-directml hard-requires torch==2.4.1; an unpinned
+    # torchvision resolves to a newer torch and pip fails the whole install
+    # (measured live on an RX 6700 XT).
+    $code = Invoke-Process $venvPy ("-m pip install --retries 10 --timeout 300 " +
+        "torch==2.4.1 torchvision==0.19.1 torchaudio==2.4.1") 90
+    if ($code -ne 0) { return $false }
+    $code = Invoke-Process $venvPy "-m pip install --retries 10 --timeout 300 torch-directml" 60
+    return ($code -eq 0)
+}
+
 function Get-TorchModeFor([string]$venvPy) {
-    # The per-venv decision: ROCm wheels only exist for Python 3.12.
+    # The per-venv decision: both AMD stacks are Python-3.12-only (ROCm
+    # wheels are cp312; torch-directml stops at torch 2.4.1 = 3.12 max).
     $mode = Resolve-GpuMode
-    if ($mode -eq "rocm") {
+    if ($mode -in @("rocm", "directml")) {
         $minor = Get-PyMinor $venvPy
         if ($minor -ne "3.12") {
-            Write-Log ("ROCm torch needs Python 3.12 but this environment is " +
-                       "Python " + $minor + " - falling back to CPU torch. " +
-                       "Install Python 3.12 and re-run for AMD GPU rendering.") "warn"
+            Write-Log ("the AMD GPU stack needs Python 3.12 but this " +
+                       "environment is Python " + $minor + " - falling back " +
+                       "to CPU torch. Install Python 3.12 and re-run for " +
+                       "AMD GPU rendering.") "warn"
             return "cpu"
         }
     }
@@ -371,14 +405,22 @@ function Get-TorchModeFor([string]$venvPy) {
 }
 
 function Test-TorchGpu([string]$venvPy) {
-    # Warn-only: CUDA/ROCm builds still render on CPU if the GPU is unusable.
-    $code = Invoke-Process $venvPy `
-        "-c ""import sys, torch; sys.exit(0 if torch.cuda.is_available() else 1)""" 5
+    # Warn-only, per-stack: a GPU build still renders on CPU if the GPU is
+    # unusable, so a failure here never blocks the install.
+    $mode = Resolve-GpuMode
+    if ($mode -eq "directml") {
+        $probe = "import sys, torch_directml; sys.exit(0 if torch_directml.device_count() > 0 else 1)"
+    } elseif ($mode -eq "xpu") {
+        $probe = "import sys, torch; sys.exit(0 if torch.xpu.is_available() else 1)"
+    } else {
+        $probe = "import sys, torch; sys.exit(0 if torch.cuda.is_available() else 1)"
+    }
+    $code = Invoke-Process $venvPy ("-c """ + $probe + """") 5
     if ($code -ne 0) {
         Write-Log ("torch is installed but cannot use the GPU - renders run " +
                    "on the CPU for now. Update the GPU driver (AMD: Adrenalin " +
-                   "26.2.2 or newer / NVIDIA: current GeForce driver) and " +
-                   "renders speed up automatically.") "warn"
+                   "26.2.2+ / NVIDIA: current GeForce / Intel: current Arc " +
+                   "driver) and renders speed up automatically.") "warn"
     }
 }
 
@@ -534,14 +576,61 @@ function Step-CopyApp([string]$dest) {
     Write-Log ("app files installed to " + $dest)
 }
 
+function Step-GitUpdates([string]$dest) {
+    # Turn the installed folder into a real git clone (best effort): that is
+    # what makes launch.ps1's auto-update work, so pushed fixes arrive on
+    # this machine at every launch. Never fatal - without git or GitHub
+    # access the machine simply stays on the payload version, and re-running
+    # the installer updates it instead.
+    if (Test-Path (Join-Path $dest ".git")) {
+        Write-Log "already a git clone - the update channel is active"
+        return
+    }
+    $git = Get-Command git -ErrorAction SilentlyContinue
+    if (-not $git) {
+        Write-Log ("git is not installed - automatic updates stay off " +
+                   "(re-run this installer to update)") "warn"
+        return
+    }
+    $repo = "https://github.com/HeSho420/PromptForge.git"
+    $ok = $false
+    $env:GIT_TERMINAL_PROMPT = "0"   # NEVER hang the install on a prompt
+    try {
+        Invoke-Process $git.Source ("-C """ + $dest + """ init") 2 | Out-Null
+        Invoke-Process $git.Source ("-C """ + $dest + """ remote add origin " + $repo) 2 | Out-Null
+        # schannel TLS survives AV certificate interception; interactive
+        # credentials are disabled so a machine without stored GitHub
+        # access fails fast instead of hanging a silent install.
+        $code = Invoke-Process $git.Source ("-C """ + $dest + """ -c http.sslBackend=schannel " +
+            "-c credential.interactive=false fetch --depth 1 origin main") 5
+        if ($code -eq 0) {
+            # data\, venvs, tools\ and frontend\dist are gitignored or
+            # untracked - this aligns only the CODE with the repository,
+            # and the pre-built UI the payload shipped stays in place.
+            $code = Invoke-Process $git.Source ("-C """ + $dest + """ checkout -f -B main origin/main") 3
+            if ($code -eq 0) { $ok = $true }
+        }
+    } finally {
+        Remove-Item Env:GIT_TERMINAL_PROMPT -ErrorAction SilentlyContinue
+    }
+    if ($ok) {
+        Write-Log "connected to the update channel - new versions arrive automatically at launch"
+    } else {
+        Remove-Item (Join-Path $dest ".git") -Recurse -Force -ErrorAction SilentlyContinue
+        Write-Log ("could not reach the PromptForge repository from this " +
+                   "machine - automatic updates stay off (re-run this " +
+                   "installer to update)") "warn"
+    }
+}
+
 function Step-Python {
     $py = Find-Python
     if ($py) {
-        # ROCm-capable AMD GPU -> the AMD torch wheels are cp312-only, so a
-        # machine that only has e.g. 3.11 still gets a 3.12 install.
-        if ((Resolve-GpuMode) -eq "rocm" -and (Get-PyMinor $py) -ne "3.12") {
+        # AMD GPU (either stack) -> the GPU wheels are Python-3.12-only, so
+        # a machine that only has e.g. 3.11 still gets a 3.12 install.
+        if ((Resolve-GpuMode) -in @("rocm", "directml") -and (Get-PyMinor $py) -ne "3.12") {
             Write-Log ("Python " + (Get-PyMinor $py) + " found, but the AMD " +
-                       "GPU needs Python 3.12 for ROCm - installing 3.12 too")
+                       "GPU stack needs Python 3.12 - installing 3.12 too")
         } else {
             Write-Log ("Python found: " + $py)
             $script:PythonExe = $py
@@ -644,6 +733,24 @@ function Step-TorchSam([string]$dest) {
                 "torch torchvision") 90
             if ($code -ne 0) { throw "torch installation failed" }
         }
+    } elseif ($mode -eq "directml") {
+        Write-Log "AMD GPU - installing the DirectML torch stack (about 2 GB)"
+        if (-not (Install-DirectmlTorch $venvPy)) {
+            Write-Log "DirectML torch failed to install - falling back to CPU torch" "warn"
+            $code = Invoke-Process $venvPy ("-m pip install --retries 10 --timeout 300 " +
+                "torch torchvision") 90
+            if ($code -ne 0) { throw "torch installation failed" }
+        }
+    } elseif ($mode -eq "xpu") {
+        Write-Log "Intel Arc GPU - installing torch's XPU build (about 2 GB)"
+        $code = Invoke-Process $venvPy ("-m pip install --retries 10 --timeout 300 " +
+            "torch torchvision --index-url " + $script:TorchXpuIndex) 120
+        if ($code -ne 0) {
+            Write-Log "XPU torch failed to install - falling back to CPU torch" "warn"
+            $code = Invoke-Process $venvPy ("-m pip install --retries 10 --timeout 300 " +
+                "torch torchvision") 90
+            if ($code -ne 0) { throw "torch installation failed" }
+        }
     } else {
         Write-Log "no supported GPU - installing CPU torch (renders work, slowly)"
         $code = Invoke-Process $venvPy ("-m pip install --retries 10 --timeout 300 " +
@@ -670,26 +777,35 @@ function Step-ComfyFiles([string]$dest) {
     # networks (seen live: 4/4 read timeouts). Release-tag archives are
     # cached by github and far more reliable - resolve the latest tag first.
     $urls = @()
-    try {
-        $req = [System.Net.HttpWebRequest]::Create(
-            "https://api.github.com/repos/comfyanonymous/ComfyUI/releases/latest")
-        $req.UserAgent = "PromptForge-Installer/1.0"
-        $req.Timeout = 15000
-        $resp = $req.GetResponse()
-        $rd = New-Object System.IO.StreamReader ($resp.GetResponseStream())
-        $json = $rd.ReadToEnd(); $rd.Close(); $resp.Close()
-        if ($json -match '"tag_name"\s*:\s*"([^"]+)"') {
-            $tag = $Matches[1]
-            Write-Log ("latest ComfyUI release: " + $tag)
-            $urls += ("https://github.com/comfyanonymous/ComfyUI/archive/refs/tags/" + $tag + ".zip")
-            $urls += ("https://codeload.github.com/comfyanonymous/ComfyUI/zip/refs/tags/" + $tag)
+    if ((Resolve-GpuMode) -eq "directml") {
+        # DirectML machines are pinned: torch-directml is frozen at torch
+        # 2.4.1 and releases newer than this tag crash on import there.
+        Write-Log ("DirectML machine - installing ComfyUI " + $script:ComfyDmlTag +
+                   " (newest release that runs on torch 2.4.1)")
+        $urls += ("https://github.com/comfyanonymous/ComfyUI/archive/refs/tags/" + $script:ComfyDmlTag + ".zip")
+        $urls += ("https://codeload.github.com/comfyanonymous/ComfyUI/zip/refs/tags/" + $script:ComfyDmlTag)
+    } else {
+        try {
+            $req = [System.Net.HttpWebRequest]::Create(
+                "https://api.github.com/repos/comfyanonymous/ComfyUI/releases/latest")
+            $req.UserAgent = "PromptForge-Installer/1.0"
+            $req.Timeout = 15000
+            $resp = $req.GetResponse()
+            $rd = New-Object System.IO.StreamReader ($resp.GetResponseStream())
+            $json = $rd.ReadToEnd(); $rd.Close(); $resp.Close()
+            if ($json -match '"tag_name"\s*:\s*"([^"]+)"') {
+                $tag = $Matches[1]
+                Write-Log ("latest ComfyUI release: " + $tag)
+                $urls += ("https://github.com/comfyanonymous/ComfyUI/archive/refs/tags/" + $tag + ".zip")
+                $urls += ("https://codeload.github.com/comfyanonymous/ComfyUI/zip/refs/tags/" + $tag)
+            }
+        } catch {
+            Write-Log ("could not resolve the latest ComfyUI release (" +
+                       $_.Exception.Message + ") - using the master branch") "warn"
         }
-    } catch {
-        Write-Log ("could not resolve the latest ComfyUI release (" +
-                   $_.Exception.Message + ") - using the master branch") "warn"
+        $urls += $script:ComfyZipUrl
+        $urls += "https://codeload.github.com/comfyanonymous/ComfyUI/zip/refs/heads/master"
     }
-    $urls += $script:ComfyZipUrl
-    $urls += "https://codeload.github.com/comfyanonymous/ComfyUI/zip/refs/heads/master"
 
     $zip = Join-Path $env:TEMP "promptforge-comfyui.zip"
     $tmp = Join-Path $env:TEMP ("promptforge-comfyui-" + [Guid]::NewGuid().ToString("N"))
@@ -743,12 +859,29 @@ function Step-ComfyVenv([string]$dest) {
             $code = Invoke-Process $venvPy ("-m pip install --retries 10 --timeout 300 " +
                 "torch torchvision torchaudio") 90
         }
+    } elseif ($mode -eq "directml") {
+        Write-Log "installing the DirectML torch stack for ComfyUI (about 2 GB)"
+        if (Install-DirectmlTorch $venvPy) { $code = 0 } else {
+            Write-Log "DirectML torch failed - falling back to CPU torch for ComfyUI" "warn"
+            $code = Invoke-Process $venvPy ("-m pip install --retries 10 --timeout 300 " +
+                "torch torchvision torchaudio") 90
+        }
+    } elseif ($mode -eq "xpu") {
+        Write-Log "installing torch's XPU build for ComfyUI (about 2 GB)"
+        $code = Invoke-Process $venvPy ("-m pip install --retries 10 --timeout 300 " +
+            "torch torchvision torchaudio --index-url " + $script:TorchXpuIndex) 120
+        if ($code -ne 0) {
+            Write-Log "XPU torch failed - falling back to CPU torch for ComfyUI" "warn"
+            $code = Invoke-Process $venvPy ("-m pip install --retries 10 --timeout 300 " +
+                "torch torchvision torchaudio") 90
+        }
     } else {
         Write-Log "installing CPU torch for ComfyUI"
         $code = Invoke-Process $venvPy ("-m pip install --retries 10 --timeout 300 " +
             "torch torchvision torchaudio") 90
     }
     if ($code -ne 0) { throw "torch installation for ComfyUI failed" }
+    if ($mode -ne "cpu") { Test-TorchGpu $venvPy }
     $req = Join-Path $comfy "requirements.txt"
     $code = Invoke-Process $venvPy `
         ("-m pip install --retries 10 --timeout 300 -r """ + $req + """") 60
@@ -842,6 +975,7 @@ function Run-Install([string]$dest) {
     $steps = @(
         @{ n = "Checking this PC (preflight)";        b = { Step-Preflight $dest } },
         @{ n = "Installing PromptForge files";        b = { Step-CopyApp $dest } },
+        @{ n = "Connecting automatic updates";        b = { Step-GitUpdates $dest } },
         @{ n = "Python 3.12";                         b = { Step-Python } },
         @{ n = "Backend environment";                 b = { Step-BackendVenv $dest } },
         @{ n = "AI libraries (torch + SAM)";          b = { Step-TorchSam $dest } },
@@ -876,6 +1010,24 @@ function Run-Install([string]$dest) {
     if ($script:Failed.Count -eq 0) {
         Write-Log "=== DONE - PromptForge is installed ==="
         Write-Log "First launch downloads the AI models (several GB) automatically."
+        if (-not $NoLaunch) {
+            # Auto-launch: -ExecutionPolicy Bypass makes this work on
+            # machines where running .ps1 scripts is disabled by default.
+            Write-Log "starting PromptForge..."
+            try {
+                # The script path is quoted BY HAND: PS 5.1's Start-Process
+                # joins -ArgumentList with spaces and no quoting, so an
+                # install dir containing a space would otherwise split the
+                # path and the app would never start (measured live).
+                Start-Process -FilePath (Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe") `
+                    -WorkingDirectory $dest `
+                    -ArgumentList "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+                                  ('"' + (Join-Path $dest "launch.ps1") + '"')
+            } catch {
+                Write-Log ("could not auto-start PromptForge (" +
+                           $_.Exception.Message + ") - use the desktop shortcut") "warn"
+            }
+        }
         return $true
     }
     Write-Log ("=== FINISHED WITH PROBLEMS: " + ($script:Failed -join "; ") +
@@ -992,11 +1144,12 @@ function Show-Gui {
         Set-Status "Finished."
         if ($ok) {
             [System.Windows.Forms.MessageBox]::Show(
-                ("PromptForge is installed." + [Environment]::NewLine +
+                ("PromptForge is installed and STARTING NOW - a browser " +
+                 "tab opens when it is ready." + [Environment]::NewLine +
                  [Environment]::NewLine +
-                 "Start it with the PromptForge shortcut on the desktop. " +
                  "The first launch downloads the AI models (several GB) " +
-                 "and can take a while."),
+                 "and can take a while. Next time, use the PromptForge " +
+                 "shortcut on the desktop."),
                 "PromptForge Setup",
                 [System.Windows.Forms.MessageBoxButtons]::OK,
                 [System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null

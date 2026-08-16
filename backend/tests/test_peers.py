@@ -750,6 +750,10 @@ class DownloadLane(unittest.TestCase):
             self.assertFalse(
                 q.busy(),
                 "a machine copying a model must still accept renders")
+            self.assertFalse(
+                q.busy_local(),
+                "busy_local is what the peer 409/idle gates consult - it "
+                "must ignore downloads too")
         finally:
             release.set()
             q.stop()

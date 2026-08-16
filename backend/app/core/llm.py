@@ -19,11 +19,46 @@ as local output.
 from __future__ import annotations
 
 import json
+import os
+import shutil
+import subprocess
+import threading
 import urllib.error
 import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Protocol
+
+_PULLING: set[str] = set()
+_PULL_LOCK = threading.Lock()
+
+
+def ollama_autopull(model: str) -> bool:
+    """Kick off `ollama pull <model>` in the background, once per process.
+
+    A missing local model must never be a dead end the user has to fix by
+    hand: the current request falls back (API/heuristics, honestly stamped),
+    and once the pull lands every later request runs locally again. Returns
+    True when a pull was actually started."""
+    with _PULL_LOCK:
+        if model in _PULLING:
+            return False
+        _PULLING.add(model)
+    exe = shutil.which("ollama")
+    if not exe:
+        cand = (Path(os.environ.get("LOCALAPPDATA", ""))
+                / "Programs" / "Ollama" / "ollama.exe")
+        exe = str(cand) if cand.exists() else None
+    if not exe:
+        return False
+    try:
+        flags = 0x08000008 if os.name == "nt" else 0  # DETACHED|NO_WINDOW
+        subprocess.Popen([exe, "pull", model], creationflags=flags,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return True
+    except OSError:
+        return False
 
 
 class LLMError(RuntimeError):
@@ -107,9 +142,14 @@ class LocalLLM:
             except Exception:  # noqa: BLE001 — body is diagnostic only
                 body = b""
             if exc.code == 404 and b"model" in body and b"not found" in body:
+                started = ollama_autopull(self.model)
+                note = (" — downloading it in the background now; this "
+                        "request uses the fallback and later ones run "
+                        "locally" if started else
+                        f" (try: ollama pull {self.model})")
                 raise LLMUnavailableError(
-                    f"Local LLM server has no model '{self.model}' "
-                    f"(try: ollama pull {self.model}).") from exc
+                    f"Local LLM server has no model '{self.model}'{note}"
+                ) from exc
             # Anything else: probably not Ollama — fall through to OpenAI.
         except (urllib.error.URLError, OSError, TimeoutError) as exc:
             raise LLMUnavailableError(
@@ -130,9 +170,12 @@ class LocalLLM:
             data = self._post(self.base_url + "/chat/completions", payload, self.timeout_s)
         except urllib.error.HTTPError as exc:
             if exc.code == 404:
+                started = ollama_autopull(self.model)
+                note = (" — downloading it in the background now" if started
+                        else f" (try: ollama pull {self.model})")
                 raise LLMUnavailableError(
-                    f"Local LLM server has no model '{self.model}' "
-                    f"(try: ollama pull {self.model}).") from exc
+                    f"Local LLM server has no model '{self.model}'{note}"
+                ) from exc
             raise LLMUnavailableError(
                 f"Local LLM at {self.base_url} returned HTTP {exc.code}.") from exc
         except (urllib.error.URLError, OSError, TimeoutError) as exc:

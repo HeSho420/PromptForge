@@ -85,14 +85,21 @@ class LocalLLMTests(unittest.TestCase):
             llm.complete("sys", "hi")
         self.assertIn("unreachable", str(ctx.exception))
 
-    def test_missing_model_hints_ollama_pull(self):
+    def test_missing_model_self_heals_or_hints_ollama_pull(self):
+        """A missing model now auto-starts `ollama pull` in the background;
+        the error either says the download started (Ollama installed) or
+        still carries the manual hint (no Ollama on this box). Both name
+        the model — the user always learns what is missing."""
         def post(url, payload, timeout):
             raise urllib.error.HTTPError(url, 404, "not found", {}, None)  # type: ignore[arg-type]
 
         llm = LocalLLM("http://localhost:11434/v1", "qwen2.5:7b", http_post=post)
         with self.assertRaises(LLMUnavailableError) as ctx:
             llm.complete("sys", "hi")
-        self.assertIn("ollama pull qwen2.5:7b", str(ctx.exception))
+        msg = str(ctx.exception)
+        self.assertIn("qwen2.5:7b", msg)
+        self.assertTrue("downloading it in the background" in msg
+                        or "ollama pull qwen2.5:7b" in msg, msg)
 
 
 class ClaudeLLMTests(unittest.TestCase):

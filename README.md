@@ -38,13 +38,28 @@ Design rules the code follows:
   later means re-implementing that small surface, not touching call sites.
 - **Originals are never overwritten.** Every edit is a new version row + file.
 
-## Quick start from a clone
+## Quick start
+
+**Easiest — works on every PC, even where PowerShell scripts are disabled:**
+
+1. GitHub → *Code → Download ZIP* → unpack anywhere.
+2. Double-click **`install.bat`** — it connects the folder to the update
+   channel (when this account has repository access), then starts the app.
+   Everything else installs itself. Day to day, double-click
+   **`launch.bat`**.
+
+Or from a terminal:
 
 ```powershell
-git clone https://github.com/<you>/PromptForge.git
+git clone https://github.com/HeSho420/PromptForge.git
 cd PromptForge
-.\launch.ps1
+.\launch.bat
 ```
+
+There is also a single-file GUI installer: build `PromptForge-Setup.bat`
+with `installer\build-installer.ps1` and double-click it on any 64-bit
+Windows 10/11 PC (no git, no Node needed there); it auto-starts the app
+when the install finishes.
 
 **No models ship in this repository** — `data/` (models, your photos, the
 database) is deliberately untracked. On a fresh clone the app rebuilds it:
@@ -58,7 +73,8 @@ database) is deliberately untracked. On a fresh clone the app rebuilds it:
   Models tab and the job log.
 - `launch.ps1` installs and self-repairs everything else: Python and
   Node.js (via winget) if the machine has neither, the backend venv with
-  the right torch for your GPU brand (NVIDIA CUDA / AMD ROCm / CPU),
+  the right torch for your GPU (NVIDIA CUDA / AMD ROCm or DirectML /
+  Intel Arc XPU / CPU),
   the UI build, **ComfyUI itself** (downloaded into `tools\ComfyUI` when
   no install is found), and Ollama with a planner model sized to your
   hardware.
