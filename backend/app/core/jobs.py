@@ -3,7 +3,7 @@
 MVP implementation: a worker thread and a queue.Queue. The public surface
 (enqueue / get / cancel / retry / handler registry) is deliberately small and
 broker-shaped so it can be swapped for Redis + Celery/RQ or BullMQ later
-without touching call sites (see ROADMAP).
+without touching call sites.
 
 States: pending -> running -> completed
                          \\-> retrying -> running ...

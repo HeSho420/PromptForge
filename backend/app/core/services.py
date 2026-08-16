@@ -114,7 +114,7 @@ class _GreyPixels(Protocol):
 
 
 # Registry seed: models the ComfyUI path will need. URLs/checksums are filled
-# per deployment (see README "Model configuration"); nothing downloads
+# per deployment (see docs/PromptForge-Documentation.pdf); nothing downloads
 # automatically without an explicit user action.
 DEFAULT_MODELS = [
     ModelInfo(

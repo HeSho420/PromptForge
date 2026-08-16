@@ -15,7 +15,7 @@ Honesty note: SAM proposes real object masks (is_mock=False), but SAM itself
 is not text-conditioned. The prompt picks the best candidate via transparent
 keyword/spatial priors (see select_candidate). A learned text-grounding stage
 (e.g. CLIP ranking) can replace `select_candidate` behind the same signature;
-until then the heuristic selection is documented here and in the README. The
+until then the heuristic selection is documented here. The
 user always reviews/corrects the mask in the editor before rendering.
 """
 from __future__ import annotations

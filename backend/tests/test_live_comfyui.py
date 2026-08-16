@@ -4,7 +4,7 @@ Skipped by default so the suite stays offline-safe. To run it:
 
     1. Start ComfyUI (default http://127.0.0.1:8188) with the
        sd-v1-5-inpainting.safetensors checkpoint visible to it
-       (see README: "Connecting ComfyUI").
+       (the launcher starts and verifies it).
     2. PROMPTFORGE_LIVE_COMFYUI=1 python3 -m unittest tests.test_live_comfyui -v
 
 This is deliberately a real render — nothing is mocked. It verifies the two

@@ -191,7 +191,7 @@ class Settings:
 
 
 ALLOWED_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
-ALLOWED_VIDEO_EXTS = {".mp4", ".mov", ".webm", ".mkv"}  # video pipeline: see ROADMAP
+ALLOWED_VIDEO_EXTS = {".mp4", ".mov", ".webm", ".mkv"}
 # 3D results. GLB only: it is a single self-contained binary file (geometry +
 # any textures + materials in one), which keeps a mesh a normal asset rather
 # than a folder of loose .obj/.mtl/.png that would need its own plumbing.

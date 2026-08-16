@@ -1,4 +1,4 @@
-"""ComfyUI adapter (prepared backend — see README "Implemented vs prepared").
+"""ComfyUI adapter (the real render backend; mock is the offline stand-in).
 
 What works today, fully offline and unit-tested:
   * loading versioned workflow templates from app/workflows/

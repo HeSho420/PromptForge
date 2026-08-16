@@ -933,7 +933,7 @@ def create_app(services: Services | None = None) -> Flask:
         if not model.url:
             return _error(409, "no_url",
                           "No download URL configured for this model. "
-                          "Add one in the registry first (see README).")
+                          "Add one in the registry first (see docs/PromptForge-Documentation.pdf).")
         job = services.queue.enqueue("model_download", {"model": name})
         return jsonify(job.to_dict()), 202
 

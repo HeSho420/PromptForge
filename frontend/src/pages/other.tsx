@@ -615,7 +615,7 @@ export function Models() {
                         title={
                           m.url
                             ? "Download with checksum validation (resumes if interrupted)"
-                            : "No download URL configured — see README"
+                            : "No download URL configured — add one in the model registry"
                         }
                       >
                         {queued?.name === m.name
@@ -2127,7 +2127,8 @@ export function Settings() {
       <h1>Settings</h1>
       <p className="sub">
         Backends are adapters. The active ones are shown below; switch them
-        with environment variables when starting the server (see README).
+        with environment variables when starting the server (the full list
+        is in docs/PromptForge-Documentation.pdf).
       </p>
       {error && <div className="notice">Backend unreachable: {error}</div>}
       {health && (

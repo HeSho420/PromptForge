@@ -73,7 +73,7 @@ $app = Join-Path $staging "app"
 New-Item -ItemType Directory -Force $app | Out-Null
 try {
     foreach ($f in @("launch.ps1", "launch.bat", "install.bat", "setup.ps1",
-                     "doctor.ps1", "allow-lan.ps1", "README.md", "ROADMAP.md")) {
+                     "doctor.ps1", "allow-lan.ps1")) {
         $p = Join-Path $root $f
         if (Test-Path $p) { Copy-Item $p (Join-Path $app $f) }
     }
