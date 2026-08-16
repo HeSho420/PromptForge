@@ -702,11 +702,27 @@ class PeerService:
         # /pf-peer/ollama shares memory with the render about to start —
         # unload before the graph is submitted or the render can hard-crash
         # (the classic 8 GB Ollama+ComfyUI collision, measured live).
+        #
+        # BOUNDED: an Ollama holding several warm models can take tens of
+        # seconds to release them, and the delegator's client times a
+        # /prompt submit out at 30 s — an unbounded unload here made a
+        # HEALTHY peer read as "stopped answering mid-render" (measured
+        # live on the first whole-job delegation). A few seconds buys the
+        # common case; past that the render proceeds and Ollama finishes
+        # releasing in parallel.
         if req.command == "POST" and rest.split("?", 1)[0] == "/prompt":
-            try:
-                ollama_unload_all(self.llm_url)
-            except Exception:  # noqa: BLE001 — best-effort, never blocks
-                pass
+            freed = threading.Event()
+
+            def unload() -> None:
+                try:
+                    ollama_unload_all(self.llm_url)
+                except Exception:  # noqa: BLE001 — best-effort by design
+                    pass
+                freed.set()
+
+            threading.Thread(target=unload, daemon=True,
+                             name="pf-prompt-unload").start()
+            freed.wait(8.0)
         target = self.comfy_url + rest
         headers = {"Content-Type": req.headers.get("Content-Type")
                    or "application/octet-stream"}
