@@ -377,6 +377,41 @@ function Install-RocmTorch([string]$venvPy) {
 }
 
 function Install-DirectmlTorch([string]$venvPy) {
+    # NATIVE first: AMD's multi-arch channel ships a FULL torch (video-
+    # capable, all ops) for cards the official wheel list skips - proven
+    # on an RX 6700 XT, which rendered videos on exactly this stack.
+    $gfx = $null
+    try {
+        $n = (Get-CimInstance Win32_VideoController -ErrorAction Stop |
+              Where-Object { $_.Name -match "Radeon|AMD" } |
+              Select-Object -First 1 -ExpandProperty Name)
+        if ($n -match "RX\s?6[89]\d0") { $gfx = "gfx1030" }
+        elseif ($n -match "RX\s?67\d0") { $gfx = "gfx1031" }
+        elseif ($n -match "RX\s?66\d0") { $gfx = "gfx1032" }
+        elseif ($n -match "RX\s?6[45]\d0") { $gfx = "gfx1034" }
+        elseif ($n -match "RX\s?76\d0") { $gfx = "gfx1102" }
+        elseif ($n -match "RX\s?5[67]\d0") { $gfx = "gfx1010" }
+        elseif ($n -match "RX\s?55\d0") { $gfx = "gfx1012" }
+    } catch {}
+    if ($gfx) {
+        Write-Log ("trying AMD's native ROCm torch for " + $gfx +
+                   " (full stack, video-capable; several GB)")
+        $code = Invoke-Process $venvPy ("-m pip install --pre --retries 10 " +
+            "--timeout 600 --index-url " +
+            "https://rocm.nightlies.amd.com/whl-multi-arch/ " +
+            "torch torchvision torchaudio amd-torch-device-" + $gfx) 120
+        if ($code -eq 0) {
+            $ok = Invoke-Process $venvPy `
+                "-c ""import sys, torch; sys.exit(0 if torch.cuda.is_available() else 1)""" 5
+            if ($ok -eq 0) {
+                Write-Log "[ok] native ROCm torch is live - this GPU renders everything, video included"
+                return $true
+            }
+        }
+        Write-Log "native ROCm did not take - falling back to the DirectML pins" "warn"
+        Invoke-Process $venvPy ("-m pip uninstall -y torch torchvision " +
+            "torchaudio amd-torch-device-" + $gfx) 10 | Out-Null
+    }
     # PINNED: torch-directml hard-requires torch==2.4.1; an unpinned
     # torchvision resolves to a newer torch and pip fails the whole install
     # (measured live on an RX 6700 XT).

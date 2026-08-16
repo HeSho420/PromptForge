@@ -309,6 +309,52 @@ function Get-AmdGpuName {
     } catch { return $null }
 }
 
+function Get-AmdGfxArch {
+    # The gfx architecture id for AMD's NATIVE multi-arch torch channel
+    # (rocm.nightlies.amd.com/whl-multi-arch: an arch-generic torch 2.9
+    # plus a per-card amd-torch-device-<gfx> kernel package). A FULL torch
+    # with every op — WAN video and Flux Kontext included — on cards the
+    # official ROCm wheel list skips; proven on this household's RX 6700
+    # XT, which rendered videos on exactly this stack. Only unambiguous
+    # discrete names map; iGPUs stay on DirectML.
+    $n = Get-AmdGpuName
+    if (-not $n) { return $null }
+    if ($n -match "RX\s?6[89]\d0") { return "gfx1030" }
+    if ($n -match "RX\s?67\d0") { return "gfx1031" }
+    if ($n -match "RX\s?66\d0") { return "gfx1032" }
+    if ($n -match "RX\s?6[45]\d0") { return "gfx1034" }
+    if ($n -match "RX\s?76\d0") { return "gfx1102" }
+    if ($n -match "RX\s?5[67]\d0") { return "gfx1010" }
+    if ($n -match "RX\s?55\d0") { return "gfx1012" }
+    return $null
+}
+
+function Install-RocmNative([string]$dir, [string]$arch) {
+    # Try AMD's native multi-arch stack in this venv. TRUE only when torch
+    # afterwards actually SEES the GPU; anything less is rolled back by
+    # the caller. Nightly channel — every failure path lands back on the
+    # proven DirectML pins, so this can only ever upgrade a machine.
+    $pipN = Join-Path $dir ".venv\Scripts\pip.exe"
+    $pyN = Join-Path $dir ".venv\Scripts\python.exe"
+    if (-not (Test-Path $pipN)) { return $false }
+    $log = Join-Path $logDir "rocm-native-install.log"
+    Write-Host "  Trying AMD's native ROCm torch for this card ($arch) -" -ForegroundColor Yellow
+    Write-Host "  a full GPU stack that also runs WAN video and Kontext (several GB, one time)..." -ForegroundColor Yellow
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    & $pipN install --pre --retries 10 --timeout 600 `
+        --index-url https://rocm.nightlies.amd.com/whl-multi-arch/ `
+        torch torchvision torchaudio "amd-torch-device-$arch" *> $log
+    $sees = (& $pyN -c "import torch; print(int(torch.cuda.is_available()))" 2>$null | Out-String).Trim()
+    $ErrorActionPreference = $prev
+    if ($sees -eq "1") {
+        Write-Host "  [ok] Native ROCm torch is live - $((Get-AmdGpuName)) now renders EVERYTHING, video included" -ForegroundColor Green
+        return $true
+    }
+    Write-Host "  Native ROCm did not take on this machine (see $log) - staying on DirectML (images render fine there)." -ForegroundColor Yellow
+    return $false
+}
+
 function Test-PyImport([string]$py, [string]$mods) {
     # PS 5.1 landmine: a native command writing to a REDIRECTED stderr while
     # $ErrorActionPreference is "Stop" becomes a terminating
@@ -700,8 +746,17 @@ function Repair-ComfyVenv($dir, $srcDir = $null) {
             if ($natR -eq "1") {
                 "keeping existing native GPU torch (ROCm SDK build)" | Out-File $repairLog -Encoding utf8
             } else {
-                & $pip install --retries 10 --timeout 300 torch==2.4.1 torchvision==0.19.1 torchaudio==2.4.1 *> $repairLog
-                & $pip install --retries 10 --timeout 300 torch-directml *>> $repairLog
+                # Fresh venv: try AMD's NATIVE multi-arch stack first — a
+                # full torch that also runs video and Kontext (this very
+                # card class rendered videos on it). DirectML only when
+                # the native one does not take.
+                $archF = Get-AmdGfxArch
+                $gotNative = $false
+                if ($archF) { $gotNative = Install-RocmNative $dir $archF }
+                if (-not $gotNative) {
+                    & $pip install --retries 10 --timeout 300 torch==2.4.1 torchvision==0.19.1 torchaudio==2.4.1 *> $repairLog
+                    & $pip install --retries 10 --timeout 300 torch-directml *>> $repairLog
+                }
             }
         } elseif ($mode -eq "xpu") {
             # Intel Arc: torch's native XPU wheels; ComfyUI detects the
@@ -746,6 +801,23 @@ function Repair-ComfyVenv($dir, $srcDir = $null) {
         if ($nativeOk -eq "1") {
             Write-Host "  [ok] $amd is already visible to torch (ROCm SDK build) - native GPU rendering enabled" -ForegroundColor Green
             return $true
+        }
+        # One-shot UPGRADE for machines already running DirectML: this
+        # card class rendered videos on AMD's native stack, so try it
+        # once. Failure marks a flag (delete data\logs\rocm-native.tried
+        # to retry) and rolls back: the uninstall below makes the
+        # existing DirectML repair path reinstall the proven pins.
+        $archU = Get-AmdGfxArch
+        $triedFlag = Join-Path $logDir "rocm-native.tried"
+        if ($archU -and -not (Test-Path $triedFlag)) {
+            New-Item -ItemType File -Force $triedFlag | Out-Null
+            if (Install-RocmNative $dir $archU) { return $true }
+            $pipR = Join-Path $dir ".venv\Scripts\pip.exe"
+            $prevR = $ErrorActionPreference
+            $ErrorActionPreference = "Continue"
+            & $pipR uninstall -y torch torchvision torchaudio `
+                "amd-torch-device-$archU" *>> (Join-Path $logDir "rocm-native-install.log")
+            $ErrorActionPreference = $prevR
         }
         if (-not (Test-PyImport $venvPy "torch_directml")) {
             Write-Host "  $amd renders through DirectML - installing that stack (one time)..." -ForegroundColor Yellow
