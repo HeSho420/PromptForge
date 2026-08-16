@@ -2042,14 +2042,33 @@ class MissingNodeHeal(unittest.TestCase):
         from app.adapters.comfyui import ComfyUIClient
 
         client = ComfyUIClient("http://peer:8765/pf-peer/comfy")
-        client.submit = lambda _g: (_ for _ in ()).throw(
+        client.request = lambda *_a, **_k: (_ for _ in ()).throw(
             self._missing_node_error())
-        sentinel = ("image", "pid")
-        client.on_missing_node = (
-            lambda _exc, _c: SimpleNamespace(run_graph=lambda _g: sentinel))
+        sub = SimpleNamespace(submit=lambda _g: "pid-sub",
+                              wait_for_output=lambda pid: f"img-{pid}")
+        client.on_missing_node = lambda _exc, _c: sub
         graph = {"1": {"class_type": "SaveImage",
                        "inputs": {"images": ["1", 0]}}}
-        self.assertEqual(client.run_graph(graph), sentinel)
+        # The graph lands on the substitute AND is polled there.
+        self.assertEqual(client.run_graph(graph), ("img-pid-sub", "pid-sub"))
+        self.assertIs(client._submitted_via, sub)
+
+    def test_direct_submit_callers_are_healed_too(self):
+        """The background route calls submit() directly (its graph emits
+        two images, so run_graph does not fit) — measured live slipping
+        past a heal that lived only in run_graph. The heal now lives in
+        submit itself."""
+        from types import SimpleNamespace
+
+        from app.adapters.comfyui import ComfyUIClient
+
+        client = ComfyUIClient("http://peer:8765/pf-peer/comfy")
+        client.request = lambda *_a, **_k: (_ for _ in ()).throw(
+            self._missing_node_error())
+        sub = SimpleNamespace(submit=lambda _g: "pid-sub")
+        client.on_missing_node = lambda _exc, _c: sub
+        self.assertEqual(client.submit({"1": {}}), "pid-sub")
+        self.assertIs(client._submitted_via, sub)
 
     def test_run_graph_retries_in_place_after_an_install(self):
         from app.adapters.comfyui import ComfyUIClient
@@ -2057,13 +2076,13 @@ class MissingNodeHeal(unittest.TestCase):
         client = ComfyUIClient("http://127.0.0.1:9")
         calls = {"n": 0}
 
-        def submit(_g):
+        def request(_m, _p, _d=None, _h=None):
             calls["n"] += 1
             if calls["n"] == 1:
                 raise self._missing_node_error()
-            return "pid-2"
+            return b'{"prompt_id": "pid-2"}'
 
-        client.submit = submit
+        client.request = request
         client.wait_for_output = lambda pid: f"img-{pid}"
         client.on_missing_node = lambda _exc, c: c  # "installed — retry here"
         graph = {"1": {"class_type": "SaveImage",
@@ -2075,7 +2094,7 @@ class MissingNodeHeal(unittest.TestCase):
         from app.adapters.comfyui import ComfyUIClient, MissingNodeError
 
         client = ComfyUIClient("http://127.0.0.1:9")
-        client.submit = lambda _g: (_ for _ in ()).throw(
+        client.request = lambda *_a, **_k: (_ for _ in ()).throw(
             self._missing_node_error())
         graph = {"1": {"class_type": "SaveImage",
                        "inputs": {"images": ["1", 0]}}}
@@ -2096,6 +2115,7 @@ class MissingNodeHeal(unittest.TestCase):
         self.assertIsNone(node_packs.pack_for_node("KSampler"))
 
     def test_the_healer_reroutes_peer_graphs_to_this_machine(self):
+        import threading as _t
         from types import SimpleNamespace
 
         asked: list[tuple[str, str]] = []
@@ -2106,6 +2126,7 @@ class MissingNodeHeal(unittest.TestCase):
                 request_pack_install=lambda base, slug: asked.append(
                     (base, slug))),
             _comfy_main=local,
+            _comfy_tls=_t.local(),
             events=SimpleNamespace(log=lambda *_a: None),
             settings=SimpleNamespace(auto_install=True,
                                      inpaint_backend="comfyui"),
@@ -2116,6 +2137,9 @@ class MissingNodeHeal(unittest.TestCase):
                                         client)
         self.assertIs(out, local)
         self.assertEqual(asked, [("http://192.168.1.101:8765", "rmbg")])
+        # The worker thread is rebound: the REST of the job (polling
+        # included) follows the graph to the machine that took it.
+        self.assertIs(stub._comfy_tls.client, local)
 
     def test_the_healer_installs_locally_exactly_once(self):
         from types import SimpleNamespace

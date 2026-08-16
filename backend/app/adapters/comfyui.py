@@ -474,9 +474,37 @@ class ComfyUIClient:
         return filename
 
     def submit(self, graph: dict[str, Any]) -> str:
+        """Submit a graph; heal a missing-node rejection instead of failing.
+
+        EVERY submission path funnels through here (run_graph and the
+        multi-output routes that call submit directly — the background
+        route's two-image graph was the one measured slipping past a heal
+        that lived only in run_graph). On MissingNodeError the injected
+        healer either fixes THIS engine (install + restart → resubmit
+        here) or returns the engine that has the node (a peer proxy falls
+        back to the local one). `_submitted_via` records where the graph
+        actually landed so run_graph polls the right machine; direct
+        callers re-read `services.comfy` per call and the healer rebinds
+        that to the substitute for the rest of the job."""
+        self._submitted_via = self
         payload = json.dumps({"prompt": graph}).encode()
-        raw = self.request("POST", "/prompt", payload,
-                           {"Content-Type": "application/json"})
+        try:
+            raw = self.request("POST", "/prompt", payload,
+                               {"Content-Type": "application/json"})
+        except MissingNodeError as exc:
+            healer = self.on_missing_node
+            substitute = healer(exc, self) if healer else None
+            if substitute is None:
+                raise
+            if substitute is self:
+                # Healed in place (pack installed, engine restarted). A
+                # second rejection propagates — one heal per submit.
+                raw = self.request("POST", "/prompt", payload,
+                                   {"Content-Type": "application/json"})
+            else:
+                prompt_id = substitute.submit(graph)
+                self._submitted_via = substitute
+                return prompt_id
         return json.loads(raw)["prompt_id"]
 
     # A render that is still going must never be reported as a dead backend:
@@ -692,24 +720,11 @@ class ComfyUIClient:
     def run_graph(self, graph: dict[str, Any]) -> tuple[Image.Image, str]:
         """Submit a validated graph and wait for its image. Returns (image, prompt_id)."""
         validate_workflow(graph)  # belt-and-braces: never send unvalidated graphs
-        try:
-            prompt_id = self.submit(graph)
-        except MissingNodeError as exc:
-            # Self-healing: a rejected node type is an installable gap, not
-            # a dead end. The injected healer either fixes THIS engine
-            # (install + restart, then we resubmit here) or hands back a
-            # different engine that has the node (a peer proxy falls back
-            # to the local one). A second rejection propagates — the healer
-            # runs once per submit.
-            healer = self.on_missing_node
-            substitute = healer(exc, self) if healer else None
-            if substitute is None:
-                raise
-            if substitute is self:
-                prompt_id = self.submit(graph)
-            else:
-                return substitute.run_graph(graph)
-        return self.wait_for_output(prompt_id), prompt_id
+        prompt_id = self.submit(graph)
+        # submit() may have healed a missing-node rejection by handing the
+        # graph to a different engine — poll the machine that TOOK it.
+        engine = getattr(self, "_submitted_via", None) or self
+        return engine.wait_for_output(prompt_id), prompt_id
 
 
 class ComfyUIInpaintingAdapter:

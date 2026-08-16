@@ -3757,6 +3757,14 @@ class Services:
                             "rendering this step here instead"
                             + (f"; asked it to install '{pack.title}' for "
                                "next time" if pack else ""))
+                # Rebind this worker thread to the local engine: callers
+                # re-read `self.comfy` per call (result polling included),
+                # so the REST of this job follows the graph to the machine
+                # that actually took it instead of bouncing per submit.
+                try:
+                    self._comfy_tls.client = local
+                except Exception:  # noqa: BLE001 — the reroute still works
+                    pass
                 return local
             if (pack is None
                     or not self.settings.auto_install
