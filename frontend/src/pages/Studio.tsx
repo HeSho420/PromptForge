@@ -59,7 +59,35 @@ export function Studio({ incoming, onConsumed, onBusy }: PanelProps = {}) {
   // redraw; not clearing costs a wrong answer with no way to see why.
   useEffect(() => {
     if (job?.state !== "completed") return;
-    if (job.result?.version_id) setView("result");
+    const vid = job.result?.version_id as string | undefined;
+    if (vid) {
+      // PRELOAD the result before swapping the view: switching first made
+      // the panel appear with an image that had no bytes yet (collapsed
+      // frame, then a jump when it landed) — the intermittent completion
+      // glitch. The editor stays on screen until the pixels exist; if the
+      // fetch stalls, a short fallback still swaps so the UI can't hang.
+      let done = false;
+      const swap = () => {
+        if (!done) {
+          done = true;
+          setView("result");
+        }
+      };
+      const img = new Image();
+      img.onload = swap;
+      img.onerror = swap;
+      img.src = api.versionFileUrl(vid);
+      const fallback = window.setTimeout(swap, 2000);
+      setUserMask(null);
+      setAutoMask(null);
+      setMaskIsMock(false);
+      setMaskSource(null);
+      setMaskNotes([]);
+      return () => {
+        done = true;
+        window.clearTimeout(fallback);
+      };
+    }
     setUserMask(null);
     setAutoMask(null);
     setMaskIsMock(false);

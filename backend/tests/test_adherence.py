@@ -258,6 +258,35 @@ class EscalationPlanTests(unittest.TestCase):
         self.assertIn("(at night:1.3)", text)
 
 
+class TargetedRepairTests(unittest.TestCase):
+    """The surgical rung: fix ONLY the confirmed-missing requirements on
+    the best image before any whole-frame re-roll."""
+
+    def test_repair_rung_is_wired_first_and_fail_open(self):
+        import inspect
+        ladder = inspect.getsource(Services._pursue_request)
+        self.assertIn("_repair_missing", ladder)
+        # It must run BEFORE the escalation plan is even computed.
+        self.assertLess(ladder.index("_repair_missing"),
+                        ladder.index("escalation_plan"))
+        repair = inspect.getsource(Services._repair_missing)
+        self.assertIn('inpaint_backend == "mock"', repair)   # offline = None
+        self.assertIn("auto_mask", repair)                   # exists → segment
+        self.assertIn("propose_placement", repair)           # absent → place
+        self.assertIn("keep", ladder.lower())                # keep-best stays
+
+    def test_repair_and_new_model_research_reach_all_routable_folders(self):
+        import inspect
+        src = inspect.getsource(Services._handle_model_download)
+        self.assertIn("_RESEARCH_FOLDERS", src)
+        self.assertEqual(Services._RESEARCH_FOLDERS,
+                         frozenset({"checkpoints", "diffusion_models",
+                                    "loras"}))
+        disk = inspect.getsource(Services._research_new_disk_models)
+        self.assertIn("model_intel.missing", disk)
+        self.assertIn("auto_install", disk)
+
+
 class AttemptComparisonTests(unittest.TestCase):
     """What counts as 'better' — the ordering the whole ladder rests on."""
 

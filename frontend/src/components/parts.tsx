@@ -185,6 +185,16 @@ export function BeforeAfter({
   // scale, centered, so outpainted margins show as real added canvas.
   const [beforeW, setBeforeW] = useState<number | null>(null);
   const [afterW, setAfterW] = useState<number | null>(null);
+  // New comparison = new geometry. Without this reset the widths of the
+  // PREVIOUS result leak into the first frames of the next one and the
+  // before image flashes at the wrong scale until both loads land — the
+  // intermittent "before/after glitch". The overlay below also stays
+  // hidden until both sizes are known for the same reason.
+  useEffect(() => {
+    setBeforeW(null);
+    setAfterW(null);
+    setPos(50);
+  }, [beforeUrl, afterUrl]);
 
   const move = (clientX: number) => {
     const rect = ref.current?.getBoundingClientRect();
@@ -221,7 +231,16 @@ export function BeforeAfter({
         draggable={false}
         onLoad={(e) => setAfterW(e.currentTarget.naturalWidth || null)}
       />
-      <div className="overlay" style={{ clipPath: `inset(0 0 0 ${pos}%)` }}>
+      <div
+        className="overlay"
+        style={{
+          clipPath: `inset(0 0 0 ${pos}%)`,
+          // Hidden until BOTH natural sizes are known: rendering the
+          // before image with a guessed scale for a few frames was the
+          // visible glitch.
+          visibility: beforeW && afterW ? "visible" : "hidden",
+        }}
+      >
         <img
           ref={revealOnLoad}
           src={beforeUrl}
@@ -233,7 +252,8 @@ export function BeforeAfter({
       </div>
       <div
         className="handle"
-        style={{ left: `${pos}%` }}
+        style={{ left: `${pos}%`,
+                 visibility: beforeW && afterW ? "visible" : "hidden" }}
         role="slider"
         aria-label="Before and after comparison"
         aria-valuenow={Math.round(pos)}

@@ -1831,6 +1831,14 @@ class Services:
                                                 + ", ".join(refreshed))
             except Exception:  # noqa: BLE001
                 pass
+            # New models on DISK (dropped in by hand, or synced outside a
+            # download job): research what each is best at, so the planner
+            # can route prompts to it. Every ~10 min, a few at a time.
+            try:
+                if revive and tick % 40 == 0:
+                    self._research_new_disk_models()
+            except Exception:  # noqa: BLE001
+                pass
 
     # -- helpers ---------------------------------------------------------------
     @staticmethod
@@ -5399,6 +5407,41 @@ class Services:
         return {"file": fname, "researched": True,
                 "quality": entry["quality"]}
 
+    # Folders whose files the planner ROUTES BETWEEN — those are worth
+    # capability research. Encoders/VAEs/upscalers are plumbing, not a
+    # choice, and researching them would only pollute the knowledge file.
+    _RESEARCH_FOLDERS = frozenset({"checkpoints", "diffusion_models",
+                                   "loras"})
+
+    def _research_new_disk_models(self, cap: int = 4) -> None:
+        """Detect models that appeared on DISK without a download job and
+        queue capability research for them — a hand-copied checkpoint gets
+        the same treatment as a downloaded one. Bounded per sweep so a
+        freshly synced library does not flood the queue."""
+        if not self.settings.auto_install:
+            return
+        names: list[str] = []
+        root = self.settings.data_dir / "models"
+        for folder in sorted(self._RESEARCH_FOLDERS):
+            d = root / folder
+            if not d.is_dir():
+                continue
+            for f in d.iterdir():
+                if f.is_file() and f.suffix.lower() in (
+                        ".safetensors", ".ckpt", ".gguf"):
+                    names.append(f.name)
+        queued = 0
+        for fname in self.model_intel.missing(names):
+            if fname in self._intel_queued:
+                continue
+            self._intel_queued.add(fname)
+            self.queue.enqueue("model_research", {"file": fname})
+            self.events.log("info", f"New model detected on disk: '{fname}' "
+                                    "— researching what it does best")
+            queued += 1
+            if queued >= cap:
+                break
+
     def _queue_model_research(self, job: Job, ckpts: list[str]) -> None:
         """Queue background research for installed checkpoints that have no
         capability notes yet (once per session each; jobs show in the Queue)."""
@@ -5714,6 +5757,77 @@ class Services:
             context = f"{context}\n{lessons}"
         return context
 
+    def _repair_missing(self, job: Job, best: _Attempt,
+                        prompt: str) -> _Attempt | None:
+        """Surgical accuracy rescue: repaint ONLY the requirements the
+        checklist confirmed missing, on the best image so far.
+
+        A whole-frame re-roll gambles everything that already works to fix
+        one absent hat; this rung keeps the frame and fixes the hat. A
+        region that exists but is wrong is segmented by the words that
+        failed; content that does not exist yet gets a placement box from
+        the vision model. Fail-open everywhere — None means 'nothing was
+        repaired, climb the normal ladder'."""
+        missing = best.missing()
+        if not missing or best.image is None:
+            return None
+        if self.settings.inpaint_backend == "mock":
+            return None   # offline — no engine to repair with
+        image = best.image
+        variant = checkpoint = None
+        fixed: list[str] = []
+        for need in missing[:2]:
+            need = str(need).strip()
+            if not need:
+                continue
+            job.log("info", f"[stage] repair — fixing only: {need}")
+            mask = None
+            try:
+                choice = self.auto_mask(image, need, job=job)
+                if (choice.ok and choice.mask is not None
+                        and choice.mask.getbbox()):
+                    mask = choice.mask
+            except Exception:  # noqa: BLE001 — fall through to placement
+                mask = None
+            if mask is None:
+                # Nothing matching exists yet — this is an ADD: the vision
+                # model picks where the new content belongs.
+                try:
+                    mask = quality.propose_placement(self.critic, image,
+                                                     need)
+                except Exception:  # noqa: BLE001
+                    mask = None
+            if mask is None or not mask.getbbox():
+                job.log("info", f"No region could be chosen for '{need}' — "
+                                "left to the re-render rungs")
+                continue
+            if checkpoint is None and variant is None:
+                variant, checkpoint = self._choose_inpaint(job, need)
+            enh = quality.enhance_prompt(self.llm, need, "inpaint")
+            try:
+                try:
+                    result = self.inpainting.inpaint(  # type: ignore[call-arg]
+                        image, self._refine_mask(mask), enh["positive"],
+                        negative=enh["negative"], checkpoint=checkpoint,
+                        variant=variant or "modern")
+                except TypeError:
+                    result = self.inpainting.inpaint(
+                        image, self._refine_mask(mask), enh["positive"])
+            except (PermanentError, TransientError) as exc:
+                job.log("info", f"Repair of '{need}' could not render "
+                                f"({exc}) — left to the re-render rungs")
+                continue
+            image = result.image
+            fixed.append(need)
+        if not fixed:
+            return None
+        job.log("info", "Repaired in place: " + "; ".join(fixed))
+        crit2 = self._critique(job, image, prompt)
+        adh2 = self._adherence(job, image, prompt, best.checklist)
+        return _Attempt(image=image, prompt_id=best.prompt_id, gen=best.gen,
+                        crit=crit2, adherence=adh2, repairs=best.repairs,
+                        checklist=best.checklist, strategy="targeted repair")
+
     def _pursue_request(self, job: Job, *, task: str, prompt: str,
                         prompt_used: str, context: str, image_context: str,
                         triage: dict[str, Any] | None, used_template: bool,
@@ -5737,6 +5851,22 @@ class Services:
         best = state
         if best.satisfies(self.settings):
             return 0, best
+        # Rung 0 — surgical repair: the checklist NAMES what is missing;
+        # when the rest of the frame is already right, repaint only those
+        # pixels on the best image instead of gambling the whole frame on
+        # a re-roll. Keep-best applies, so this can only improve things.
+        rounds = 0
+        repaired = self._repair_missing(job, best, prompt)
+        if repaired is not None:
+            rounds = 1
+            if repaired.beats(best):
+                job.log("info", f"Repair kept — {repaired.summary()}")
+                best = repaired
+            else:
+                job.log("info", "The repair did not improve the checklist "
+                                "— keeping the previous best")
+            if best.satisfies(self.settings):
+                return rounds, best
         current_workflow = (triage or {}).get("workflow") if used_template \
             else None
         models, workflows = self._ladder_candidates(task, current_workflow,
@@ -5752,7 +5882,7 @@ class Services:
             current_model=current_model, current_workflow=current_workflow,
             allow_model_change=not named, max_rungs=budget)
         if not plan:
-            return 0, best
+            return rounds, best
         # Say the ceiling ONCE, before any of it happens: a live countdown
         # that quietly runs four minutes past its estimate reads as a hang,
         # and that is when people kill the job.
@@ -5762,7 +5892,6 @@ class Services:
                         "only improve it.")
         self._log_eta(job, extra_renders=len(plan))
 
-        rounds = 0
         for strategy in plan:
             if best.satisfies(self.settings) or job.cancel_requested:
                 break
@@ -9992,11 +10121,14 @@ class Services:
             raise (PermanentError if permanent else TransientError)(msg) from exc
         model = self.registry.get(name)
         job.log("info", f"Model {name} ready at {model.path if model else '?'}")
-        # New checkpoint on board: research what it performs best at so the
-        # planner can route prompts to it (repeats for every new download).
+        # New model on board: research what it performs best at so the
+        # planner can route prompts to it. Not just checkpoints — the
+        # diffusion_models folder holds the strongest generators (Z-Image,
+        # Kontext, WAN) and LoRAs change what a prompt can achieve; leaving
+        # them out meant the knowledge file steered around the best tools.
         if (model and model.status == "ready"
-                and (model.meta or {}).get("folder",
-                                           "checkpoints") == "checkpoints"):
+                and (model.meta or {}).get("folder", "checkpoints")
+                in self._RESEARCH_FOLDERS):
             fname = Path(str((model.meta or {}).get("file")
                              or model.path or "")).name
             if fname and fname not in self._intel_queued:
