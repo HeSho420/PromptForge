@@ -1535,8 +1535,9 @@ function NetworkPanel() {
       .catch(() => setCombine(null));
   }, []);
   const toggleCombine = async () => {
-    if (combine === null) return;
-    const next = !combine;
+    // null = the settings fetch failed or hasn't landed; treat as "off"
+    // so the checkbox always works instead of silently doing nothing.
+    const next = !(combine ?? false);
     setCombine(next); // optimistic — the checkbox must feel instant
     try {
       const s = await api.setSettings({ lan_combine: next });
@@ -1657,27 +1658,25 @@ function NetworkPanel() {
           {data.version ? ` · version ${data.version.commit}` : ""}.
         </div>
       )}
-      {combine !== null && (
-        <label
-          className="row"
-          style={{ gap: 8, fontSize: 12.5, alignItems: "center",
-                   cursor: "pointer", userSelect: "none" }}
-          title="With combine mode on, queued work spreads across every
+      <label
+        className="row"
+        style={{ gap: 8, fontSize: 12.5, alignItems: "center",
+                 cursor: "pointer", userSelect: "none" }}
+        title="With combine mode on, queued work spreads across every
  connected PC at once: this machine keeps the front of the queue and the
  jobs behind it go straight out to whichever machines are idle — each
  machine carries one job at a time."
-        >
-          <input
-            type="checkbox"
-            checked={combine}
-            onChange={() => void toggleCombine()}
-          />
-          <span>
-            <b>Combine mode</b> — spread the queue across all connected
-            devices{combine ? " (on)" : ""}
-          </span>
-        </label>
-      )}
+      >
+        <input
+          type="checkbox"
+          checked={combine ?? false}
+          onChange={() => void toggleCombine()}
+        />
+        <span>
+          <b>Combine mode</b> — spread the queue across all connected
+          devices{combine ? " (on)" : ""}
+        </span>
+      </label>
       {peers.length > 0 ? (
         <div className="stack" style={{ gap: 10 }}>
           {peers.map((p) => {

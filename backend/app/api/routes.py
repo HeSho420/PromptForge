@@ -951,7 +951,14 @@ def create_app(services: Services | None = None) -> Flask:
     @app.get("/")
     def index():
         if dist.exists():
-            return send_file(dist / "index.html")
+            resp = send_file(dist / "index.html")
+            # index.html must never be served from a browser cache: it is
+            # the pointer to the hash-named bundles, and a cached copy kept
+            # showing users a UI from BEFORE the last update (new features
+            # invisible until a hard refresh). The bundles themselves are
+            # content-hashed and safe to cache.
+            resp.headers["Cache-Control"] = "no-cache, must-revalidate"
+            return resp
         return jsonify({
             "app": "PromptForge API",
             "hint": "Frontend not built. Run `npm install && npm run dev` in frontend/ "

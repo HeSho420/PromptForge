@@ -507,7 +507,21 @@ if (-not (Test-PyImport $python "torch, segment_anything")) {
 }
 
 # --- 2. UI build ---------------------------------------------------------------
-if (-not (Test-Path (Join-Path $root "frontend\dist\index.html"))) {
+# Build when the bundle is MISSING or STALE. Staleness matters as much as
+# absence: the launcher's own git pull updates frontend\src on disk but the
+# old check only looked for dist\index.html existing, so updated machines
+# kept serving the previous UI forever (new panels simply never appeared).
+$uiDist = Join-Path $root "frontend\dist\index.html"
+$uiBuild = -not (Test-Path $uiDist)
+if (-not $uiBuild) {
+    try {
+        $distTime = (Get-Item $uiDist).LastWriteTime
+        $newestSrc = (Get-ChildItem (Join-Path $root "frontend\src") -Recurse -File |
+                      Measure-Object -Property LastWriteTime -Maximum).Maximum
+        if ($newestSrc -and $newestSrc -gt $distTime) { $uiBuild = $true }
+    } catch { }
+}
+if ($uiBuild) {
     if (-not (Get-Command npm -ErrorAction SilentlyContinue) -and
         (Get-Command winget -ErrorAction SilentlyContinue)) {
         Write-Host "  Installing Node.js LTS for the UI (one time)..." -ForegroundColor Yellow
@@ -517,7 +531,7 @@ if (-not (Test-Path (Join-Path $root "frontend\dist\index.html"))) {
                     [Environment]::GetEnvironmentVariable('Path', 'User') + ';' + $env:Path
     }
     if (Get-Command npm -ErrorAction SilentlyContinue) {
-        Write-Host "  First run: building the UI (one time)..."
+        Write-Host "  Building the UI (missing or older than the code)..."
         Push-Location (Join-Path $root "frontend")
         try {
             if (-not (Test-Path "node_modules")) { npm install --no-fund --no-audit | Out-Null }

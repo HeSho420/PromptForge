@@ -130,3 +130,35 @@ class ImageCritic:
             score, issues = float(m.group(0)), []
         return Critique(score=max(1.0, min(10.0, score)), issues=issues,
                         model=self.model)
+
+
+class CriticChain:
+    """Primary critic first, local fallback when it fails — the vision
+    counterpart of FallbackLLM. Used during peer delegation so quality
+    checks run on the render machine, but a peer without the vision model
+    (or an older build without the proxy) silently degrades to checking
+    here instead of dropping quality checks on the floor."""
+
+    def __init__(self, primary: ImageCritic, fallback: ImageCritic):
+        self.primary = primary
+        self.fallback = fallback
+
+    def _call(self, name: str, *args, **kwargs):
+        try:
+            return getattr(self.primary, name)(*args, **kwargs)
+        except Exception:  # noqa: BLE001 — any peer failure means "check here"
+            return getattr(self.fallback, name)(*args, **kwargs)
+
+    def ask(self, image: Image.Image, question: str) -> str:
+        return self._call("ask", image, question)
+
+    def describe(self, image: Image.Image, question: str) -> str:
+        return self._call("describe", image, question)
+
+    def critique(self, image: Image.Image, prompt: str) -> Critique:
+        return self._call("critique", image, prompt)
+
+    def __getattr__(self, name: str):
+        # Attributes (model name etc.) come from the primary; only the
+        # three calls above carry the fallback behaviour.
+        return getattr(self.primary, name)

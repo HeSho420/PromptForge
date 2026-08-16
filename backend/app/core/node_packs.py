@@ -33,6 +33,9 @@ class NodePack:
     unlocks: str              # which PromptForge feature waits on this pack
     extra_repos: tuple = ()   # (repo, dir_name) companions installed with it
     note: str = ""            # honest caveats (build tools, size, speed)
+    provides: tuple = ()      # node class_types our graphs use from this pack
+                              # (beyond verify_node) — lets a missing-node
+                              # error name the pack that heals it
 
 
 KNOWN_PACKS: dict[str, NodePack] = {p.name: p for p in [
@@ -48,6 +51,7 @@ KNOWN_PACKS: dict[str, NodePack] = {p.name: p for p in [
         extra_repos=(("ltdrdata/ComfyUI-Impact-Subpack",
                       "ComfyUI-Impact-Subpack"),),
         note="Downloads its detector models (~450 MB) on first use.",
+        provides=("UltralyticsDetectorProvider", "SAMLoader"),
     ),
     NodePack(
         name="controlnet-aux",
@@ -59,6 +63,8 @@ KNOWN_PACKS: dict[str, NodePack] = {p.name: p for p in [
         dir_name="comfyui_controlnet_aux",
         verify_node="CannyEdgePreprocessor",
         unlocks="pose/depth ControlNet guidance (with controlnet-union-sdxl)",
+        provides=("DWPreprocessor", "DepthAnythingPreprocessor",
+                  "LineArtPreprocessor"),
     ),
     NodePack(
         name="frame-interpolation",
@@ -81,6 +87,8 @@ KNOWN_PACKS: dict[str, NodePack] = {p.name: p for p in [
         verify_node="RMBG",
         unlocks="transparent cutouts + better selection masks",
         note="Downloads its matting models (~1.5 GB) on first use.",
+        provides=("BiRefNetRMBG", "ClothesSegment", "BodySegment",
+                  "FaceSegment", "FashionSegment", "Segment", "SegmentV2"),
     ),
     NodePack(
         name="ic-light",
@@ -91,6 +99,7 @@ KNOWN_PACKS: dict[str, NodePack] = {p.name: p for p in [
         dir_name="ComfyUI-IC-Light",
         verify_node="LoadAndApplyICLightUnet",
         unlocks="relighting edits (with the iclight-sd15-fc model)",
+        provides=("ICLightConditioning",),
     ),
     NodePack(
         name="instantid",
@@ -101,6 +110,7 @@ KNOWN_PACKS: dict[str, NodePack] = {p.name: p for p in [
         dir_name="ComfyUI_InstantID",
         verify_node="ApplyInstantID",
         unlocks="single-photo identity renders",
+        provides=("InstantIDModelLoader", "InstantIDFaceAnalysis"),
         note="Its InsightFace dependency sometimes needs Microsoft C++ "
              "Build Tools on Windows — the install reports honestly if "
              "that happens.",
@@ -114,8 +124,19 @@ KNOWN_PACKS: dict[str, NodePack] = {p.name: p for p in [
         dir_name="ComfyUI-GGUF",
         verify_node="UnetLoaderGGUF",
         unlocks="Flux Kontext instruction-based editing (kontext)",
+        provides=("DualCLIPLoaderGGUF", "CLIPLoaderGGUF"),
     ),
 ]}
+
+
+def pack_for_node(class_type: str) -> NodePack | None:
+    """The curated pack that ships a node type, or None. This is what turns
+    a ComfyUI 'missing_node_type' rejection into an actionable install —
+    only ever a curated pack, never a guess from the node's name."""
+    for pack in KNOWN_PACKS.values():
+        if class_type == pack.verify_node or class_type in pack.provides:
+            return pack
+    return None
 
 
 def zip_urls(repo: str) -> list[str]:

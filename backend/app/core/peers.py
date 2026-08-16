@@ -50,6 +50,8 @@ from pathlib import Path
 from typing import Any, cast
 from urllib.parse import quote, unquote
 
+from .llm import ollama_autopull, ollama_unload_all
+
 log = logging.getLogger("promptforge.peers")
 
 BEACON_INTERVAL_S = 6.0
@@ -168,9 +170,17 @@ class PeerService:
                  env_provider: Callable[[], dict] | None = None,
                  queue_provider: Callable[[], dict] | None = None,
                  version_provider: Callable[[], dict | None] | None = None,
-                 auto_update: bool = True):
+                 auto_update: bool = True,
+                 llm_url: str = "http://127.0.0.1:11434"):
         self.registry = registry
         self.comfy_url = comfy_url.rstrip("/")
+        # This machine's OWN Ollama, proxied at /pf-peer/ollama/* so a
+        # delegating peer can run a job's planning and quality checks on
+        # THIS machine too — the whole job, not just the pixels.
+        self.llm_url = llm_url.rstrip("/").removesuffix("/v1")
+        # Injected by Services: queues a curated node-pack install on THIS
+        # machine when a delegating peer's graph needs a node we lack.
+        self.pack_installer: Callable[[str], dict] | None = None
         self.share = share
         self.render = render
         self.udp_port = udp_port
@@ -456,6 +466,9 @@ class PeerService:
         if path.startswith("/pf-peer/comfy/"):
             self._proxy(req, body=None)
             return
+        if path.startswith("/pf-peer/ollama/"):
+            self._proxy_llm(req, body=None)
+            return
         if path.startswith("/pf-peer/log/"):
             self._serve_log(req, unquote(path[len("/pf-peer/log/"):]))
             return
@@ -523,6 +536,37 @@ class PeerService:
                 req._json(400, {"error": "bad Content-Length"})
                 return
             self._proxy(req, body=body)
+            return
+        if path.startswith("/pf-peer/ollama/"):
+            # 64 MB: a vision request carries base64 images, nothing more.
+            body = req.read_body(64 * 1024 * 1024)
+            if body is None:
+                req._json(400, {"error": "bad Content-Length"})
+                return
+            self._proxy_llm(req, body=body)
+            return
+        if path == "/pf-peer/install-pack":
+            # A delegating peer's graph needed a node this machine lacks.
+            # Only CURATED pack slugs are ever accepted (validated by the
+            # installer Services injects), the install runs as a normal
+            # visible job here, and this machine's own auto-install setting
+            # has the final word.
+            raw = req.read_body(1024 * 1024)
+            if raw is None:
+                req._json(400, {"error": "bad Content-Length"})
+                return
+            if not self.render:
+                req._json(403, {"error": "render sharing is off"})
+                return
+            if self.pack_installer is None:
+                req._json(501, {"error": "no pack installer on this build"})
+                return
+            try:
+                slug = str(json.loads(raw.decode() or "{}").get("pack", ""))
+            except (ValueError, UnicodeDecodeError):
+                req._json(400, {"error": "bad request body"})
+                return
+            req._json(200, self.pack_installer(slug))
             return
         if path == "/pf-peer/pull":
             # A peer offers its model manifest; THIS machine decides what
@@ -653,6 +697,16 @@ class PeerService:
             req._json(409, {"error": "busy with local work"})
             return
         rest = req.path[len("/pf-peer/comfy"):] or "/"
+        # VRAM discipline for delegated renders, same as local ones: on
+        # single-GPU machines a vision model the delegator just used via
+        # /pf-peer/ollama shares memory with the render about to start —
+        # unload before the graph is submitted or the render can hard-crash
+        # (the classic 8 GB Ollama+ComfyUI collision, measured live).
+        if req.command == "POST" and rest.split("?", 1)[0] == "/prompt":
+            try:
+                ollama_unload_all(self.llm_url)
+            except Exception:  # noqa: BLE001 — best-effort, never blocks
+                pass
         target = self.comfy_url + rest
         headers = {"Content-Type": req.headers.get("Content-Type")
                    or "application/octet-stream"}
@@ -677,6 +731,75 @@ class PeerService:
         except Exception as exc:  # noqa: BLE001
             req._json(502, {"error": f"local ComfyUI unreachable: "
                                      f"{str(exc)[:160]}"})
+
+    def _proxy_llm(self, req: _PeerHandler, body: bytes | None) -> None:
+        """Forward one request to this machine's OWN Ollama.
+
+        This is what lets a delegated job run ENTIRELY on this machine:
+        the delegator points its planner/critic at /pf-peer/ollama/* and
+        every LLM call lands here, next to the GPU doing the pixels. Same
+        policy switch as renders (render sharing), but no busy gate — LLM
+        calls ride along with a render this machine already accepted."""
+        if not self.render:
+            req._json(403, {"error": "render sharing is off"})
+            return
+        rest = req.path[len("/pf-peer/ollama"):] or "/"
+        target = self.llm_url + rest
+        headers = {"Content-Type": req.headers.get("Content-Type")
+                   or "application/json"}
+        inner = urllib.request.Request(target, data=body, headers=headers,
+                                       method=req.command)
+        try:
+            with urllib.request.urlopen(inner, timeout=600) as resp:
+                payload = resp.read()
+                req.send_response(resp.status)
+                ctype = resp.headers.get("Content-Type")
+                if ctype:
+                    req.send_header("Content-Type", ctype)
+                req.send_header("Content-Length", str(len(payload)))
+                req.end_headers()
+                req.wfile.write(payload)
+        except urllib.error.HTTPError as exc:
+            payload = exc.read() if hasattr(exc, "read") else b""
+            # Self-heal on OUR side: a 404 for a named model means this
+            # machine's Ollama has not pulled it yet. Start the pull in the
+            # background; the delegator falls back to its own LLM for this
+            # call and later ones land here.
+            if exc.code == 404 and body:
+                try:
+                    model = str(json.loads(body.decode()).get("model") or "")
+                except (ValueError, UnicodeDecodeError):
+                    model = ""
+                if model:
+                    try:
+                        ollama_autopull(model)
+                    except Exception:  # noqa: BLE001 — heal is best-effort
+                        pass
+            req.send_response(exc.code)
+            req.send_header("Content-Length", str(len(payload)))
+            req.end_headers()
+            req.wfile.write(payload)
+        except Exception as exc:  # noqa: BLE001
+            req._json(502, {"error": f"local LLM unreachable: "
+                                     f"{str(exc)[:160]}"})
+
+    def request_pack_install(self, peer_base: str, slug: str) -> None:
+        """Fire-and-forget: ask the machine at `peer_base` to install a
+        curated node pack (its own settings decide). Called when a graph
+        delegated there was rejected for a node it does not have."""
+        def post() -> None:
+            try:
+                body = json.dumps({"pack": slug}).encode()
+                inner = urllib.request.Request(
+                    peer_base.rstrip("/") + "/pf-peer/install-pack",
+                    data=body, headers={"Content-Type": "application/json"},
+                    method="POST")
+                with urllib.request.urlopen(inner, timeout=8) as resp:
+                    resp.read()
+            except Exception:  # noqa: BLE001 — the reroute already saved the job
+                pass
+        threading.Thread(target=post, daemon=True,
+                         name="pf-pack-install-request").start()
 
     # ---------------------------------------------------------------- beacon
     # Same-machine pairs are real (tests, one PC with two installs): a

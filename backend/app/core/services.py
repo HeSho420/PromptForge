@@ -67,7 +67,7 @@ from ..config import PROJECT_ROOT, Settings
 from . import eta, motion, node_packs, quality
 from . import scene_graph as scene_module
 from . import video as video_io
-from .critic import CriticUnavailable, Critique, ImageCritic
+from .critic import CriticChain, CriticUnavailable, Critique, ImageCritic
 from .db import Database
 from .experience import ExperienceStore
 from .hardware import _probe_gpu_registry as hw_gpu_registry  # noqa: E501
@@ -974,6 +974,46 @@ class _TextMaskWorker:
                 pass
 
 
+class _ThreadBoundLLM:
+    """Resolves to `services.llm` at CALL time.
+
+    Components built once at startup (scout, trust judge, workflow
+    generator) would otherwise capture the main LLM chain forever; through
+    this handle their calls follow the per-thread binding, so during peer
+    delegation THEIR planning traffic also runs on the render machine —
+    and tests that stub `services.llm` after construction are honoured."""
+
+    def __init__(self, services: Services):
+        self._services = services
+
+    def complete(self, system: str, prompt: str, max_tokens: int = 4096):
+        return self._services.llm.complete(system, prompt,
+                                           max_tokens=max_tokens)
+
+    @property
+    def source(self) -> str:
+        return self._services.llm.source
+
+    def __getattr__(self, name: str):
+        return getattr(self._services.llm, name)
+
+
+class _EventLogJob:
+    """Job-shaped shim (only .log) for job-taking machinery that runs
+    OUTSIDE a queue job — the inline missing-node heal installs a pack in
+    the middle of a render and logs to the event feed instead."""
+
+    def __init__(self, events: EventLog, prefix: str = ""):
+        self._events = events
+        self._prefix = prefix
+
+    def log(self, level: str, msg: str) -> None:
+        try:
+            self._events.log(level, f"{self._prefix}{msg}")
+        except Exception:  # noqa: BLE001 — logging must never break a heal
+            pass
+
+
 class Services:
     def __init__(self, settings: Settings | None = None):
         self.settings = settings or Settings()
@@ -1009,10 +1049,23 @@ class Services:
         self.segmentation: SegmentationAdapter = self._build_segmentation()
         self.inpainting: InpaintingAdapter = self._build_inpainting()
 
-        self.llm: LLMClient = self._build_llm()
+        # Thread-local LLM/critic overrides: during peer delegation the
+        # worker thread binds its planning and quality-check traffic to the
+        # render machine, so the WHOLE job runs there — not just the pixels.
+        # Must exist before the `llm`/`critic` properties are first read.
+        self._llm_tls = threading.local()
+        self._critic_tls = threading.local()
+        self.llm = self._build_llm()
+        # Components built once at startup get a thread-bound handle, so
+        # their LLM calls also follow the per-thread binding at CALL time.
         self.workflow_ai = WorkflowGenerator(
-            self.llm, schema_provider=self._live_object_info)
-        self._object_info_cache: tuple[float, dict] | None = None
+            _ThreadBoundLLM(self), schema_provider=self._live_object_info)
+        # Live /object_info per ENGINE (keyed by base_url): during
+        # delegation self.comfy is a peer's proxy, and one shared cache
+        # let a graph validate against the WRONG machine's nodes —
+        # measured live as a BiRefNetRMBG graph sailing past the local
+        # gate onto a peer that had never installed the pack.
+        self._object_info_cache: dict[str, tuple[float, dict]] = {}
         # Which heavy model ComfyUI is believed to be holding, so a second
         # render of the SAME model doesn't unload and reload 10+ GB for
         # nothing. Cleared whenever the cache is actually dropped.
@@ -1030,13 +1083,21 @@ class Services:
         self.comfy = (OfflineComfyClient()
                       if self.settings.inpaint_backend == "mock"
                       else ComfyUIClient(self.settings.comfyui_url))
+        # A graph bounced for an uninstalled node type heals instead of
+        # failing: install the curated pack here, or reroute a delegated
+        # graph back to this machine (and ask the peer to install).
+        try:
+            self.comfy.on_missing_node = self._on_missing_node
+        except Exception:  # noqa: BLE001 — a client without the hook just skips it
+            pass
+        self._heal_attempted: set[str] = set()
         self.hardware = probe(self.settings.data_dir)
-        self.trust = TrustJudge(self.llm)
+        self.trust = TrustJudge(_ThreadBoundLLM(self))
         self.scout = ModelScout(
-            self.llm, self.model_search, self.downloader, self.registry,
-            trust=self.trust,
+            _ThreadBoundLLM(self), self.model_search, self.downloader,
+            self.registry, trust=self.trust,
             max_auto_bytes=max_auto_download_bytes(self.hardware))
-        self.critic: ImageCritic | None = (
+        self.critic = (
             ImageCritic(self.settings.llm_url, self.settings.critic_model)
             if self.settings.critic_model else None)
         self.experience = ExperienceStore(self.db)
@@ -1088,7 +1149,11 @@ class Services:
             env_provider=self._comfy_env_report,
             queue_provider=self._queue_public_snapshot,
             version_provider=self._version_info,
-            auto_update=self.settings.peer_auto_update)
+            auto_update=self.settings.peer_auto_update,
+            llm_url=self.settings.llm_url)
+        # A delegating peer whose graph needs a node we lack can ask us to
+        # install the curated pack (our auto-install setting decides).
+        self.peers.pack_installer = self._peer_pack_install
         # Sockets only open for real rendering setups: the mock backend is
         # what every test fixture uses, and hundreds of tests each opening
         # LAN listeners would fight over the ports for nothing.
@@ -1290,6 +1355,29 @@ class Services:
     @comfy.setter
     def comfy(self, client: Any) -> None:
         self._comfy_main = client
+
+    @property
+    def llm(self) -> Any:
+        """This thread's LLM. During peer delegation the worker thread sees
+        a chain whose FIRST stop is the render machine's Ollama (local as
+        fallback); every other thread — and every test that stubs
+        `services.llm = Fake()` via the setter — sees the main chain."""
+        return getattr(self._llm_tls, "client", None) or self._llm_main
+
+    @llm.setter
+    def llm(self, client: Any) -> None:
+        self._llm_main = client
+
+    @property
+    def critic(self) -> Any:
+        """This thread's vision critic, peer-bound during delegation with
+        the local critic as silent fallback. May be None (no critic model
+        configured) — same contract as before."""
+        return getattr(self._critic_tls, "client", None) or self._critic_main
+
+    @critic.setter
+    def critic(self, client: Any) -> None:
+        self._critic_main = client
 
     def _handle_update(self, job: Job) -> dict[str, Any]:
         """Pull what was pushed, refresh what changed, restart into it.
@@ -1787,12 +1875,33 @@ class Services:
         # these wraps in parallel and each peer must carry ONE of our jobs.
         with self._reserve_lock:
             self._reserved_peers.add(peer.host)
-        self._comfy_tls.client = ComfyUIClient(
-            f"{peer.base}/pf-peer/comfy")
+        engine = ComfyUIClient(f"{peer.base}/pf-peer/comfy")
+        engine.on_missing_node = self._on_missing_node
+        self._comfy_tls.client = engine
+        # The WHOLE job moves: planning and quality checks bind to the
+        # render machine's Ollama too (proxied at /pf-peer/ollama), with
+        # this machine's own LLM/critic as silent fallback — an older peer
+        # without the proxy, or one missing a model, degrades gracefully
+        # instead of failing the job. autopull=False: a 404 over there
+        # must not pull models into THIS machine's Ollama; the peer heals
+        # its own gap (its proxy starts the pull itself).
+        peer_llm_base = f"{peer.base}/pf-peer/ollama/v1"
+        self._llm_tls.client = FallbackLLM(
+            LocalLLM(peer_llm_base, self.settings.llm_model,
+                     autopull=False),
+            self._llm_main)
+        if self._critic_main is not None and self.settings.critic_model:
+            self._critic_tls.client = CriticChain(
+                ImageCritic(peer_llm_base, self.settings.critic_model),
+                self._critic_main)
+        job.log("info", f"[peer] the whole job runs on '{peer.name}' — "
+                        "planning and quality checks included")
         try:
             execute(job)
         finally:
             self._comfy_tls.client = None
+            self._llm_tls.client = None
+            self._critic_tls.client = None
             with self._reserve_lock:
                 self._reserved_peers.discard(peer.host)
 
@@ -3614,6 +3723,79 @@ class Services:
                 pass
         return False
 
+    def _on_missing_node(self, exc: Any, client: Any) -> Any | None:
+        """The heal behind run_graph: a graph bounced because a node type is
+        not installed on the engine it was sent to. Returns the client to
+        re-run the graph through, or None to let the error stand. Two cases:
+
+        peer engine   the delegated machine lacks the node (fresh install).
+                      Re-run on THIS machine — the local gate passed to get
+                      here — and ask the peer to install the curated pack so
+                      next time it renders there. The job never fails.
+
+        local engine  install the curated pack NOW (visible in the event
+                      feed), restart ComfyUI, retry once. Once per pack per
+                      session — a pack that fails to install must not loop.
+
+        Never raises: any surprise here means the original error stands."""
+        try:
+            classes = tuple(getattr(exc, "class_types", ()) or ())
+            pack = next((p for p in
+                         (node_packs.pack_for_node(c) for c in classes)
+                         if p is not None), None)
+            base_url = str(getattr(client, "base_url", ""))
+            if "/pf-peer/comfy" in base_url:
+                peer_base = base_url.split("/pf-peer/comfy", 1)[0]
+                if pack is not None:
+                    self.peers.request_pack_install(peer_base, pack.name)
+                local = self._comfy_main
+                if local is client or getattr(local, "offline", False):
+                    return None
+                names = ", ".join(classes) or "a required node"
+                self.events.log(
+                    "info", f"The render machine does not have {names} — "
+                            "rendering this step here instead"
+                            + (f"; asked it to install '{pack.title}' for "
+                               "next time" if pack else ""))
+                return local
+            if (pack is None
+                    or not self.settings.auto_install
+                    or self.settings.inpaint_backend == "mock"
+                    or pack.name in self._heal_attempted):
+                return None
+            self._heal_attempted.add(pack.name)
+            self.events.log(
+                "info", f"'{classes[0] if classes else pack.verify_node}' "
+                        f"is not installed — installing node pack "
+                        f"'{pack.title}' now, then retrying the render")
+            result = self._install_pack_now(
+                pack, _EventLogJob(self.events, f"[{pack.name}] "))
+            return client if result.get("active") else None
+        except Exception:  # noqa: BLE001 — healing must never mask the error
+            return None
+
+    def _peer_pack_install(self, slug: str) -> dict[str, Any]:
+        """A delegating peer's graph needed a node THIS machine lacks and
+        asked us to install the pack. Curated slugs only, this machine's
+        auto-install setting has the final word, and the install runs as a
+        normal visible job in our own queue."""
+        if slug not in node_packs.KNOWN_PACKS:
+            return {"queued": False, "error": "not a curated pack"}
+        if (not self.settings.auto_install
+                or self.settings.inpaint_backend == "mock"):
+            return {"queued": False, "error": "auto-install is off here"}
+        if slug in self._packs_queued:
+            return {"queued": True, "note": "already queued"}
+        self._packs_queued.add(slug)
+        try:
+            self.queue.enqueue("node_pack", {"pack": slug})
+            self.events.log("info", f"Node pack '{slug}' queued — a "
+                                    "connected machine's render needs it")
+            return {"queued": True}
+        except Exception:  # noqa: BLE001 — honest refusal beats a crash
+            self._packs_queued.discard(slug)
+            return {"queued": False, "error": "queueing failed"}
+
     def _template_runnable(self, task: str) -> tuple[bool, str]:
         """Can this machine run the task's template RIGHT NOW — template
         present, its models downloaded, its memory needs met? The edit
@@ -5117,9 +5299,16 @@ class Services:
                 f"{task} render failed: "
                 f"{commit_exhausted_hint(str(exc)) or exc}") from exc
 
-    def _live_object_info(self) -> dict | None:
-        """The live /object_info schema, cached ~5 min. None when ComfyUI is
-        unreachable — the schema check is advisory, never a blocker.
+    def _live_object_info(self, engine: Any | None = None) -> dict | None:
+        """The live /object_info schema, cached ~5 min PER ENGINE. None when
+        that ComfyUI is unreachable — the schema check is advisory, never a
+        blocker.
+
+        Keyed by the engine's base_url because during delegation self.comfy
+        is a peer's proxy: one shared cache served the LOCAL machine's node
+        list while validating a graph bound for the PEER (measured live —
+        a BiRefNetRMBG graph passed the gate onto a machine without the
+        pack). Callers that ask about THIS machine pass self._comfy_main.
 
         Mock mode means OFFLINE: a ComfyUI answering on this box belongs to
         some other setup (measured live: the dev machine's real instance
@@ -5128,15 +5317,18 @@ class Services:
         misdiagnosed 'load flakes')."""
         if self.settings.inpaint_backend == "mock":
             return None
+        comfy = engine if engine is not None else self.comfy
+        key = str(getattr(comfy, "base_url", "local"))
         now = time.time()
-        if self._object_info_cache and now - self._object_info_cache[0] < 300:
-            return self._object_info_cache[1]
+        hit = self._object_info_cache.get(key)
+        if hit and now - hit[0] < 300:
+            return hit[1]
         try:
-            info = self.comfy.object_info()
+            info = comfy.object_info()
         except Exception:  # noqa: BLE001 — ComfyUI down: skip the check
             return None
         if isinstance(info, dict) and info:
-            self._object_info_cache = (now, info)
+            self._object_info_cache[key] = (now, info)
             return info
         return None
 
@@ -6593,7 +6785,10 @@ class Services:
         and the raw schema is a multi-megabyte response nobody should refetch
         per job."""
         base = self._comfy_base()
-        info = self._live_object_info()
+        # THIS machine's engine, explicitly: pack status is a statement
+        # about what this install can do, and must not flip when the
+        # calling thread happens to be delegation-bound to a peer.
+        info = self._live_object_info(self._comfy_main)
         live = set(info.keys()) if info else None
         return [node_packs.pack_status(p, base, live)
                 for p in node_packs.KNOWN_PACKS.values()]
@@ -6667,7 +6862,7 @@ class Services:
         time.sleep(1)  # a beat for the socket to leave TIME_WAIT
         # The node inventory may have changed: drop the cached /object_info so
         # new nodes are visible immediately instead of after the TTL.
-        self._object_info_cache = None
+        self._object_info_cache.clear()
         if not self._spawn_comfy() or not self._wait_comfy(180):
             raise TransientError("ComfyUI did not come back after being "
                                  "restarted — the job will retry.")
@@ -6725,6 +6920,12 @@ class Services:
             raise PermanentError(
                 "Unknown node pack. Only the curated packs can be installed: "
                 + ", ".join(sorted(node_packs.KNOWN_PACKS)))
+        return self._install_pack_now(pack, job)
+
+    def _install_pack_now(self, pack: node_packs.NodePack,
+                          job: Any) -> dict[str, Any]:
+        """The install itself, callable from the queue job AND inline from
+        the missing-node heal (`job` only needs .log). Restarts ComfyUI."""
         base = self._comfy_base()
         if base is None:
             raise PermanentError(
@@ -6767,7 +6968,9 @@ class Services:
         self._restart_comfy(job)
         live = set()
         try:
-            live = self.comfy.installed_node_types()
+            # THIS machine's engine explicitly: the heal can run on a
+            # delegation-bound thread whose self.comfy is a peer proxy.
+            live = self._comfy_main.installed_node_types()
         except Exception:  # noqa: BLE001 — verified below as missing
             pass
         active = pack.verify_node in live

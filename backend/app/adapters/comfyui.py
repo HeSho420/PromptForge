@@ -137,6 +137,17 @@ class WorkflowRuntimeError(AdapterError):
     details so the LLM repair loop can act on them."""
 
 
+class MissingNodeError(WorkflowRuntimeError):
+    """ComfyUI rejected the graph because a node type is not installed on
+    THAT engine. Typed (with the class names) so the caller can install the
+    pack that ships it, or render on an engine that has it, instead of
+    failing the job."""
+
+    def __init__(self, message: str, class_types: tuple[str, ...] = ()):
+        super().__init__(message)
+        self.class_types = class_types
+
+
 class WorkflowLibrary:
     """Loads versioned templates: <task>_v<N>.json.
 
@@ -287,6 +298,13 @@ class ComfyUIClient:
     """HTTP client for a ComfyUI server: submit graphs, fetch results, and
     inspect what the server actually has installed (nodes, checkpoints)."""
 
+    # Injected by Services: called (MissingNodeError, this client) when a
+    # graph is rejected for an uninstalled node type. Returns a client to
+    # re-run the graph through (this one after installing the pack, or the
+    # local engine when this one is a peer proxy) — or None to give up and
+    # let the error propagate.
+    on_missing_node = None
+
     def __init__(self, base_url: str, poll_interval: float = 1.0,
                  timeout_s: float = 600.0):
         self.base_url = base_url.rstrip("/")
@@ -320,8 +338,18 @@ class ComfyUIClient:
                     "The render engine behind this request died mid-"
                     f"render: {json.dumps(detail)[:400]}") from exc
             if detail:
+                text = json.dumps(detail)
+                # Typed missing-node rejection: name the classes so the
+                # caller can install the pack (or render elsewhere) rather
+                # than surface the raw error to the user.
+                if "missing_node_type" in text:
+                    classes = tuple(dict.fromkeys(
+                        re.findall(r'"class_type":\s*"([^"]+)"', text)))
+                    raise MissingNodeError(
+                        f"ComfyUI rejected the request: {text[:2000]}",
+                        class_types=classes) from exc
                 raise WorkflowRuntimeError(
-                    f"ComfyUI rejected the request: {json.dumps(detail)[:2000]}") from exc
+                    f"ComfyUI rejected the request: {text[:2000]}") from exc
             raise WorkflowRuntimeError(
                 f"ComfyUI returned HTTP {exc.code} for {path}.") from exc
         except (urllib.error.URLError, OSError) as exc:
@@ -664,7 +692,23 @@ class ComfyUIClient:
     def run_graph(self, graph: dict[str, Any]) -> tuple[Image.Image, str]:
         """Submit a validated graph and wait for its image. Returns (image, prompt_id)."""
         validate_workflow(graph)  # belt-and-braces: never send unvalidated graphs
-        prompt_id = self.submit(graph)
+        try:
+            prompt_id = self.submit(graph)
+        except MissingNodeError as exc:
+            # Self-healing: a rejected node type is an installable gap, not
+            # a dead end. The injected healer either fixes THIS engine
+            # (install + restart, then we resubmit here) or hands back a
+            # different engine that has the node (a peer proxy falls back
+            # to the local one). A second rejection propagates — the healer
+            # runs once per submit.
+            healer = self.on_missing_node
+            substitute = healer(exc, self) if healer else None
+            if substitute is None:
+                raise
+            if substitute is self:
+                prompt_id = self.submit(graph)
+            else:
+                return substitute.run_graph(graph)
         return self.wait_for_output(prompt_id), prompt_id
 
 

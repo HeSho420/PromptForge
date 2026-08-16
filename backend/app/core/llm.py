@@ -106,11 +106,15 @@ class LocalLLM:
 
     def __init__(self, base_url: str, model: str, timeout_s: float = 300.0,
                  http_post: Callable[[str, dict[str, Any], float], dict[str, Any]]
-                 | None = None):
+                 | None = None, autopull: bool = True):
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.timeout_s = timeout_s
         self._post = http_post or _http_post_json
+        # False for clients pointed at ANOTHER machine's Ollama (peer
+        # delegation): pulling the model into THIS machine's Ollama would
+        # not fix the 404 over there. The peer heals its own gap.
+        self.autopull = autopull
 
     NUM_CTX = 8192  # planner context now carries guides/templates/lessons
 
@@ -142,7 +146,7 @@ class LocalLLM:
             except Exception:  # noqa: BLE001 — body is diagnostic only
                 body = b""
             if exc.code == 404 and b"model" in body and b"not found" in body:
-                started = ollama_autopull(self.model)
+                started = self.autopull and ollama_autopull(self.model)
                 note = (" — downloading it in the background now; this "
                         "request uses the fallback and later ones run "
                         "locally" if started else
@@ -170,7 +174,7 @@ class LocalLLM:
             data = self._post(self.base_url + "/chat/completions", payload, self.timeout_s)
         except urllib.error.HTTPError as exc:
             if exc.code == 404:
-                started = ollama_autopull(self.model)
+                started = self.autopull and ollama_autopull(self.model)
                 note = (" — downloading it in the background now" if started
                         else f" (try: ollama pull {self.model})")
                 raise LLMUnavailableError(

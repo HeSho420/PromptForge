@@ -1555,10 +1555,18 @@ class HonestHandPickedDelegation(unittest.TestCase):
                 log=lambda lvl, msg: events.append((lvl, msg))),
             queue=queue,
             _comfy_tls=_threading.local(),
+            # Whole-job delegation plumbing: the wrap also binds the LLM
+            # and critic to the peer, and arms the missing-node healer.
+            _llm_tls=_threading.local(),
+            _critic_tls=_threading.local(),
+            _llm_main=SimpleNamespace(source="local"),
+            _critic_main=None,
+            _on_missing_node=lambda exc, client: None,
             # Combine-mode plumbing the wrap now uses on every path.
             _reserved_peers=set(),
             _reserve_lock=_threading.Lock(),
-            settings=SimpleNamespace(lan_combine=False),
+            settings=SimpleNamespace(lan_combine=False, llm_model="qwen",
+                                     critic_model=""),
         ), events
 
     def test_unreachable_pinned_device_fails_the_job_without_running(self):
@@ -1868,6 +1876,308 @@ class QueueBusyAndDelegationWiring(unittest.TestCase):
         src = inspect.getsource(ModelDownloader.download)
         self.assertIn("if self.peer_source is not None and model.sha256:",
                       src)
+
+
+class WholeJobDelegation(unittest.TestCase):
+    """Choosing a renderer moves the WHOLE job there: planning and quality
+    checks bind to the render machine's Ollama (proxied at
+    /pf-peer/ollama), with this machine as silent fallback."""
+
+    def test_the_llm_and_critic_follow_the_thread_binding(self):
+        import threading as _t
+        from types import SimpleNamespace
+
+        stub = SimpleNamespace(_llm_tls=_t.local(), _llm_main="MAIN",
+                               _critic_tls=_t.local(), _critic_main=None)
+        self.assertEqual(Services.llm.fget(stub), "MAIN")
+        stub._llm_tls.client = "PEER"
+        self.assertEqual(Services.llm.fget(stub), "PEER")
+        stub._llm_tls.client = None
+        self.assertEqual(Services.llm.fget(stub), "MAIN")
+        # critic may be None (no critic model) — same contract as before.
+        self.assertIsNone(Services.critic.fget(stub))
+        stub._critic_tls.client = "PEER-CRITIC"
+        self.assertEqual(Services.critic.fget(stub), "PEER-CRITIC")
+
+    def test_the_wrap_binds_and_always_unbinds_everything(self):
+        src = inspect.getsource(Services._delegate_wrap)
+        self.assertIn("pf-peer/ollama/v1", src)
+        self.assertIn("FallbackLLM", src)          # peer first, local fallback
+        self.assertIn("CriticChain", src)
+        self.assertIn("autopull=False", src)       # never pull models HERE
+        self.assertIn("on_missing_node", src)      # peer engine can heal too
+        self.assertIn("self._llm_tls.client = None", src)
+        self.assertIn("self._critic_tls.client = None", src)
+
+    def test_the_ollama_proxy_forwards_to_this_machines_llm(self):
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        seen: list[str] = []
+
+        class _Stub(BaseHTTPRequestHandler):
+            def log_message(self, *_a):
+                pass
+
+            def do_POST(self):
+                seen.append(self.path)
+                length = int(self.headers.get("Content-Length") or 0)
+                self.rfile.read(length)
+                body = json.dumps({"message": {"content": "ok"}}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        llm_stub = ThreadingHTTPServer(("127.0.0.1", 0), _Stub)
+        threading.Thread(target=llm_stub.serve_forever, daemon=True).start()
+        with tempfile.TemporaryDirectory() as tmp:
+            svc = PeerService(
+                FakeRegistry(Path(tmp) / "m"), share=True, render=True,
+                comfy_url="http://127.0.0.1:9",
+                llm_url=f"http://127.0.0.1:{llm_stub.server_address[1]}",
+                http_port=BASE_HTTP + 70, udp_port=BASE_UDP + 70,
+                name="llm-host", loopback_only=True)
+            svc.start()
+            try:
+                req = urllib.request.Request(
+                    f"http://127.0.0.1:{svc.http_port}"
+                    "/pf-peer/ollama/api/chat",
+                    data=json.dumps({"model": "m"}).encode(),
+                    headers={"Content-Type": "application/json"},
+                    method="POST")
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    data = json.loads(resp.read())
+                self.assertEqual(data["message"]["content"], "ok")
+                self.assertEqual(seen, ["/api/chat"])  # prefix stripped
+            finally:
+                svc.stop()
+                llm_stub.shutdown()
+
+    def test_the_ollama_proxy_respects_render_sharing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            svc = PeerService(
+                FakeRegistry(Path(tmp) / "m"), share=True, render=False,
+                comfy_url="http://127.0.0.1:9",
+                http_port=BASE_HTTP + 71, udp_port=BASE_UDP + 71,
+                name="no-render", loopback_only=True)
+            svc.start()
+            try:
+                req = urllib.request.Request(
+                    f"http://127.0.0.1:{svc.http_port}"
+                    "/pf-peer/ollama/api/chat", data=b"{}", method="POST")
+                with self.assertRaises(urllib.error.HTTPError) as ctx:
+                    urllib.request.urlopen(req, timeout=10)
+                self.assertEqual(ctx.exception.code, 403)
+            finally:
+                svc.stop()
+
+    def test_peer_pointed_llm_never_pulls_models_into_this_machine(self):
+        import io
+        from unittest import mock
+
+        from app.core import llm as llm_mod
+        from app.core.llm import LLMUnavailableError, LocalLLM
+
+        def post_404(url, _payload, _timeout):
+            raise urllib.error.HTTPError(
+                url, 404, "not found", None,
+                io.BytesIO(b'{"error":"model \'x\' not found"}'))
+
+        client = LocalLLM("http://127.0.0.1:9/v1", "x",
+                          http_post=post_404, autopull=False)
+        with mock.patch.object(llm_mod, "ollama_autopull") as pull:
+            with self.assertRaises(LLMUnavailableError):
+                client.complete("s", "p")
+            pull.assert_not_called()
+
+    def test_delegated_prompt_posts_unload_ollama_first(self):
+        # The 8 GB collision, prevented at the proxy: a vision model the
+        # delegator just used shares VRAM with the render about to start.
+        src = inspect.getsource(PeerService._proxy)
+        self.assertIn("ollama_unload_all(self.llm_url)", src)
+        self.assertIn('== "/prompt"', src)
+
+
+class MissingNodeHeal(unittest.TestCase):
+    """A graph rejected for an uninstalled node type heals instead of
+    failing: the curated pack installs here, or a delegated graph reroutes
+    back to this machine while the peer is asked to install."""
+
+    def _missing_node_error(self):
+        from app.adapters.comfyui import MissingNodeError
+        return MissingNodeError(
+            "ComfyUI rejected the request: ...missing_node_type...",
+            class_types=("BiRefNetRMBG",))
+
+    def test_the_rejection_parses_into_a_typed_error(self):
+        import io
+        from unittest import mock
+
+        from app.adapters.comfyui import ComfyUIClient, MissingNodeError
+
+        # The exact body from the live failure report.
+        body = json.dumps({
+            "error": {"type": "missing_node_type",
+                      "message": "Node 'BiRefNetRMBG' not found.",
+                      "details": "Node ID '#3'",
+                      "extra_info": {"node_id": "3",
+                                     "class_type": "BiRefNetRMBG",
+                                     "node_title": "BiRefNetRMBG"}},
+            "node_errors": {}}).encode()
+
+        def raise_400(*_a, **_k):
+            raise urllib.error.HTTPError(
+                "http://x/prompt", 400, "bad", None, io.BytesIO(body))
+
+        client = ComfyUIClient("http://127.0.0.1:9")
+        with mock.patch("urllib.request.urlopen", side_effect=raise_400):
+            with self.assertRaises(MissingNodeError) as ctx:
+                client.request("POST", "/prompt", b"{}")
+        self.assertEqual(ctx.exception.class_types, ("BiRefNetRMBG",))
+
+    def test_run_graph_reroutes_to_the_substitute_engine(self):
+        from types import SimpleNamespace
+
+        from app.adapters.comfyui import ComfyUIClient
+
+        client = ComfyUIClient("http://peer:8765/pf-peer/comfy")
+        client.submit = lambda _g: (_ for _ in ()).throw(
+            self._missing_node_error())
+        sentinel = ("image", "pid")
+        client.on_missing_node = (
+            lambda _exc, _c: SimpleNamespace(run_graph=lambda _g: sentinel))
+        graph = {"1": {"class_type": "SaveImage",
+                       "inputs": {"images": ["1", 0]}}}
+        self.assertEqual(client.run_graph(graph), sentinel)
+
+    def test_run_graph_retries_in_place_after_an_install(self):
+        from app.adapters.comfyui import ComfyUIClient
+
+        client = ComfyUIClient("http://127.0.0.1:9")
+        calls = {"n": 0}
+
+        def submit(_g):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise self._missing_node_error()
+            return "pid-2"
+
+        client.submit = submit
+        client.wait_for_output = lambda pid: f"img-{pid}"
+        client.on_missing_node = lambda _exc, c: c  # "installed — retry here"
+        graph = {"1": {"class_type": "SaveImage",
+                       "inputs": {"images": ["1", 0]}}}
+        self.assertEqual(client.run_graph(graph), ("img-pid-2", "pid-2"))
+        self.assertEqual(calls["n"], 2)
+
+    def test_run_graph_without_a_healer_lets_the_error_stand(self):
+        from app.adapters.comfyui import ComfyUIClient, MissingNodeError
+
+        client = ComfyUIClient("http://127.0.0.1:9")
+        client.submit = lambda _g: (_ for _ in ()).throw(
+            self._missing_node_error())
+        graph = {"1": {"class_type": "SaveImage",
+                       "inputs": {"images": ["1", 0]}}}
+        with self.assertRaises(MissingNodeError):
+            client.run_graph(graph)
+
+    def test_every_node_our_graphs_use_maps_to_its_pack(self):
+        from app.core import node_packs
+
+        self.assertEqual(node_packs.pack_for_node("BiRefNetRMBG").name,
+                         "rmbg")
+        self.assertEqual(node_packs.pack_for_node("ClothesSegment").name,
+                         "rmbg")
+        self.assertEqual(node_packs.pack_for_node("DWPreprocessor").name,
+                         "controlnet-aux")
+        self.assertEqual(node_packs.pack_for_node("FaceDetailer").name,
+                         "impact-pack")
+        self.assertIsNone(node_packs.pack_for_node("KSampler"))
+
+    def test_the_healer_reroutes_peer_graphs_to_this_machine(self):
+        from types import SimpleNamespace
+
+        asked: list[tuple[str, str]] = []
+        local = SimpleNamespace(base_url="http://127.0.0.1:8188",
+                                offline=False)
+        stub = SimpleNamespace(
+            peers=SimpleNamespace(
+                request_pack_install=lambda base, slug: asked.append(
+                    (base, slug))),
+            _comfy_main=local,
+            events=SimpleNamespace(log=lambda *_a: None),
+            settings=SimpleNamespace(auto_install=True,
+                                     inpaint_backend="comfyui"),
+            _heal_attempted=set())
+        client = SimpleNamespace(
+            base_url="http://192.168.1.101:8765/pf-peer/comfy")
+        out = Services._on_missing_node(stub, self._missing_node_error(),
+                                        client)
+        self.assertIs(out, local)
+        self.assertEqual(asked, [("http://192.168.1.101:8765", "rmbg")])
+
+    def test_the_healer_installs_locally_exactly_once(self):
+        from types import SimpleNamespace
+
+        installed: list[str] = []
+        stub = SimpleNamespace(
+            peers=SimpleNamespace(request_pack_install=lambda *_a: None),
+            _comfy_main=None,
+            events=SimpleNamespace(log=lambda *_a: None),
+            settings=SimpleNamespace(auto_install=True,
+                                     inpaint_backend="comfyui"),
+            _heal_attempted=set(),
+            _install_pack_now=lambda pack, _job: (
+                installed.append(pack.name) or {"active": True}))
+        client = SimpleNamespace(base_url="http://127.0.0.1:8188")
+        exc = self._missing_node_error()
+        self.assertIs(Services._on_missing_node(stub, exc, client), client)
+        self.assertEqual(installed, ["rmbg"])
+        # Second failure of the same pack: never loop the install.
+        self.assertIsNone(Services._on_missing_node(stub, exc, client))
+        self.assertEqual(installed, ["rmbg"])
+
+    def test_the_peer_install_endpoint_only_takes_curated_slugs(self):
+        from types import SimpleNamespace
+
+        queued: list[tuple[str, dict]] = []
+        stub = SimpleNamespace(
+            settings=SimpleNamespace(auto_install=True,
+                                     inpaint_backend="comfyui"),
+            _packs_queued=set(),
+            queue=SimpleNamespace(
+                enqueue=lambda t, p: queued.append((t, p))),
+            events=SimpleNamespace(log=lambda *_a: None))
+        out = Services._peer_pack_install(stub, "rmbg")
+        self.assertTrue(out["queued"])
+        self.assertEqual(queued, [("node_pack", {"pack": "rmbg"})])
+        out = Services._peer_pack_install(stub, "evil/../pack")
+        self.assertFalse(out["queued"])
+        self.assertEqual(len(queued), 1)
+
+    def test_object_info_is_cached_per_engine(self):
+        from types import SimpleNamespace
+
+        stub = SimpleNamespace(
+            settings=SimpleNamespace(inpaint_backend="comfyui"),
+            _object_info_cache={})
+        local = SimpleNamespace(base_url="http://127.0.0.1:8188",
+                                object_info=lambda: {"KSampler": {}})
+        peer = SimpleNamespace(
+            base_url="http://192.168.1.101:8765/pf-peer/comfy",
+            object_info=lambda: {"KSampler": {}, "BiRefNetRMBG": {}})
+        a = Services._live_object_info(stub, local)
+        b = Services._live_object_info(stub, peer)
+        self.assertNotIn("BiRefNetRMBG", a)
+        self.assertIn("BiRefNetRMBG", b)
+        # And the cached answers stay separated on the second read.
+        self.assertNotIn("BiRefNetRMBG",
+                         Services._live_object_info(stub, local))
+
+    def test_pack_status_reads_this_machines_engine(self):
+        src = inspect.getsource(Services.node_pack_report)
+        self.assertIn("_live_object_info(self._comfy_main)", src)
 
 
 if __name__ == "__main__":
