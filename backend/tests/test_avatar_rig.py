@@ -135,6 +135,28 @@ class KontextRefusal(unittest.TestCase):
     SILENTLY by returning the input unchanged. The pipeline must detect
     that and switch engines instead of shipping a no-op."""
 
+    def test_a_backend_that_cannot_run_kontext_reroutes_not_fails(self):
+        """Measured live on a DirectML machine: Flux sampling died with
+        'Cannot access storage of OpaqueTensorImpl' and the job failed
+        PERMANENTLY. Three layers now land on the inpaint engine instead:
+        a per-backend block memo, a proactive privateuseone device gate,
+        and a runtime catch for the missing-ops error class — all scoped
+        per backend URL so a DirectML peer cannot disable Kontext for
+        this machine's own CUDA renders."""
+        import inspect
+
+        from app.core.services import Services
+        src = inspect.getsource(Services._render_kontext_step)
+        self.assertIn("_kontext_blocked", src)
+        self.assertIn('"privateuseone"', src)
+        self.assertIn("OpaqueTensorImpl", src)
+        # every layer must END in the fallback, never in a raise
+        self.assertGreaterEqual(src.count("_inpaint_fallback"), 4)
+        blocked = inspect.getsource(Services._kontext_blocked)
+        self.assertIn("base_url", blocked)   # per-backend, not global
+        dev = inspect.getsource(Services._render_device)
+        self.assertIn("base", dev)           # cache keyed per backend too
+
     def test_the_noop_detector_separates_nothing_from_something(self):
         from PIL import Image
 

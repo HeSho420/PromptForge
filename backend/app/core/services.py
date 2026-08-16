@@ -4816,6 +4816,39 @@ class Services:
     # just the input handed back.
     _KONTEXT_NOOP = 0.015
 
+    def _render_device(self) -> str:
+        """The ACTIVE ComfyUI's render device type — "cuda",
+        "privateuseone" (DirectML), "cpu", ... — cached briefly PER
+        BACKEND: self.comfy is thread-locally rebound to a peer's engine
+        during delegation, and a cache keyed on time alone would answer
+        with the wrong machine's device. "" when unknowable; advisory —
+        capability gates read it, nothing hard-fails on it."""
+        base = str(getattr(self.comfy, "base_url", ""))
+        cached = getattr(self, "_render_device_cache", None)
+        if (cached and cached[0] == base
+                and time.time() - cached[1] < 120):
+            return cached[2]
+        dev = ""
+        try:
+            stats = self.comfy.request("GET", "/system_stats")
+            dev = str((stats.get("devices") or [{}])[0].get("type") or "")
+        except Exception:  # noqa: BLE001 — advisory only
+            dev = ""
+        self._render_device_cache = (base, time.time(), dev)
+        return dev
+
+    def _kontext_blocked(self) -> bool:
+        """Has Kontext been proven un-runnable on the ACTIVE backend?
+        Per backend URL: a DirectML peer must not disable Kontext for
+        this machine's own CUDA renders, or the other way round."""
+        base = str(getattr(self.comfy, "base_url", ""))
+        return base in getattr(self, "_kontext_unsupported", set())
+
+    def _block_kontext(self) -> None:
+        unsup: set[str] = getattr(self, "_kontext_unsupported", set())
+        unsup.add(str(getattr(self.comfy, "base_url", "")))
+        self._kontext_unsupported = unsup
+
     def _render_kontext_step(self, job: Job, image: Image.Image,
                              instruction: str) -> Image.Image:
         """One whole-image instruction edit through FLUX.1 Kontext.
@@ -4838,7 +4871,23 @@ class Services:
                             "instruction — going straight to the inpaint "
                             "engine")
             return self._inpaint_fallback(job, image, instruction)
+        if self._kontext_blocked():
+            job.log("info", "[route] Kontext cannot run on this render "
+                            "backend — going straight to the masked "
+                            "inpaint engine")
+            return self._inpaint_fallback(job, image, instruction)
         self._require_comfy(job)
+        if self._render_device() == "privateuseone":
+            # DirectML: Flux-class sampling needs torch ops the frozen
+            # DirectML backend does not implement (measured live on an
+            # RX 6700 XT: 'Cannot access storage of OpaqueTensorImpl'
+            # at KSampler). Say so once and use the engine that works.
+            self._block_kontext()
+            job.log("info", "[route] This machine renders through DirectML, "
+                            "which cannot run Flux Kontext — using the "
+                            "masked inpaint engine instead (real renders, "
+                            "same request)")
+            return self._inpaint_fallback(job, image, instruction)
         template = self.workflows.load("kontext")
         small = self._fit_megapixels(image, self._KONTEXT_MP)
         if small.size != image.size:
@@ -4859,6 +4908,19 @@ class Services:
             raise self._comfy_died_midrender(job, "kontext", instruction,
                                              exc) from exc
         except WorkflowRuntimeError as exc:
+            if re.search(r"OpaqueTensorImpl|NotImplementedError",
+                         str(exc)):
+                # The backend cannot execute this model class AT ALL —
+                # permanent for Kontext on this backend, but not for the
+                # request: the masked inpaint engine renders it instead,
+                # and the per-backend flag stops future jobs paying for
+                # another crash to learn the same fact.
+                self._block_kontext()
+                job.log("info", "[route] Kontext is not runnable on this "
+                                "machine's render backend (missing torch "
+                                "ops) — switching this step to the masked "
+                                "inpaint engine")
+                return self._inpaint_fallback(job, image, instruction)
             self._diagnose_and_record(job, "kontext", instruction, str(exc))
             raise PermanentError(
                 f"kontext render failed: "
