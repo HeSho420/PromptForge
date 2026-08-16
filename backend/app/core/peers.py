@@ -1106,8 +1106,13 @@ class PeerService:
                 continue
         return None
 
-    def best_idle_peer(self,
-                       exclude: frozenset[str] = frozenset()) -> Peer | None:
+    # Backends that crash or crawl on WAN-class video sampling: DirectML
+    # dies with missing torch ops (measured live — the peer's ComfyUI
+    # process was killed mid-request), and a CPU peer would take hours.
+    VIDEO_INCAPABLE_DEVICES = frozenset({"privateuseone", "cpu"})
+
+    def best_idle_peer(self, exclude: frozenset[str] = frozenset(),
+                       video: bool = False) -> Peer | None:
         """An idle peer that can actually RENDER, or None.
 
         A peer with no ComfyUI cannot help however idle it is, and one
@@ -1139,7 +1144,10 @@ class PeerService:
             comfy = info.get("comfy") or {}
             if not comfy.get("up"):
                 continue
-            if str(comfy.get("device") or "").lower() == "cpu":
+            device = str(comfy.get("device") or "").lower()
+            if video and device in self.VIDEO_INCAPABLE_DEVICES:
+                continue   # this job class would crash or crawl there
+            if device == "cpu":
                 cpu_fallback = cpu_fallback or peer
                 continue
             return peer

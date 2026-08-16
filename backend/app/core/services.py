@@ -1737,6 +1737,14 @@ class Services:
                            "ComfyUI is not running. Launch PromptForge "
                            "there (the launcher starts ComfyUI) or run "
                            "doctor.ps1 on that machine.")
+            elif (job.type in ("video", "motion_transfer")
+                  and str((info.get("comfy") or {}).get("device") or "")
+                  .lower() in self.peers.VIDEO_INCAPABLE_DEVICES):
+                problem = (f"'{found.name}' renders through "
+                           f"{(info.get('comfy') or {}).get('device')}, "
+                           "which cannot run WAN video (it crashes the "
+                           "engine). Pick a machine with an NVIDIA or "
+                           "native-ROCm GPU for video jobs.")
             elif not info.get("idle"):
                 # Busy is temporary: hold the job at the front of the
                 # queue and re-check in a few seconds. The pause also
@@ -1761,7 +1769,9 @@ class Services:
         elif target != "local":
             with self._reserve_lock:
                 taken = frozenset(self._reserved_peers)
-            peer = self.peers.best_idle_peer(exclude=taken)
+            peer = self.peers.best_idle_peer(
+                exclude=taken,
+                video=job.type in ("video", "motion_transfer"))
             if peer is not None:
                 verb = ("combine mode" if self.settings.lan_combine
                         else "this machine is busy")
@@ -4868,6 +4878,21 @@ class Services:
     # just the input handed back.
     _KONTEXT_NOOP = 0.015
 
+    def _require_video_capable(self, job: Job) -> None:
+        """WAN-class video cannot run on a DirectML backend — the missing
+        torch ops KILL the ComfyUI process mid-request (measured live as a
+        connection reset on an RX 6700 XT). Fail before the crash, with
+        the way out spelled out: render video on a capable machine."""
+        if self._render_device() != "privateuseone":
+            return
+        raise PermanentError(
+            "This render backend runs through DirectML, which cannot "
+            "execute WAN video (its torch is missing the ops — the engine "
+            "crashes mid-load). Nothing was rendered. Render video on a "
+            "machine with an NVIDIA or native-ROCm GPU: pick it under "
+            "Render, or leave Render on auto — video jobs are only ever "
+            "delegated to capable machines.")
+
     def _render_device(self) -> str:
         """The ACTIVE ComfyUI's render device type — "cuda",
         "privateuseone" (DirectML), "cpu", ... — cached briefly PER
@@ -7751,6 +7776,7 @@ class Services:
         p = job.payload
         ref_id, drive_id = p["reference_asset_id"], p["driving_asset_id"]
         self._require_comfy(job)
+        self._require_video_capable(job)
         self._log_eta(job)
 
         reference = self.open_asset_image(ref_id)
@@ -8137,6 +8163,7 @@ class Services:
         """Image-to-video via the versioned WAN template."""
         p = job.payload
         self._require_comfy(job)
+        self._require_video_capable(job)
         self._log_eta(job, required_models=["wan22-ti2v-5b", "wan-umt5-xxl",
                                             "wan22-vae"])
         asset, prompt_id, width, height, length = self._render_video_asset(

@@ -308,6 +308,17 @@ class ComfyUIClient:
                 detail = json.loads(exc.read())
             except Exception:
                 detail = None
+            # A DELEGATED render talks to a peer's /pf-peer/comfy proxy;
+            # when the peer's own engine dies mid-request (measured live:
+            # WAN video crashing a DirectML ComfyUI, connection reset),
+            # the proxy answers with this wording. That is a BACKEND-DOWN
+            # situation, not a rejected graph — mapping it to a rejection
+            # failed the job permanently instead of letting the existing
+            # fall-back-to-local machinery re-render it here.
+            if detail and "unreachable" in json.dumps(detail):
+                raise BackendUnavailableError(
+                    "The render engine behind this request died mid-"
+                    f"render: {json.dumps(detail)[:400]}") from exc
             if detail:
                 raise WorkflowRuntimeError(
                     f"ComfyUI rejected the request: {json.dumps(detail)[:2000]}") from exc

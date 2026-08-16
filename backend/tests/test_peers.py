@@ -830,11 +830,37 @@ class CombineMode(unittest.TestCase):
             release_head.set()
             q.stop()
 
+    def test_video_jobs_never_land_on_a_backend_that_crashes_on_them(self):
+        """Measured live: a delegated WAN video killed a DirectML peer's
+        ComfyUI mid-request (connection reset) and the job failed
+        permanently. Three layers now prevent or absorb it."""
+        import inspect
+
+        from app.adapters.comfyui import ComfyUIClient
+        # 1. Auto-delegation skips DirectML/CPU peers for video job types.
+        self.assertIn("privateuseone", PeerService.VIDEO_INCAPABLE_DEVICES)
+        self.assertIn("cpu", PeerService.VIDEO_INCAPABLE_DEVICES)
+        src = inspect.getsource(PeerService.best_idle_peer)
+        self.assertIn("VIDEO_INCAPABLE_DEVICES", src)
+        wrap = inspect.getsource(Services._delegate_wrap)
+        self.assertIn('job.type in ("video", "motion_transfer")', wrap)
+        # 2. A DirectML backend fails video EARLY and honestly, before the
+        #    crash — and both video handlers ask.
+        self.assertIn("_require_video_capable",
+                      inspect.getsource(Services._handle_video))
+        self.assertIn("_require_video_capable",
+                      inspect.getsource(Services._handle_motion_transfer))
+        # 3. A peer engine dying mid-request maps to BACKEND-DOWN (so the
+        #    fall-back-to-local machinery runs), not to a graph rejection.
+        req = inspect.getsource(ComfyUIClient.request)
+        self.assertIn('"unreachable" in json.dumps(detail)', req)
+        self.assertIn("BackendUnavailableError", req)
+
     def test_reservation_and_eager_wiring(self):
         src = inspect.getsource(Services._delegate_wrap)
         self.assertIn("_reserved_peers.add", src)      # book the peer
         self.assertIn("_reserved_peers.discard", src)  # and release it
-        self.assertIn("best_idle_peer(exclude=", src)  # never double-book
+        self.assertIn("exclude=taken", src)            # never double-book
         self.assertIn("exclude", inspect.getsource(Services._peer_gate))
         helper = inspect.getsource(JobQueue._run_helper)
         # Eager mode takes jobs BEHIND the head — the head stays local.
@@ -1523,7 +1549,8 @@ class HonestHandPickedDelegation(unittest.TestCase):
             peers=SimpleNamespace(
                 find_peer=lambda t: find_result,
                 add_peer=lambda h, p, timeout=3.0, pin=True: info,
-                best_idle_peer=lambda exclude=frozenset(): None),
+                best_idle_peer=lambda exclude=frozenset(), video=False: None,
+                VIDEO_INCAPABLE_DEVICES=frozenset({"privateuseone", "cpu"})),
             events=SimpleNamespace(
                 log=lambda lvl, msg: events.append((lvl, msg))),
             queue=queue,
