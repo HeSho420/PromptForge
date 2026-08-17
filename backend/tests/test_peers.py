@@ -2204,5 +2204,87 @@ class MissingNodeHeal(unittest.TestCase):
         self.assertIn("_live_object_info(self._comfy_main)", src)
 
 
+class MiopenTiledRetry(unittest.TestCase):
+    """AMD's MIOpen fails inside VAEDecode where CUDA raises a clean OOM —
+    ComfyUI's own tiled fallback never fires there (measured live: a WAN
+    video sampled fully on the RX 6700 XT and died at the decode). The
+    render is retried once with VAEDecodeTiled instead of being lost."""
+
+    GRAPH = {
+        "9": {"class_type": "KSampler", "inputs": {}},
+        "10": {"class_type": "VAEDecode",
+               "inputs": {"samples": ["9", 0], "vae": ["2", 2]}},
+        "11": {"class_type": "SaveImage", "inputs": {"images": ["10", 0]}},
+    }
+
+    # The wording from the live failure report.
+    MIOPEN = RuntimeError(
+        'ComfyUI execution failed: [["execution_error", {"node_id": "10", '
+        '"node_type": "VAEDecode", '
+        '"exception_message": "miopenStatusUnknownError\\n"}]]')
+
+    def test_the_swap_keeps_links_and_fills_tile_params(self):
+        from app.adapters.comfyui import tiled_vae_graph
+
+        tiled = tiled_vae_graph(self.GRAPH)
+        self.assertIsNotNone(tiled)
+        node = tiled["10"]
+        self.assertEqual(node["class_type"], "VAEDecodeTiled")
+        self.assertEqual(node["inputs"]["samples"], ["9", 0])
+        self.assertEqual(node["inputs"]["vae"], ["2", 2])
+        self.assertEqual(node["inputs"]["tile_size"], 256)
+        self.assertEqual(node["inputs"]["temporal_size"], 64)
+        # The original graph is untouched.
+        self.assertEqual(self.GRAPH["10"]["class_type"], "VAEDecode")
+
+    def test_tile_params_follow_the_live_schema(self):
+        from app.adapters.comfyui import tiled_vae_graph
+
+        # An older engine whose tiled decoder has no temporal inputs.
+        info = {"VAEDecodeTiled": {"input": {"required": {
+            "samples": {}, "vae": {}, "tile_size": {}, "overlap": {}}}}}
+        tiled = tiled_vae_graph(self.GRAPH, info)
+        inputs = tiled["10"]["inputs"]
+        self.assertIn("tile_size", inputs)
+        self.assertIn("overlap", inputs)
+        self.assertNotIn("temporal_size", inputs)
+        self.assertNotIn("temporal_overlap", inputs)
+
+    def test_an_engine_without_the_tiled_decoder_declines(self):
+        from app.adapters.comfyui import tiled_vae_graph
+
+        self.assertIsNone(tiled_vae_graph(self.GRAPH, {"KSampler": {}}))
+
+    def test_an_already_tiled_graph_cannot_heal_twice(self):
+        from app.adapters.comfyui import tiled_vae_graph
+
+        tiled = tiled_vae_graph(self.GRAPH)
+        self.assertIsNone(tiled_vae_graph(tiled))
+
+    def test_the_retry_only_answers_miopen_failures(self):
+        from types import SimpleNamespace
+
+        logged: list[str] = []
+        stub = SimpleNamespace(_live_object_info=lambda *a, **k: None)
+        job = SimpleNamespace(log=lambda _lvl, msg: logged.append(msg))
+        out = Services._miopen_tiled_retry(stub, job, self.GRAPH,
+                                           self.MIOPEN)
+        self.assertIsNotNone(out)
+        self.assertEqual(out["10"]["class_type"], "VAEDecodeTiled")
+        self.assertTrue(any("tiled" in m for m in logged))
+        self.assertIsNone(Services._miopen_tiled_retry(
+            stub, job, self.GRAPH, RuntimeError("some other failure")))
+
+    def test_the_hint_replaces_the_wrong_wan_advice(self):
+        self.assertIn("MIOpen", Services._miopen_hint(self.MIOPEN))
+        self.assertIsNone(Services._miopen_hint(RuntimeError("boom")))
+
+    def test_every_render_site_carries_the_retry(self):
+        src = inspect.getsource(Services._render_video_asset)
+        self.assertIn("_miopen_tiled_retry", src)
+        self.assertIn("_miopen_tiled_retry",
+                      inspect.getsource(Services._handle_motion_transfer))
+
+
 if __name__ == "__main__":
     unittest.main()

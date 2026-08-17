@@ -55,6 +55,7 @@ from ..adapters.comfyui import (
     WorkflowRuntimeError,
     WorkflowValidationError,
     build_workflow,
+    tiled_vae_graph,
     validate_workflow,
 )
 from ..adapters.mock import (
@@ -3804,6 +3805,41 @@ class Services:
             self._packs_queued.discard(slug)
             return {"queued": False, "error": "queueing failed"}
 
+    def _miopen_tiled_retry(self, job: Job, graph: dict[str, Any],
+                            exc: Exception) -> dict[str, Any] | None:
+        """When AMD's MIOpen fails inside the VAE decode, hand back a tiled
+        variant of the graph to retry ONCE — or None when this is not that
+        failure (or the graph has no plain VAEDecode to swap).
+
+        Measured live on the RX 6700 XT's native ROCm stack: a WAN video
+        SAMPLED to completion and died only at VAEDecode with
+        `miopenStatusUnknownError`. On CUDA the same pressure raises a
+        clean OOM that ComfyUI answers with its own tiled fallback; on AMD
+        it does not, so the render's last step is where we step in."""
+        if "miopen" not in str(exc).lower():
+            return None
+        tiled = tiled_vae_graph(graph, self._live_object_info())
+        if tiled is None:
+            return None
+        job.log("info", "AMD's GPU library (MIOpen) failed inside the VAE "
+                        "decode — the sampling itself succeeded, so the "
+                        "same render is retried with tiled decoding, which "
+                        "needs far less memory at once")
+        return tiled
+
+    @staticmethod
+    def _miopen_hint(exc: Exception) -> str | None:
+        """An honest message for a miopen failure that survived the tiled
+        retry — the stock 'update ComfyUI for WAN nodes' advice is wrong
+        for this failure and sent the user chasing the wrong fix."""
+        if "miopen" not in str(exc).lower():
+            return None
+        return ("The render failed inside AMD's GPU library (MIOpen) at "
+                "the VAE decode, even after an automatic tiled-decode "
+                "retry. Lower the resolution or clip length and try again "
+                "— and keep the AMD driver current; the native ROCm stack "
+                "on this card is still maturing.")
+
     def _template_runnable(self, task: str) -> tuple[bool, str]:
         """Can this machine run the task's template RIGHT NOW — template
         present, its models downloaded, its memory needs met? The edit
@@ -5297,15 +5333,22 @@ class Services:
         self._free_vram(job)
         self._prepare_graph(job, graph)
         try:
-            out, _pid = self.comfy.run_graph(graph)
-            return out
+            try:
+                out, _pid = self.comfy.run_graph(graph)
+                return out
+            except WorkflowRuntimeError as first:
+                tiled = self._miopen_tiled_retry(job, graph, first)
+                if tiled is None:
+                    raise
+                out, _pid = self.comfy.run_graph(tiled)
+                return out
         except BackendUnavailableError as exc:
             raise self._comfy_died_midrender(job, task, positive, exc) from exc
         except WorkflowRuntimeError as exc:
             self._diagnose_and_record(job, task, positive, str(exc))
             raise PermanentError(
                 f"{task} render failed: "
-                f"{commit_exhausted_hint(str(exc)) or exc}") from exc
+                f"{commit_exhausted_hint(str(exc)) or self._miopen_hint(exc) or exc}") from exc
 
     def _live_object_info(self, engine: Any | None = None) -> dict | None:
         """The live /object_info schema, cached ~5 min PER ENGINE. None when
@@ -8083,8 +8126,15 @@ class Services:
             self._apply_weight_dtype(job, graph)
             self._prepare_heavy_render(job, need_gb=12.0)
             try:
-                prompt_id = self.comfy.submit(graph)
-                data, _fname = self.comfy.wait_for_output_file(prompt_id)
+                try:
+                    prompt_id = self.comfy.submit(graph)
+                    data, _fname = self.comfy.wait_for_output_file(prompt_id)
+                except WorkflowRuntimeError as first:
+                    tiled = self._miopen_tiled_retry(job, graph, first)
+                    if tiled is None:
+                        raise
+                    prompt_id = self.comfy.submit(tiled)
+                    data, _fname = self.comfy.wait_for_output_file(prompt_id)
             except BackendUnavailableError as exc:
                 # ComfyUI vanished mid-render. On this machine that is almost
                 # always the OS killing it during the 6.3 GB text-encoder
@@ -8093,7 +8143,8 @@ class Services:
                 raise self._comfy_died_midrender(
                     job, "motion_transfer", positive, exc) from exc
             except WorkflowRuntimeError as exc:
-                hint = commit_exhausted_hint(str(exc))
+                hint = (commit_exhausted_hint(str(exc))
+                        or self._miopen_hint(exc))
                 self._diagnose_and_record(job, "motion_transfer", positive,
                                           str(exc))
                 raise PermanentError(
@@ -8301,13 +8352,20 @@ class Services:
                                 "If this render fails with OS error 1455, "
                                 "enlarge the Windows paging file or close "
                                 "memory-hungry apps.")
-            prompt_id = self.comfy.submit(graph)
-            data, filename = self.comfy.wait_for_output_file(prompt_id)
+            try:
+                prompt_id = self.comfy.submit(graph)
+                data, filename = self.comfy.wait_for_output_file(prompt_id)
+            except WorkflowRuntimeError as first:
+                tiled = self._miopen_tiled_retry(job, graph, first)
+                if tiled is None:
+                    raise
+                prompt_id = self.comfy.submit(tiled)
+                data, filename = self.comfy.wait_for_output_file(prompt_id)
         except BackendUnavailableError as exc:
             raise self._comfy_died_midrender(job, "video", prompt, exc) from exc
         except WorkflowRuntimeError as exc:
             self._diagnose_and_record(job, "video", prompt, str(exc))
-            hint = commit_exhausted_hint(str(exc))
+            hint = commit_exhausted_hint(str(exc)) or self._miopen_hint(exc)
             if hint:
                 raise PermanentError(f"Video render failed: {hint}") from exc
             raise PermanentError(

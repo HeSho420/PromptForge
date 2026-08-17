@@ -276,6 +276,46 @@ def validate_workflow(graph: dict[str, Any]) -> None:
                         f"Node {node_id} input '{key}' links to missing node {value[0]}.")
 
 
+def tiled_vae_graph(graph: dict[str, Any],
+                    object_info: dict[str, Any] | None = None,
+                    tile_size: int = 256) -> dict[str, Any] | None:
+    """A copy of `graph` with every VAEDecode swapped for VAEDecodeTiled.
+
+    Why this exists: ComfyUI's own decode has an out-of-memory fallback to
+    tiled decoding, but it only recognises CUDA's clean OOM exception. On
+    AMD the same pressure surfaces as `miopenStatusUnknownError` (a bare
+    RuntimeError) inside VAEDecode — measured live on an RX 6700 XT whose
+    WAN video SAMPLED fine and died only at the final decode — so the
+    fallback never fires and the whole render is lost at its last step.
+
+    Tile parameters are filled only when the live VAEDecodeTiled schema
+    (when given) actually declares them, so this works across ComfyUI
+    versions. Returns None when the graph has no plain VAEDecode — which
+    also makes a second heal attempt on an already-tiled graph impossible.
+    """
+    allowed: set[str] | None = None
+    if object_info:
+        spec = object_info.get("VAEDecodeTiled") or {}
+        section = spec.get("input") or {}
+        allowed = set((section.get("required") or {})
+                      | (section.get("optional") or {}))
+        if not allowed:
+            return None  # this engine has no tiled decoder to swap to
+    out = copy.deepcopy(graph)
+    swapped = False
+    for node in out.values():
+        if isinstance(node, dict) and node.get("class_type") == "VAEDecode":
+            node["class_type"] = "VAEDecodeTiled"
+            inputs = node.setdefault("inputs", {})
+            for key, value in (("tile_size", tile_size), ("overlap", 64),
+                               ("temporal_size", 64),
+                               ("temporal_overlap", 8)):
+                if allowed is None or key in allowed:
+                    inputs.setdefault(key, value)
+            swapped = True
+    return out if swapped else None
+
+
 def build_workflow(template: dict[str, Any], params: dict[str, Any]) -> dict[str, Any]:
     """Fill a template's declared parameter slots. Unknown params are
     rejected. A slot may be a single {node, input} or a LIST of them — one
