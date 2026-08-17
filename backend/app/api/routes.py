@@ -54,6 +54,9 @@ def create_app(services: Services | None = None) -> Flask:
             "segmentation_is_mock": services.segmentation.is_mock,
             "llm_local": f"{services.settings.llm_url} ({services.settings.llm_model})",
             "llm_api_fallback": services.settings.llm_api_model or None,
+            # The RESOLVED vision judge ("auto" picks by hardware), so a
+            # glance at /api/health shows which model actually grades.
+            "critic_model": services.critic_model or None,
         })
 
     # -- assets -----------------------------------------------------------------

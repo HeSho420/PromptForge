@@ -63,7 +63,19 @@ Machines: HerlockLaptop2 (RTX 4060 8GB, CUDA) and HerlockGame (RX 6700 XT
 
 ## Implemented improvements (this loop)
 
-- (cycle log begins below)
+- **Cycle 1 (00832db)** Structured outputs: planner replies are now a
+  server-enforced grammar (Ollama JSON schema, verified live on 0.32).
+  complete_with_schema inspects client signatures so every test fake
+  keeps working. Measured 6-prompt live A/B: 6/6 → 6/6 (no regression;
+  the win is the guaranteed tail + the OPERATION_TASK enum). 910 tests.
+  Learned: the engineered plan prompt was already strong on happy paths —
+  future schema claims must measure tails, not means.
+- **Cycle 2 (in progress)** Vision judge llava → qwen2.5-vl: "auto"
+  default resolves by hardware (7B ≥6 GB VRAM or ≥12 GB RAM, else 3B),
+  explicit names honored, CriticChain keeps llava as live fallback while
+  autopull fetches the upgrade at startup — the fleet migrates itself.
+  /api/health now reports the resolved judge. A/B on measured llava
+  failure cases (noise, gradient, real photo) pending model download.
 
 ## Rejected / deferred
 

@@ -112,8 +112,11 @@ class Settings:
         default_factory=lambda: int(os.environ.get("PROMPTFORGE_WORKFLOW_REPAIRS", "2"))
     )
     # Vision model (Ollama) that judges photorealism of results; "" disables.
+    # "auto" (the default) picks by hardware — qwen2.5-vl 7B on machines
+    # with >=6 GB VRAM or >=12 GB RAM, 3B below — with llava as the live
+    # fallback while the model downloads. Any explicit name is used as-is.
     critic_model: str = field(
-        default_factory=lambda: os.environ.get("PROMPTFORGE_CRITIC_MODEL", "llava")
+        default_factory=lambda: os.environ.get("PROMPTFORGE_CRITIC_MODEL", "auto")
     )
     # Minimum acceptable realism score (1-10); below it a strategy change is tried.
     critic_min_score: float = field(

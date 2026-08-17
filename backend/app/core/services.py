@@ -89,6 +89,7 @@ from .llm import (
     LLMUnavailableError,
     LocalLLM,
     complete_with_schema,
+    ollama_autopull,
     ollama_is_up,
     ollama_unload_all,
 )
@@ -1102,9 +1103,22 @@ class Services:
             _ThreadBoundLLM(self), self.model_search, self.downloader,
             self.registry, trust=self.trust,
             max_auto_bytes=max_auto_download_bytes(self.hardware))
-        self.critic = (
-            ImageCritic(self.settings.llm_url, self.settings.critic_model)
-            if self.settings.critic_model else None)
+        # The vision judge. "auto" resolves by hardware to qwen2.5-vl —
+        # llava (the old default) was MEASURED hallucinating: a 1/10
+        # garbage render got a 100% checklist, a blank gradient scored
+        # 40% accuracy; the keep-best wreckage veto exists because of it.
+        # During migration the new model may not be pulled yet, so llava
+        # stays as the chain's fallback: the first checks still answer
+        # while autopull fetches the upgrade in the background.
+        self.critic_model = self._resolve_critic_model()
+        if not self.critic_model:
+            self.critic = None
+        elif self.critic_model == "llava":
+            self.critic = ImageCritic(self.settings.llm_url, "llava")
+        else:
+            self.critic = CriticChain(
+                ImageCritic(self.settings.llm_url, self.critic_model),
+                ImageCritic(self.settings.llm_url, "llava"))
         self.experience = ExperienceStore(self.db)
         self.model_index = ModelIndex(self.db, self.model_search)
         # Per-model capability notes (researched online, LLM-distilled,
@@ -1275,6 +1289,20 @@ class Services:
         except (OSError, json.JSONDecodeError):
             pass  # applies for this run even if persisting failed
 
+    def _resolve_critic_model(self) -> str:
+        """The vision judge for THIS machine. Explicit names ("llava",
+        "qwen2.5vl:32b", anything) are honored verbatim; "" stays
+        disabled; "auto" picks by hardware. The 7B is unloaded before
+        every render like all Ollama models, so VRAM fit only has to
+        cover the judging moments between renders."""
+        configured = (self.settings.critic_model or "").strip()
+        if configured != "auto":
+            return configured
+        hw = self.hardware
+        if hw.vram_gb >= 6 or hw.ram_gb >= 12:
+            return "qwen2.5vl:7b"
+        return "qwen2.5vl:3b"
+
     def _build_llm(self) -> LLMClient:
         local = LocalLLM(self.settings.llm_url, self.settings.llm_model)
         api = (ClaudeLLM(self.settings.llm_api_model)
@@ -1312,6 +1340,16 @@ class Services:
                 workers=self.COMBINE_WORKERS
                 if self.settings.lan_combine else 1,
                 eager=lambda: self.settings.lan_combine)
+        # Make sure the vision judge is actually on disk. `ollama pull` of
+        # a present model is a near-instant no-op; a missing one downloads
+        # in the background while the critic chain's llava fallback keeps
+        # quality checks answering — this is what migrates every machine
+        # to the new judge without a single failed check.
+        if self.critic_model and self.settings.inpaint_backend != "mock":
+            try:
+                ollama_autopull(self.critic_model)
+            except Exception:  # noqa: BLE001 — the 404 path re-triggers it
+                pass
         # Reclaim disk for images deleted in previous sessions.
         try:
             purged = self.store.purge_trash()
@@ -1895,9 +1933,9 @@ class Services:
             LocalLLM(peer_llm_base, self.settings.llm_model,
                      autopull=False),
             self._llm_main)
-        if self._critic_main is not None and self.settings.critic_model:
+        if self._critic_main is not None and self.critic_model:
             self._critic_tls.client = CriticChain(
-                ImageCritic(peer_llm_base, self.settings.critic_model),
+                ImageCritic(peer_llm_base, self.critic_model),
                 self._critic_main)
         job.log("info", f"[peer] the whole job runs on '{peer.name}' — "
                         "planning and quality checks included")

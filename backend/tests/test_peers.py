@@ -1561,6 +1561,7 @@ class HonestHandPickedDelegation(unittest.TestCase):
             _critic_tls=_threading.local(),
             _llm_main=SimpleNamespace(source="local"),
             _critic_main=None,
+            critic_model="",
             _on_missing_node=lambda exc, client: None,
             # Combine-mode plumbing the wrap now uses on every path.
             _reserved_peers=set(),
@@ -2202,6 +2203,35 @@ class MissingNodeHeal(unittest.TestCase):
     def test_pack_status_reads_this_machines_engine(self):
         src = inspect.getsource(Services.node_pack_report)
         self.assertIn("_live_object_info(self._comfy_main)", src)
+
+
+class CriticSelection(unittest.TestCase):
+    """'auto' picks the vision judge by hardware; explicit names are
+    honored verbatim; the wrap uses the RESOLVED name, never 'auto'."""
+
+    @staticmethod
+    def _resolve(configured, vram, ram):
+        from types import SimpleNamespace
+        stub = SimpleNamespace(
+            settings=SimpleNamespace(critic_model=configured),
+            hardware=SimpleNamespace(vram_gb=vram, ram_gb=ram))
+        return Services._resolve_critic_model(stub)
+
+    def test_auto_picks_by_hardware(self):
+        self.assertEqual(self._resolve("auto", 8.0, 15.7), "qwen2.5vl:7b")
+        self.assertEqual(self._resolve("auto", 0.0, 64.0), "qwen2.5vl:7b")
+        self.assertEqual(self._resolve("auto", 2.0, 8.0), "qwen2.5vl:3b")
+
+    def test_explicit_names_and_disabled_pass_through(self):
+        self.assertEqual(self._resolve("llava", 8.0, 16.0), "llava")
+        self.assertEqual(self._resolve("qwen2.5vl:32b", 24.0, 64.0),
+                         "qwen2.5vl:32b")
+        self.assertEqual(self._resolve("", 8.0, 16.0), "")
+
+    def test_delegation_wrap_uses_the_resolved_name(self):
+        src = inspect.getsource(Services._delegate_wrap)
+        self.assertIn("self.critic_model", src)
+        self.assertNotIn("self.settings.critic_model", src)
 
 
 class MiopenTiledRetry(unittest.TestCase):
