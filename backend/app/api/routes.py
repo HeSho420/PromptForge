@@ -93,15 +93,15 @@ def create_app(services: Services | None = None) -> Flask:
     def promote_version(version_id: str):
         """'Continue from this result': the version becomes the asset's
         working image, so the next edit/mask/video builds on it instead of
-        the original upload. Reversible â€” the original is version-labelled
+        the original upload. Reversible — the original is version-labelled
         'original' and can be promoted back."""
         asset = services.store.promote_version(version_id)
         if asset is None:
             return _error(404, "not_found",
-                          "Nothing to continue from â€” unknown version, a mask "
+                          "Nothing to continue from — unknown version, a mask "
                           "artifact, or its file is missing.")
         services.invalidate_asset_caches(asset.id)
-        services.events.log("info", f"Continuing from result {version_id} â€” it "
+        services.events.log("info", f"Continuing from result {version_id} — it "
                                     f"is now the working image of {asset.filename}")
         return jsonify(asset.to_dict())
 
@@ -132,7 +132,7 @@ def create_app(services: Services | None = None) -> Flask:
         deleted = [a.id for a in services.store.list_assets()
                    if services.store.delete_asset(a.id)]
         services.events.log("info", f"Gallery cleared ({len(deleted)} images "
-                                    "moved to trash â€” undo available)")
+                                    "moved to trash — undo available)")
         return jsonify({"deleted": deleted})
 
     # -- masks --------------------------------------------------------------------
@@ -221,7 +221,7 @@ def create_app(services: Services | None = None) -> Flask:
     def update_status():
         """Where this install stands against the git remote.
 
-        ?fetch=0 skips the network fetch and answers from the last one â€”
+        ?fetch=0 skips the network fetch and answers from the last one —
         the Settings page polls that way to stay instant."""
         fetch = request.args.get("fetch", "1") not in ("0", "false")
         return jsonify(services.updates.status(fetch=fetch))
@@ -329,7 +329,7 @@ def create_app(services: Services | None = None) -> Flask:
 
     @api.post("/peers/probe")
     def peers_probe():
-        """Connect to a peer by address â€” for networks where the UDP
+        """Connect to a peer by address — for networks where the UDP
         discovery broadcasts never arrive (firewalls, AP isolation)."""
         body = request.get_json(silent=True) or {}
         host = str(body.get("host") or "").strip()
@@ -454,7 +454,7 @@ def create_app(services: Services | None = None) -> Flask:
         avatar_payload: dict = {
             "asset_ids": asset_ids, "consent": True,
             "name": (body.get("name") or "").strip() or None,
-            # Both default ON â€” they are what makes the mesh look like the
+            # Both default ON — they are what makes the mesh look like the
             # person and like a whole person. Off is a deliberate choice: bare
             # geometry is easier to sculpt on, and a body the model invented
             # below the crop is a guess you may not want in your file.
@@ -589,7 +589,7 @@ def create_app(services: Services | None = None) -> Flask:
     def delete_job(job_id: str):
         if not services.queue.delete(job_id):
             return _error(409, "not_deletable",
-                          "Running jobs can't be deleted â€” cancel first.")
+                          "Running jobs can't be deleted — cancel first.")
         return jsonify({"deleted": job_id})
 
     @api.post("/jobs/clear")
@@ -628,7 +628,7 @@ def create_app(services: Services | None = None) -> Flask:
     def list_events():
         """Merged real-time execution log: system events (health monitor,
         restarts) + every job's log lines, newest last. LLM-reasoning lines
-        are filtered out â€” this stream shows what the app is DOING."""
+        are filtered out — this stream shows what the app is DOING."""
         limit = min(int(request.args.get("limit", 300)), 500)
         merged = list(services.events.list())
         for job in services.queue.list()[:30]:
@@ -644,7 +644,7 @@ def create_app(services: Services | None = None) -> Flask:
     def clear_events():
         """Delete the Behind-the-Scenes log: the system event buffer AND the
         stored log lines of every non-running job (the stream merges both).
-        Job records themselves â€” prompts, states, results â€” are kept."""
+        Job records themselves — prompts, states, results — are kept."""
         events_cleared = services.events.clear()
         jobs_stripped = services.queue.clear_logs()
         services.events.log("info", "Behind-the-Scenes log deleted by the "
@@ -656,8 +656,8 @@ def create_app(services: Services | None = None) -> Flask:
     @api.delete("/history/prompts")
     def clear_prompt_history():
         """Delete the prompt history: every finished (completed / failed /
-        cancelled) job record â€” including its prompt and logs, in memory AND
-        across the whole SQLite history â€” plus the verbatim prompt text kept
+        cancelled) job record — including its prompt and logs, in memory AND
+        across the whole SQLite history — plus the verbatim prompt text kept
         in the workflow-learning memory. Pending and running jobs are
         untouched, and prompts already saved into gallery recipe cards stay
         with their images."""
@@ -708,7 +708,7 @@ def create_app(services: Services | None = None) -> Flask:
             log.warning("Safety block (workflow run): category=%s", verdict.category)
             return _error(422, f"safety_{verdict.category}", verdict.reason or "Blocked.")
         # "make 4 images of X" queues 4 SEQUENTIAL renders (the hardware
-        # rarely batches) â€” each with its own seed, appearing in the gallery
+        # rarely batches) — each with its own seed, appearing in the gallery
         # as they finish.
         count, cleaned = (quality.count_request(prompt)
                           if task == "generate" else (1, prompt))
@@ -723,7 +723,7 @@ def create_app(services: Services | None = None) -> Flask:
             extra_ids = [services.queue.enqueue("workflow", dict(payload)).id
                          for _ in range(count - 1)]
             services.events.log(
-                "info", f"Queued {count} renders for \"{cleaned[:80]}\" â€” "
+                "info", f"Queued {count} renders for \"{cleaned[:80]}\" — "
                         "they run one after another")
             out = job.to_dict()
             out.update({"batch_count": count,
@@ -734,7 +734,7 @@ def create_app(services: Services | None = None) -> Flask:
     # -- runtime settings (Civitai token) -----------------------------------------
     @api.get("/settings")
     def get_settings():
-        # Never echo the token itself â€” only whether one is configured.
+        # Never echo the token itself — only whether one is configured.
         return jsonify({
             "civitai_token_set": bool(services.settings.civitai_token),
             "lan_combine": bool(services.settings.lan_combine),
@@ -767,7 +767,7 @@ def create_app(services: Services | None = None) -> Flask:
         try:
             saved = services.save_candidate(
                 cand_id, live_test=bool(body.get("live_test", True)))
-        except Exception as exc:  # noqa: BLE001 â€” surface the reason
+        except Exception as exc:  # noqa: BLE001 — surface the reason
             return _error(422, "approve_failed", str(exc))
         return jsonify(saved), 201
 
@@ -865,7 +865,7 @@ def create_app(services: Services | None = None) -> Flask:
     @api.get("/nodepacks")
     def list_node_packs():
         """Curated ComfyUI node packs with PROBED status (absent/installed/
-        active/broken) â€” each unlocks a specific PromptForge capability."""
+        active/broken) — each unlocks a specific PromptForge capability."""
         return jsonify(services.node_pack_report())
 
     @api.post("/nodepacks/<name>/install")

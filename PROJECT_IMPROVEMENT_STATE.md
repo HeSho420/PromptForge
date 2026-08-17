@@ -43,7 +43,8 @@ Machines: HerlockLaptop2 (RTX 4060 8GB, CUDA) and HerlockGame (RX 6700 XT
    mode) can hit "database is locked" instead of waiting.
 5. Peer endpoints have no shared-secret auth (home-LAN trust model —
    acceptable for now, revisit before any commercial positioning).
-6. routes.py carries pre-existing em-dash mojibake in a few strings.
+6. ~~routes.py em-dash mojibake~~ FIXED (cycle 4): 18 double-encoded
+   em-dashes repaired in user-facing API messages.
 
 ## Improvement backlog (scored: impact/user value/difficulty/risk)
 
@@ -56,7 +57,9 @@ Machines: HerlockLaptop2 (RTX 4060 8GB, CUDA) and HerlockGame (RX 6700 XT
 - Peer pairing secret (auth for /pf-peer/*): 6/5/6/5 — design carefully,
   must not break existing fleet on rolling update.
 - Startup/latency profiling pass (unmeasured): 5/5/3/2.
-- Frontend bundle split (Viewer3D 631 kB chunk warning): 3/4/3/2.
+- ~~Frontend bundle split~~ VERIFIED ALREADY DONE: Viewer3D is
+  React.lazy-loaded (ResultView.tsx) — the 631 kB chunk only loads when
+  a 3D result renders. Closed without change.
 - Adherence: GroundingDINO text-grounded masks landed earlier; extend
   mask_verdict telemetry into Behind-the-Scenes: 5/5/4/2.
 - routes.py mojibake cleanup: 2/2/1/1.
