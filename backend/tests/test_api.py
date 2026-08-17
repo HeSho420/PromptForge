@@ -58,6 +58,34 @@ class ApiIntegrationTests(unittest.TestCase):
         self.assertEqual(data["status"], "ok")
         self.assertTrue(data["inpaint_is_mock"])
 
+    def test_the_polled_jobs_list_is_trimmed_but_detail_stays_complete(self):
+        """Measured live: 100 history jobs weighed 4.3 MB per poll, 3.7 MB
+        of it payload.mask_b64 nothing reads from a list. The LIST elides
+        bulk fields and caps finished logs; the detail endpoint and
+        ?full=1 keep everything."""
+        asset_id = self._upload()
+        big_mask = "data:image/png;base64," + "A" * 100_000
+        resp = self.client.post("/api/edits", json={
+            "asset_id": asset_id, "prompt": "change the sky",
+            "mask_b64": big_mask})
+        self.assertEqual(resp.status_code, 202)
+        job_id = resp.get_json()["id"]
+        self._wait_job(job_id)
+
+        listed = next(j for j in self.client.get("/api/jobs").get_json()
+                      if j["id"] == job_id)
+        self.assertEqual(listed["payload"]["mask_b64"], "<elided from list>")
+        self.assertLessEqual(len(listed["logs"]), 3)
+
+        full_row = next(
+            j for j in self.client.get("/api/jobs?full=1").get_json()
+            if j["id"] == job_id)
+        self.assertEqual(full_row["payload"]["mask_b64"], big_mask)
+
+        detail = self.client.get(f"/api/jobs/{job_id}").get_json()
+        self.assertEqual(detail["payload"]["mask_b64"], big_mask)
+        self.assertGreater(len(detail["logs"]), 3)
+
     def test_full_edit_flow_creates_before_and_after(self):
         asset_id = self._upload()
 

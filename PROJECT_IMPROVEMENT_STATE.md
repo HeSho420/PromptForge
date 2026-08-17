@@ -118,12 +118,26 @@ Machines: HerlockLaptop2 (RTX 4060 8GB, CUDA) and HerlockGame (RX 6700 XT
 - Quality-threshold re-tune after the judge swap — MEASURED as
   unnecessary (cycle 5) and closed without churn.
 
+- **Cycle 6 (this commit)** Profiling baseline + the whale it found.
+  Cold start → healthy: 3.65 s. Warm medians: health 25 ms, models
+  75 ms, peers 45 ms, events 45 ms, assets 215 ms, gallery ~495 ms,
+  jobs LIST **4.25 MB / poll** — 3.7 MB of it payload.mask_b64
+  (historical hand-drawn masks) plus finished jobs' full logs, polled
+  every few seconds by the UI. Fix: the LIST elides mask_b64 and caps
+  finished jobs' logs to the tail (live jobs keep full logs — the
+  queue dock reads status from them); /api/jobs/<id> and ?full=1 stay
+  complete. MEASURED: 4,253,567 → 139,867 bytes (30x), 50 → 8.5 ms.
+  915 tests OK. Remaining latency candidates: gallery ~495 ms and
+  assets ~215 ms over 464 assets (per-file existence checks suspected
+  — measure before touching).
+
 ## Next priorities
 
 1. Live E2Es when HerlockGame reappears: miopen tiled-VAE retry (video),
    missing-node heal (pinned background edit), and confirm its critic
    auto-migrates to qwen2.5vl:7b (64 GB machine → 7B tier).
-2. Startup/latency profiling baseline (never measured).
+2. Gallery/assets endpoint latency (~495/215 ms over 464 assets) —
+   profile the per-file checks before optimizing.
 3. Peer pairing secret for /pf-peer/*: design the rolling migration
    first (old peers must not be locked out mid-fleet-update).
 4. Backlog: appearance-question site (services ~8659) could take a loose
