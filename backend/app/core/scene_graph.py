@@ -17,6 +17,7 @@ from typing import Any, cast
 
 from PIL import Image
 
+from .critic import ask_with_schema
 from .quality import _parse_json
 
 # 3x3 grid names so the graph, placement masks and targeted masks all speak
@@ -41,6 +42,47 @@ image and reply with ONLY JSON:
    "size": "<small|medium|large>"}]}
 List the 1-6 most prominent, editable objects. Be concrete and factual —
 no opinions, no marketing. Ground everything in what is actually visible."""
+
+# The same shape as an enforced grammar (Ollama structured outputs): the
+# scene graph feeds masking and placement, so a misshapen reply used to
+# silently degrade every downstream decision to the minimal graph.
+_SCENE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "scene": {"type": "string"},
+        "setting": {"type": "string",
+                    "enum": ["indoor", "outdoor", "studio", "street",
+                             "nature", "other"]},
+        "lighting": {"type": "string"},
+        "perspective": {"type": "string",
+                        "enum": ["eye-level", "low-angle", "high-angle",
+                                 "close-up", "wide"]},
+        "has_person": {"type": "boolean"},
+        "objects": {
+            "type": "array", "maxItems": 6,
+            "items": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "location": {"type": "string",
+                                 "enum": ["top-left", "top-center",
+                                          "top-right", "center-left",
+                                          "center", "center-right",
+                                          "bottom-left", "bottom-center",
+                                          "bottom-right"]},
+                    "size": {"type": "string",
+                             "enum": ["small", "medium", "large"]},
+                },
+                "required": ["name", "location", "size"],
+            },
+        },
+    },
+    # ALL fields required: a grammar-constrained model omits anything
+    # optional (measured live — setting/perspective came back empty until
+    # they were required here).
+    "required": ["scene", "setting", "lighting", "perspective",
+                 "has_person", "objects"],
+}
 
 
 def _palette(image: Image.Image, k: int = 5) -> list[list[int]]:
@@ -77,7 +119,8 @@ def build(image: Image.Image, critic: Any,
     if critic is None or not hasattr(critic, "ask"):
         return graph
     try:
-        data = _parse_json(critic.ask(image, _SCENE_SYSTEM))
+        data = _parse_json(ask_with_schema(critic, image, _SCENE_SYSTEM,
+                                           _SCENE_SCHEMA))
     except Exception:  # noqa: BLE001 — analysis is a bonus, never a blocker
         return graph
     if not isinstance(data, dict):

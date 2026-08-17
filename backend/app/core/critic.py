@@ -11,6 +11,7 @@ without the check (logged, never fabricated).
 from __future__ import annotations
 
 import base64
+import inspect
 import io
 import json
 import re
@@ -21,6 +22,25 @@ from dataclasses import dataclass
 from typing import Any
 
 from PIL import Image
+
+
+def ask_with_schema(critic: Any, image: Any, question: str,
+                    schema: dict[str, Any] | None) -> str:
+    """critic.ask with a JSON schema when the critic supports it.
+
+    The vision twin of llm.complete_with_schema: shape enforcement is an
+    upgrade, never a requirement, so every scripted test critic with the
+    plain (image, question) signature keeps working unconstrained. The
+    signature is inspected rather than TypeError-probed — an error raised
+    INSIDE a real ask must never be mistaken for 'no schema support'."""
+    if schema is not None:
+        try:
+            supports = "schema" in inspect.signature(critic.ask).parameters
+        except (TypeError, ValueError):
+            supports = False
+        if supports:
+            return critic.ask(image, question, schema=schema)
+    return critic.ask(image, question)
 
 CRITIC_PROMPT = """Rate how realistic and photoreal this image looks for the \
 request: "{prompt}".
@@ -63,11 +83,14 @@ class ImageCritic:
         self.timeout_s = timeout_s
         self._post = http_post or _http_post_json
 
-    def ask(self, image: Image.Image, question: str) -> str:
+    def ask(self, image: Image.Image, question: str,
+            schema: dict[str, Any] | None = None) -> str:
         """Generic vision question against the local model; returns raw text
         (JSON-formatted when the question demands it). Used for critique and
-        for view-angle classification in the avatar pipeline."""
-        return self._vision(image, question, force_json=True)
+        for view-angle classification in the avatar pipeline. `schema`
+        (a JSON Schema) upgrades "please answer as JSON" into a grammar the
+        server enforces — the reply cannot be misshapen."""
+        return self._vision(image, question, force_json=True, schema=schema)
 
     def describe(self, image: Image.Image, question: str) -> str:
         """Free-text vision answer (no JSON forcing) — scene descriptions
@@ -75,7 +98,8 @@ class ImageCritic:
         return self._vision(image, question, force_json=False)
 
     def _vision(self, image: Image.Image, question: str,
-                force_json: bool) -> str:
+                force_json: bool,
+                schema: dict[str, Any] | None = None) -> str:
         buf = io.BytesIO()
         # Bound the payload: the model doesn't need full resolution.
         img = image.convert("RGB")
@@ -92,7 +116,9 @@ class ImageCritic:
                 "images": [b64],
             }],
         }
-        if force_json:
+        if schema is not None:
+            payload["format"] = schema
+        elif force_json:
             payload["format"] = "json"
         try:
             data = self._post(f"{self.native_url}/api/chat", payload, self.timeout_s)
@@ -111,8 +137,21 @@ class ImageCritic:
                 TypeError, json.JSONDecodeError) as exc:
             raise CriticUnavailable(f"Critic model unavailable: {exc}") from exc
 
+    # The critique reply as an enforced grammar: score must be a number,
+    # issues must be strings. The bare-number salvage below stays for the
+    # unconstrained paths (older servers, scripted fakes).
+    CRITIQUE_SCHEMA = {
+        "type": "object",
+        "properties": {
+            "score": {"type": "number"},
+            "issues": {"type": "array", "items": {"type": "string"}},
+        },
+        "required": ["score"],
+    }
+
     def critique(self, image: Image.Image, prompt: str) -> Critique:
-        text = self.ask(image, CRITIC_PROMPT.format(prompt=prompt[:400]))
+        text = self.ask(image, CRITIC_PROMPT.format(prompt=prompt[:400]),
+                        schema=self.CRITIQUE_SCHEMA)
         try:
             parsed = json.loads(text)
             score = float(parsed["score"])
@@ -149,8 +188,9 @@ class CriticChain:
         except Exception:  # noqa: BLE001 — any peer failure means "check here"
             return getattr(self.fallback, name)(*args, **kwargs)
 
-    def ask(self, image: Image.Image, question: str) -> str:
-        return self._call("ask", image, question)
+    def ask(self, image: Image.Image, question: str,
+            schema: dict[str, Any] | None = None) -> str:
+        return self._call("ask", image, question, schema=schema)
 
     def describe(self, image: Image.Image, question: str) -> str:
         return self._call("describe", image, question)

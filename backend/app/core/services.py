@@ -68,7 +68,13 @@ from ..config import PROJECT_ROOT, Settings
 from . import eta, motion, node_packs, quality
 from . import scene_graph as scene_module
 from . import video as video_io
-from .critic import CriticChain, CriticUnavailable, Critique, ImageCritic
+from .critic import (
+    CriticChain,
+    CriticUnavailable,
+    Critique,
+    ImageCritic,
+    ask_with_schema,
+)
 from .db import Database
 from .experience import ExperienceStore
 from .hardware import _probe_gpu_registry as hw_gpu_registry  # noqa: E501
@@ -8505,10 +8511,18 @@ class Services:
         if self.critic is None:
             return "unknown"
         try:
-            text = self.critic.ask(image, (
+            # The enum includes "unknown" on purpose: a schema without an
+            # escape hatch would force the model to invent a bin when the
+            # photo genuinely does not show one.
+            text = ask_with_schema(self.critic, image, (
                 "From which side is the person in this photo captured? Reply "
                 "with ONLY JSON: {\"view\": \"<one of: "
-                + ", ".join(self.VIEW_BINS) + ">\"}"))
+                + ", ".join(self.VIEW_BINS) + ">\"}"),
+                {"type": "object",
+                 "properties": {"view": {
+                     "type": "string",
+                     "enum": [*self.VIEW_BINS, "unknown"]}},
+                 "required": ["view"]})
             view = str(json.loads(text).get("view", "")).strip().lower()
             return view if view in self.VIEW_BINS else "unknown"
         except (CriticUnavailable, json.JSONDecodeError, AttributeError):

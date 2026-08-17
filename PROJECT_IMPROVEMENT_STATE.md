@@ -70,12 +70,26 @@ Machines: HerlockLaptop2 (RTX 4060 8GB, CUDA) and HerlockGame (RX 6700 XT
   the win is the guaranteed tail + the OPERATION_TASK enum). 910 tests.
   Learned: the engineered plan prompt was already strong on happy paths —
   future schema claims must measure tails, not means.
-- **Cycle 2 (in progress)** Vision judge llava → qwen2.5-vl: "auto"
-  default resolves by hardware (7B ≥6 GB VRAM or ≥12 GB RAM, else 3B),
-  explicit names honored, CriticChain keeps llava as live fallback while
-  autopull fetches the upgrade at startup — the fleet migrates itself.
-  /api/health now reports the resolved judge. A/B on measured llava
-  failure cases (noise, gradient, real photo) pending model download.
+- **Cycle 2 (9a94a02)** Vision judge llava → qwen2.5-vl: "auto" default
+  resolves by hardware (7B ≥6 GB VRAM or ≥12 GB RAM, else 3B), explicit
+  names honored, CriticChain keeps llava as live fallback while autopull
+  fetches the upgrade at startup — the fleet migrates itself.
+  /api/health reports the resolved judge. MEASURED A/B: noise 5→1,
+  blank gradient 8→1, real photo 8→9. llava had ZERO separation between
+  a gradient and a photo; qwen2.5-vl separates by 8 points. 913 tests.
+  Process lesson (recorded the hard way): the suite's source-pin tests
+  read line numbers from DISK — never edit the tree while it runs (a
+  mid-run edit produced 35 phantom failures).
+- **Cycle 3 (this commit)** Schema-constrained vision judging:
+  ImageCritic.ask(schema=) + ask_with_schema (signature-inspecting twin
+  of complete_with_schema) at all five vision sites — critique
+  (score/issues), scene graph (full shape, live-verified richer than
+  llava era: 6 concrete objects + valid enums), placement (cell 1-9 +
+  size enum), view classifier (bin enum + "unknown" escape hatch),
+  checklist probe (key-only schema; the answer stays free text so the
+  anti-rubber-stamp design survives). Live lesson encoded in the scene
+  schema: grammar-constrained models OMIT non-required fields — require
+  everything you want answered. 914 tests, lint clean.
 
 ## Rejected / deferred
 

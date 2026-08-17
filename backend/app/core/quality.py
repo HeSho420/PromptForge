@@ -32,6 +32,7 @@ from typing import Any, cast
 
 from PIL import Image, ImageChops, ImageFilter, ImageStat
 
+from .critic import ask_with_schema
 from .llm import LLMClient, LLMError, complete_with_schema
 
 SCORE_KEYS = ("realism", "prompt_accuracy", "identity_preservation",
@@ -1397,8 +1398,8 @@ def propose_placement(critic: Any, image: Image.Image,
     cell, obj_size = 5, "medium"
     if critic is not None:
         try:
-            reply = critic.ask(
-                image,
+            reply = ask_with_schema(
+                critic, image,
                 context
                 + "The user wants to: " + instruction[:200] + "\n"
                 "Imagine the photo divided into a 3x3 grid numbered 1-9 "
@@ -1409,7 +1410,13 @@ def propose_placement(critic: Any, image: Image.Image,
                 "hat), medium for a person-part-sized object, large only for "
                 "something that dominates the scene. Reply ONLY JSON: "
                 '{"cell": <1-9 best spot for the new content>, '
-                '"size": "<small|medium|large>"}')
+                '"size": "<small|medium|large>"}',
+                {"type": "object",
+                 "properties": {
+                     "cell": {"type": "integer", "minimum": 1, "maximum": 9},
+                     "size": {"type": "string",
+                              "enum": ["small", "medium", "large"]}},
+                 "required": ["cell", "size"]})
             data = _parse_json(reply)
             if data:
                 cell = int(data.get("cell", 5))
@@ -2381,14 +2388,20 @@ def verify_adherence(critic: Any, image: Image.Image, prompt: str,
 
     Returns {"accuracy", "missing", "met", "source": "checklist"}, or None when
     the examiner is unavailable or answered too little to be trusted."""
-    ask = getattr(critic, "ask", None)
-    if not checklist or ask is None:
+    if not checklist or getattr(critic, "ask", None) is None:
         return None
 
     def probe(check: dict[str, str]) -> bool | None:
         try:
-            data = _parse_json(ask(image, _PROBE_QUESTION.format(
-                probe=check["probe"])))
+            # The KEY is enforced by schema; the answer stays free text on
+            # purpose — the probe is description-based exactly so a model
+            # cannot rubber-stamp a yes/no.
+            data = _parse_json(ask_with_schema(
+                critic, image,
+                _PROBE_QUESTION.format(probe=check["probe"]),
+                {"type": "object",
+                 "properties": {"answer": {"type": "string"}},
+                 "required": ["answer"]}))
         except Exception:  # noqa: BLE001 — checking is never a blocker
             return None
         if not isinstance(data, dict) or "answer" not in data:

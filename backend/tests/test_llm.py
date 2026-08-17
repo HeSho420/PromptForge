@@ -247,6 +247,43 @@ class StructuredOutputTests(unittest.TestCase):
         out = FallbackLLM(plain, None).complete("s", "p", schema=self.SCHEMA)
         self.assertEqual(out.text, "ok")
 
+    def test_vision_asks_carry_schemas_too(self):
+        import inspect as _inspect
+
+        from PIL import Image as _Image
+
+        from app.core import scene_graph
+        from app.core.critic import ImageCritic, ask_with_schema
+        from app.core.quality import propose_placement
+        from app.core.services import Services
+
+        seen = {}
+
+        def post(url, payload, timeout):
+            seen["format"] = payload.get("format")
+            return {"message": {"content": '{"score": 9, "issues": []}'}}
+
+        critic = ImageCritic("http://127.0.0.1:9/v1", "m", http_post=post)
+        img = _Image.new("RGB", (8, 8))
+        critic.ask(img, "q", schema=StructuredOutputTests.SCHEMA)
+        self.assertEqual(seen["format"], StructuredOutputTests.SCHEMA)
+        critic.critique(img, "prompt")
+        self.assertEqual(seen["format"], ImageCritic.CRITIQUE_SCHEMA)
+
+        # Plain-signature scripted critics keep working through the helper.
+        class Plain:
+            def ask(self, image, question):
+                return '{"answer": "yes"}'
+
+        self.assertEqual(
+            ask_with_schema(Plain(), img, "q", {"type": "object"}),
+            '{"answer": "yes"}')
+
+        # Every vision judge call site goes through the helper.
+        for fn in (scene_graph.build, propose_placement,
+                   Services._classify_view):
+            self.assertIn("ask_with_schema", _inspect.getsource(fn))
+
     def test_the_planner_asks_with_its_schema(self):
         from app.core.quality import _PLAN_SCHEMA, plan_edit
 
