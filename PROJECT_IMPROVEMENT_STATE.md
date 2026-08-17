@@ -103,8 +103,16 @@ Machines: HerlockLaptop2 (RTX 4060 8GB, CUDA) and HerlockGame (RX 6700 XT
 
 ## Next priorities
 
-1. Structured outputs in the LLM layer (planner first).
-2. Critic model upgrade with measured A/B.
-3. busy_timeout pragma.
-4. Live-verify miopen tiled retry + missing-node E2E when HerlockGame
-   next appears (delegator-side proof possible from this laptop).
+1. Re-measure the quality ladder's thresholds against the NEW judge:
+   quality_min / targets / the wreckage-veto bands were calibrated on
+   llava's compressed scale (it gave a gradient 8/10). qwen2.5-vl uses
+   the full scale honestly — retry pressure and pass rates will have
+   shifted; measure score distributions on real renders, then re-tune.
+2. Live E2Es when HerlockGame reappears: miopen tiled-VAE retry (video),
+   missing-node heal (pinned background edit), and confirm its critic
+   auto-migrates to qwen2.5vl:7b (64 GB machine → 7B tier).
+3. Peer pairing secret for /pf-peer/*: design the rolling migration
+   first (old peers must not be locked out mid-fleet-update).
+4. Startup/latency profiling baseline (never measured).
+5. Backlog: appearance-question site (services ~8659) could take a loose
+   schema; GroundingDINO mask telemetry into Behind-the-Scenes.
