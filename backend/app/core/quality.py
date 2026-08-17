@@ -32,7 +32,7 @@ from typing import Any, cast
 
 from PIL import Image, ImageChops, ImageFilter, ImageStat
 
-from .llm import LLMClient, LLMError
+from .llm import LLMClient, LLMError, complete_with_schema
 
 SCORE_KEYS = ("realism", "prompt_accuracy", "identity_preservation",
               "scene_consistency", "artifact_free", "visual_quality")
@@ -921,6 +921,38 @@ def default_edit_step(prompt: str) -> dict[str, Any]:
     return {**base, "task": "inpaint", "operation": op}
 
 
+# The planner's reply as a grammar the LLM server ENFORCES (Ollama
+# structured outputs). Shape errors — bare objects, missing keys, invented
+# operations — become impossible on servers that support it; everything
+# downstream still normalizes, because older servers and the API fallback
+# answer unconstrained. additionalProperties stays open on purpose: legacy
+# keys ("task") keep working and never fail the grammar.
+_PLAN_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "steps": {
+            "type": "array", "minItems": 1, "maxItems": 3,
+            "items": {
+                "type": "object",
+                "properties": {
+                    "operation": {"type": "string",
+                                  "enum": sorted(OPERATION_TASK)},
+                    "target": {"type": "string"},
+                    "instruction": {"type": "string"},
+                    "mask_adjust": {"type": "string",
+                                    "enum": ["grow", "shrink", "keep"]},
+                    "adjust_px": {"type": "integer"},
+                    "denoise": {"type": "number"},
+                    "reason": {"type": "string"},
+                },
+                "required": ["operation", "instruction"],
+            },
+        },
+    },
+    "required": ["steps"],
+}
+
+
 def plan_edit(llm: LLMClient, prompt: str, has_mask: bool,
               dropped: list[dict[str, Any]] | None = None
               ) -> list[dict[str, Any]] | None:
@@ -934,10 +966,10 @@ def plan_edit(llm: LLMClient, prompt: str, has_mask: bool,
     `dropped`, when given, collects the invented steps pruned from the plan
     (each with a 'why') so the caller can log them."""
     try:
-        reply = llm.complete(
-            _PLAN_SYSTEM,
+        reply = complete_with_schema(
+            llm, _PLAN_SYSTEM,
             f"Request: {prompt}\nUser drew a mask: {'yes' if has_mask else 'no'}",
-            max_tokens=500)
+            max_tokens=500, schema=_PLAN_SCHEMA)
         data = _parse_json(reply.text)
     except LLMError:
         return None

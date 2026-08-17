@@ -18,6 +18,7 @@ as local output.
 """
 from __future__ import annotations
 
+import inspect
 import json
 import os
 import shutil
@@ -85,8 +86,32 @@ class LLMClient(Protocol):
     @property
     def source(self) -> str: ...
 
-    def complete(self, system: str, prompt: str, max_tokens: int = 4096) -> LLMReply:
+    def complete(self, system: str, prompt: str, max_tokens: int = 4096,
+                 schema: dict[str, Any] | None = None) -> LLMReply:
         ...
+
+
+def complete_with_schema(llm: Any, system: str, prompt: str,
+                         max_tokens: int = 4096,
+                         schema: dict[str, Any] | None = None) -> LLMReply:
+    """Call llm.complete, schema-constrained when the client supports it.
+
+    Shape enforcement is an UPGRADE, never a requirement: callers pass a
+    JSON schema here instead of at llm.complete directly so that every
+    scripted test fake (and any third-party client) with the plain
+    (system, prompt, max_tokens) signature keeps working unchanged. The
+    signature is inspected rather than TypeError-probed — a TypeError
+    raised INSIDE a real completion must never be mistaken for 'no schema
+    support' and silently retried without one."""
+    if schema is not None:
+        try:
+            supports = "schema" in inspect.signature(llm.complete).parameters
+        except (TypeError, ValueError):
+            supports = False
+        if supports:
+            return llm.complete(system, prompt, max_tokens=max_tokens,
+                                schema=schema)
+    return llm.complete(system, prompt, max_tokens=max_tokens)
 
 
 # -- local backend (OpenAI-compatible: Ollama, LM Studio, llama.cpp) -----------
@@ -118,7 +143,8 @@ class LocalLLM:
 
     NUM_CTX = 8192  # planner context now carries guides/templates/lessons
 
-    def complete(self, system: str, prompt: str, max_tokens: int = 4096) -> LLMReply:
+    def complete(self, system: str, prompt: str, max_tokens: int = 4096,
+                 schema: dict[str, Any] | None = None) -> LLMReply:
         messages = [
             {"role": "system", "content": system},
             {"role": "user", "content": prompt},
@@ -127,10 +153,18 @@ class LocalLLM:
         # honors num_ctx, and the default 4k window would silently truncate
         # the front of a rich planning context. Non-Ollama servers 404 here
         # and get the OpenAI-compatible request below instead.
+        #
+        # `schema` (a JSON Schema) turns "please answer as JSON" into a
+        # grammar the server ENFORCES token-by-token (Ollama structured
+        # outputs, verified live on 0.32): the reply cannot be misshapen,
+        # which retires a whole class of small-model planning failures.
+        # Servers too old for it 400 → the OpenAI-compat fallback below
+        # still answers, unconstrained.
         native = self.base_url.removesuffix("/v1")
         try:
             data = self._post(native + "/api/chat", {
-                "model": self.model, "stream": False, "format": "json",
+                "model": self.model, "stream": False,
+                "format": schema if schema else "json",
                 "options": {"temperature": 0.2, "num_ctx": self.NUM_CTX,
                             "num_predict": max_tokens},
                 "messages": messages,
@@ -220,7 +254,11 @@ class ClaudeLLM:
         # Zero-arg client: resolves ANTHROPIC_API_KEY / auth profile itself.
         return anthropic.Anthropic()
 
-    def complete(self, system: str, prompt: str, max_tokens: int = 4096) -> LLMReply:
+    def complete(self, system: str, prompt: str, max_tokens: int = 4096,
+                 schema: dict[str, Any] | None = None) -> LLMReply:
+        # `schema` is accepted for interface parity; the API model follows
+        # JSON instructions reliably without a grammar, so it is unused.
+        del schema
         if self._client is None:
             self._client = self._client_factory()
         try:
@@ -311,13 +349,19 @@ class FallbackLLM:
         return self.primary.source if self.primary else (
             self.fallback.source if self.fallback else "none")
 
-    def complete(self, system: str, prompt: str, max_tokens: int = 4096) -> LLMReply:
+    def complete(self, system: str, prompt: str, max_tokens: int = 4096,
+                 schema: dict[str, Any] | None = None) -> LLMReply:
         failures: list[str] = []
         for client in (self.primary, self.fallback):
             if client is None:
                 continue
             try:
-                return client.complete(system, prompt, max_tokens=max_tokens)
+                # Through the schema-aware helper: a chain member without
+                # the parameter (a test fake, a third-party client) still
+                # answers, just unconstrained.
+                return complete_with_schema(client, system, prompt,
+                                            max_tokens=max_tokens,
+                                            schema=schema)
             except LLMRefusedError:
                 raise  # retrying elsewhere won't (and shouldn't) help
             except LLMUnavailableError as exc:

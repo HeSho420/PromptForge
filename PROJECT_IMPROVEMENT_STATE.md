@@ -1,0 +1,81 @@
+# PromptForge — Continuous Improvement State
+
+Working memory for the autonomous improvement loop. Updated after every
+meaningful cycle. (User docs live in docs/PromptForge-Documentation.pdf —
+this file is engineering state, not documentation.)
+
+## Architecture summary (2026-08-17)
+
+Fully-local AI image/video/avatar studio. Flask backend (port 8000, venv
+`backend/.venv`) drives ComfyUI (8188) + Ollama (11434); React/Vite
+frontend served from `frontend/dist` by Flask. SQLite (WAL). Job queue
+with four lanes: main worker, peer-delegation worker pool (combine mode),
+download lane, monitor thread. LAN fabric on 8765/8766: discovery,
+model transfer, render+LLM delegation (whole-job), remote logs, git-based
+auto-update propagation. Self-healing layers: missing models (registry +
+scout + LAN pull), missing Ollama models (autopull), missing node packs
+(install-or-reroute at ComfyUI submit), Kontext/DirectML reroutes, video
+capability gating, miopen tiled-VAE retry, ComfyUI/Ollama crash revival.
+Machines: HerlockLaptop2 (RTX 4060 8GB, CUDA) and HerlockGame (RX 6700 XT
+12GB, native ROCm since 2026-08-16, intermittently powered on).
+
+## Baseline (2026-08-17, commit 43c4dd2)
+
+- Tests: 905 passed, 1 skipped (full suite ~257 s, green with live
+  Ollama + ComfyUI + LAN peer up — that is the required bar)
+- Lint (ruff, app+tests, safety.py excluded): clean
+- Backend health: OK on the required venv interpreter
+- Ollama 0.32.13; ComfyUI local v0.28.0 (CUDA), peer v0.30.2 (ROCm)
+- Known-good live E2E: image edit, background route, delegation with
+  peer-side LLM, model/pack self-heal reroute
+
+## Known problems
+
+1. Critic quality: llava-7B hallucinates (measured: 100% checklist on
+   1/10 garbage; 40% realism on a blank gradient). Wreckage-veto is a
+   band-aid, not a fix.
+2. Planner JSON: format:"json" only — schema shape enforced by prompt
+   begging + salvage parsers; 7B models still misformat under pressure.
+3. HerlockGame video: WAN sampling works on native ROCm; VAE decode hit
+   miopenStatusUnknownError. Tiled retry shipped (43c4dd2) but NOT yet
+   live-proven (machine powered off). Also pending: missing-node E2E.
+4. sqlite: WAL on, but no busy_timeout — concurrent writers (combine
+   mode) can hit "database is locked" instead of waiting.
+5. Peer endpoints have no shared-secret auth (home-LAN trust model —
+   acceptable for now, revisit before any commercial positioning).
+6. routes.py carries pre-existing em-dash mojibake in a few strings.
+
+## Improvement backlog (scored: impact/user value/difficulty/risk)
+
+- [NOW] Ollama structured outputs (JSON schema per call): 9/8/3/2 —
+  verified live on Ollama 0.32; kills the misformat failure class.
+- [NOW] Critic upgrade llava → qwen2.5-vl (tiered, fallback chain):
+  9/9/4/3 — registry confirmed; A/B on known hallucination cases.
+- [NOW] sqlite busy_timeout: 5/4/1/1.
+- Vision judging with schema-constrained replies (rides on both above).
+- Peer pairing secret (auth for /pf-peer/*): 6/5/6/5 — design carefully,
+  must not break existing fleet on rolling update.
+- Startup/latency profiling pass (unmeasured): 5/5/3/2.
+- Frontend bundle split (Viewer3D 631 kB chunk warning): 3/4/3/2.
+- Adherence: GroundingDINO text-grounded masks landed earlier; extend
+  mask_verdict telemetry into Behind-the-Scenes: 5/5/4/2.
+- routes.py mojibake cleanup: 2/2/1/1.
+
+## Implemented improvements (this loop)
+
+- (cycle log begins below)
+
+## Rejected / deferred
+
+- Rewrite of peer HTTP layer to FastAPI/asyncio: working, tested,
+  no measured bottleneck — rejected (rewrite risk > value).
+- Speculative micro-optimizations without measurements — deferred on
+  principle.
+
+## Next priorities
+
+1. Structured outputs in the LLM layer (planner first).
+2. Critic model upgrade with measured A/B.
+3. busy_timeout pragma.
+4. Live-verify miopen tiled retry + missing-node E2E when HerlockGame
+   next appears (delegator-side proof possible from this laptop).

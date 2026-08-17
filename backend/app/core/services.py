@@ -88,6 +88,7 @@ from .llm import (
     LLMRefusedError,
     LLMUnavailableError,
     LocalLLM,
+    complete_with_schema,
     ollama_is_up,
     ollama_unload_all,
 )
@@ -987,9 +988,12 @@ class _ThreadBoundLLM:
     def __init__(self, services: Services):
         self._services = services
 
-    def complete(self, system: str, prompt: str, max_tokens: int = 4096):
-        return self._services.llm.complete(system, prompt,
-                                           max_tokens=max_tokens)
+    def complete(self, system: str, prompt: str, max_tokens: int = 4096,
+                 schema: dict[str, Any] | None = None):
+        # Via the schema-aware helper: services.llm may be a test stub
+        # with the plain signature, which must keep working unchanged.
+        return complete_with_schema(self._services.llm, system, prompt,
+                                    max_tokens=max_tokens, schema=schema)
 
     @property
     def source(self) -> str:

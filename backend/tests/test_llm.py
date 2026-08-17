@@ -183,5 +183,93 @@ class FallbackLLMTests(unittest.TestCase):
             FallbackLLM(None, None).complete("s", "p")
 
 
+class StructuredOutputTests(unittest.TestCase):
+    """A JSON schema turns 'please answer as JSON' into a grammar the
+    server enforces (Ollama structured outputs, verified live on 0.32).
+    Clients without the parameter — every scripted test fake — keep
+    working unconstrained."""
+
+    SCHEMA = {"type": "object", "properties": {"x": {"type": "integer"}},
+              "required": ["x"]}
+
+    def test_local_llm_sends_the_schema_as_format(self):
+        seen = {}
+
+        def post(url, payload, timeout):
+            seen["format"] = payload["format"]
+            return {"model": "m", "message": {"content": "{\"x\": 1}"}}
+
+        llm = LocalLLM("http://localhost:11434/v1", "m", http_post=post)
+        llm.complete("s", "p", schema=self.SCHEMA)
+        self.assertEqual(seen["format"], self.SCHEMA)
+        # Without a schema the plain json mode stays.
+        llm.complete("s", "p")
+        self.assertEqual(seen["format"], "json")
+
+    def test_helper_skips_clients_without_the_parameter(self):
+        from app.core.llm import complete_with_schema
+
+        plain = FakeBackend("local", reply=LLMReply("ok", "m", "local"))
+        out = complete_with_schema(plain, "s", "p", schema=self.SCHEMA)
+        self.assertEqual(out.text, "ok")
+        self.assertEqual(plain.calls, 1)
+
+    def test_helper_passes_the_schema_when_supported(self):
+        from app.core.llm import complete_with_schema
+
+        got = {}
+
+        class SchemaAware:
+            source = "local"
+
+            def complete(self, system, prompt, max_tokens=4096, schema=None):
+                got["schema"] = schema
+                return LLMReply("ok", "m", "local")
+
+        complete_with_schema(SchemaAware(), "s", "p", schema=self.SCHEMA)
+        self.assertEqual(got["schema"], self.SCHEMA)
+
+    def test_fallback_chain_threads_the_schema_through(self):
+        got = {}
+
+        class SchemaAware:
+            source = "local"
+
+            def complete(self, system, prompt, max_tokens=4096, schema=None):
+                got["schema"] = schema
+                return LLMReply("ok", "m", "local")
+
+        FallbackLLM(SchemaAware(), None).complete("s", "p",
+                                                  schema=self.SCHEMA)
+        self.assertEqual(got["schema"], self.SCHEMA)
+        # A plain-signature primary (every old fake) still answers.
+        plain = FakeBackend("local", reply=LLMReply("ok", "m", "local"))
+        out = FallbackLLM(plain, None).complete("s", "p", schema=self.SCHEMA)
+        self.assertEqual(out.text, "ok")
+
+    def test_the_planner_asks_with_its_schema(self):
+        from app.core.quality import _PLAN_SCHEMA, plan_edit
+
+        got = {}
+
+        class SchemaAware:
+            source = "local"
+
+            def complete(self, system, prompt, max_tokens=4096, schema=None):
+                got["schema"] = schema
+                return LLMReply(
+                    '{"steps": [{"operation": "CHANGE_ATTRIBUTE", '
+                    '"instruction": "make the shirt red"}]}', "m", "local")
+
+        steps = plan_edit(SchemaAware(), "make the shirt red", False)
+        self.assertEqual(got["schema"], _PLAN_SCHEMA)
+        self.assertEqual(steps[0]["task"], "inpaint")
+        # The schema's operations are exactly the ones the router knows.
+        from app.core.quality import OPERATION_TASK
+        enum = _PLAN_SCHEMA["properties"]["steps"]["items"][
+            "properties"]["operation"]["enum"]
+        self.assertEqual(set(enum), set(OPERATION_TASK))
+
+
 if __name__ == "__main__":
     unittest.main()
