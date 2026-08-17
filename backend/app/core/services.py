@@ -787,7 +787,11 @@ class _Attempt:
         # checkpoint hijacked the model rung and its realism-1/10 output
         # beat a realism-5/10 image on a hallucinated 100% checklist.
         # (Deliberately un-photoreal requests — flat cartoons — still score
-        # above this floor; 2/10 is wreckage, not style.)
+        # above this floor; 2/10 is wreckage, not style. RE-CALIBRATED for
+        # the qwen2.5-vl judge, 2026-08-17: the critique asks "for the
+        # request", so a proper cartoon render scored 8/10 and a watercolor
+        # 8/10 while pure noise and a corrupted render both pinned at 1/10
+        # — the band holds, with WIDER separation than llava ever gave.)
         wreck_new = self.crit.score if self.crit else None
         wreck_old = other.crit.score if other.crit else None
         if (wreck_new is not None and wreck_new <= 2

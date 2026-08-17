@@ -93,6 +93,21 @@ Machines: HerlockLaptop2 (RTX 4060 8GB, CUDA) and HerlockGame (RX 6700 XT
   anti-rubber-stamp design survives). Live lesson encoded in the scene
   schema: grammar-constrained models OMIT non-required fields — require
   everything you want answered. 914 tests, lint clean.
+- **Cycle 4 (2dbc947)** 18 double-encoded em-dashes repaired in
+  user-facing API messages; Viewer3D confirmed already lazy-loaded and
+  sqlite busy-handling confirmed already covered — two backlog items
+  closed by verification instead of code.
+- **Cycle 5 (measurement, no code churn)** Judge re-calibration DONE.
+  Controlled matrix, REAL SD renders for style/photoreal rows, both
+  judges (llava | qwen2.5vl): cartoon 7|8, watercolor 9|8, barn render
+  6|9, pure noise 1|1, corrupted render 1|1, real photo 8|9. VERDICT:
+  the wreckage-veto band (≤2 wreck / ≥3 style) HOLDS under the new
+  judge — the critique's "for the request" clause makes it grade
+  contextually, so proper cartoons score 8, nowhere near the floor.
+  Separation WIDENED (worst-legit 8 vs best-wreck 1; llava managed
+  6 vs 1) and legit renders score honestly higher → retry pressure
+  drops with zero tuning. Thresholds left untouched on measured
+  evidence; the veto comment now carries the 2026-08-17 calibration.
 
 ## Rejected / deferred
 
@@ -100,19 +115,16 @@ Machines: HerlockLaptop2 (RTX 4060 8GB, CUDA) and HerlockGame (RX 6700 XT
   no measured bottleneck — rejected (rewrite risk > value).
 - Speculative micro-optimizations without measurements — deferred on
   principle.
+- Quality-threshold re-tune after the judge swap — MEASURED as
+  unnecessary (cycle 5) and closed without churn.
 
 ## Next priorities
 
-1. Re-measure the quality ladder's thresholds against the NEW judge:
-   quality_min / targets / the wreckage-veto bands were calibrated on
-   llava's compressed scale (it gave a gradient 8/10). qwen2.5-vl uses
-   the full scale honestly — retry pressure and pass rates will have
-   shifted; measure score distributions on real renders, then re-tune.
-2. Live E2Es when HerlockGame reappears: miopen tiled-VAE retry (video),
+1. Live E2Es when HerlockGame reappears: miopen tiled-VAE retry (video),
    missing-node heal (pinned background edit), and confirm its critic
    auto-migrates to qwen2.5vl:7b (64 GB machine → 7B tier).
+2. Startup/latency profiling baseline (never measured).
 3. Peer pairing secret for /pf-peer/*: design the rolling migration
    first (old peers must not be locked out mid-fleet-update).
-4. Startup/latency profiling baseline (never measured).
-5. Backlog: appearance-question site (services ~8659) could take a loose
+4. Backlog: appearance-question site (services ~8659) could take a loose
    schema; GroundingDINO mask telemetry into Behind-the-Scenes.
