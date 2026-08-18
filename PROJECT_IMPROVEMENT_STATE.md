@@ -181,8 +181,19 @@ Machines: HerlockLaptop2 (RTX 4060 8GB, CUDA) and HerlockGame (RX 6700 XT
 
 Done: 7 singleton/updater/revive, 8 --fast rejected-by-measurement,
 9 delegated-render planner stays warm, 10 hires split, 11 face polish.
+DECIDED (cycle 12a): _face_polish stays FORGE-ONLY — edited photos
+carry REAL people's faces and FaceDetailer REGENERATES what it touches;
+identity preservation outranks detail polish (same doctrine as the
+never-mask-the-face rule). Do not "extend" it to image_edit.
 Candidates, roughly ranked:
-- image_edit final-best should ALSO get _face_polish (forge only now).
+- [NEXT — cycle 12b, scoped] Draft-intent routing: generate_draft_v1
+  EXISTS but nothing routes to it (verified: zero references in
+  quality.py/workflow_ai — the GroundingDINO dormant-engine pattern).
+  Add a deterministic coercion: request-level draft phrases ("quick
+  draft", "rough sketch of", "just a draft/preview") — NOT bare
+  adjectives ("fast car"!) — override triage to the draft template
+  when its speed LoRA is ready. 4-step renders ≈ 4-6x faster on
+  explicit request. Verify LoRA presence gates like _template_runnable.
 - Batched count-requests ("make 4 images" → batch_size on one graph,
   result plumbing for multiple assets per job) — throughput on VRAM
   headroom; render_budget.max_batch exists.
