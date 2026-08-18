@@ -3399,6 +3399,9 @@ class Services:
                                 checkpoint=swap_ckpt
                                 or last_outpaint["checkpoint"],
                                 extra=last_outpaint.get("dirs"))
+                            candidate = self._harmonize_outpaint(
+                                job, candidate, final_input,
+                                last_outpaint.get("dirs"))
                             if swap_ckpt:
                                 tried_ckpts.add(swap_ckpt)
                         else:
@@ -4201,8 +4204,34 @@ class Services:
             except Exception:  # noqa: BLE001 — keep the result we have
                 job.log("info", "[stage] guard — the re-render failed; "
                                 "keeping the first extension")
-        return self._deglyph_outpaint(job, chosen, src, positive, negative,
-                                      checkpoint, dirs)
+        deglyphed = self._deglyph_outpaint(job, chosen, src, positive,
+                                           negative, checkpoint, dirs)
+        return self._harmonize_outpaint(job, deglyphed, src, dirs)
+
+    def _harmonize_outpaint(self, job: Job, image: Image.Image,
+                            src: Image.Image,
+                            dirs: dict[str, int] | None) -> Image.Image:
+        """Exposure continuity across outpaint junctions. The sampler paints
+        plausible margins with its OWN exposure — measured on three
+        independent renders of the same request, the low-frequency colour
+        step across the right junction sat in the top percentile of the
+        image's own strip statistics every time, the recurring
+        "lighting/colour mismatch" of inspection reports. Deterministic and
+        fail-safe (any hiccup returns the render unchanged); it touches the
+        margins and the feather's inland reach only — everything beyond
+        stays byte-identical."""
+        try:
+            pads = self._margin_geometry(image.size, src.size, dirs)
+            fixed, steps = quality.harmonize_margins(image, src, pads)
+        except Exception:  # noqa: BLE001 — the guard must never kill a render
+            return image
+        if steps:
+            pretty = ", ".join(f"{side} {step:.0f}/255"
+                               for side, step in sorted(steps.items()))
+            job.log("info", "[stage] guard — matched the extension's "
+                            "exposure to the picture at the junction "
+                            f"(measured step: {pretty})")
+        return fixed
 
     # Testability seam: the glyph detector, overridable per instance.
     _glyph_rows = staticmethod(quality.glyph_band_rows)

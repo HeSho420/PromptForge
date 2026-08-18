@@ -667,6 +667,9 @@ class MarginPersonGuardTests(unittest.TestCase):
         seq = list(hits_sequence)
         s._render_template_step = render
         s._margin_intruders = lambda image, pre, dirs=None: seq.pop(0)
+        # the harness's flat fakes differ from the flat src, which would
+        # trigger a real harmonization and break object-identity asserts
+        s._harmonize_outpaint = lambda job, img, src, dirs: img
         return renders, outs
 
     class _Job:
@@ -714,6 +717,27 @@ class MarginPersonGuardTests(unittest.TestCase):
         s._guarded_outpaint(self._Job(), Image.new("RGB", (512, 480)),
                             "p", "n", None, real=True, dirs=dirs)
         self.assertEqual([extra for _t, extra in renders], [dirs, dirs])
+
+    def test_guard_hands_the_deglyphed_result_to_harmonize(self):
+        # harmonize runs LAST: it must see the deglyphed image, and its
+        # return value is what the guard hands back
+        s = self._services()
+        self._guard_harness(s, [[]])
+        deglyphed = Image.new("RGB", (704, 480), (1, 2, 3))
+        harmonized = Image.new("RGB", (704, 480), (4, 5, 6))
+        s._deglyph_outpaint = lambda *a, **k: deglyphed
+        seen = []
+
+        def harmonize(job, img, src, dirs):
+            seen.append((img, dirs))
+            return harmonized
+
+        s._harmonize_outpaint = harmonize
+        dirs = {"left": 192, "right": 0, "top": 0, "bottom": 0}
+        got = s._guarded_outpaint(self._Job(), Image.new("RGB", (512, 480)),
+                                  "p", "n", None, real=True, dirs=dirs)
+        self.assertIs(got, harmonized)
+        self.assertEqual(seen, [(deglyphed, dirs)])
 
     def test_deglyph_rerenders_and_restores_the_original_band(self):
         s = self._services()
@@ -784,6 +808,81 @@ class MarginPersonGuardTests(unittest.TestCase):
         centered = Services._pad_mask((100, 100), (292, 100))
         self.assertEqual(centered.getpixel((50, 50)), 255)
         self.assertEqual(centered.getpixel((150, 50)), 0)
+
+
+class MarginHarmonyTests(unittest.TestCase):
+    """Outpaint junction exposure continuity. Measured 2026-08-18 on three
+    independent renders of one left+right outpaint: the strip-mean step
+    across the right junction sat at p99.4-p100 of the image's own interior
+    distribution every time (the feather blends sharpness, not exposure).
+    harmonize_margins pins each margin's low-frequency colour to the SOURCE
+    at the junction, fading to untouched at the outer edge."""
+
+    @staticmethod
+    def _outpainted(src_val, margin_val, pads=(64, 0, 64, 0),
+                    size=(200, 300)):
+        left, top, right, bottom = pads
+        w, h = size
+        src = Image.new("RGB", (w, h), (src_val,) * 3)
+        out = Image.new("RGB", (w + left + right, h + top + bottom),
+                        (margin_val,) * 3)
+        out.paste(src, (left, top))
+        return src, out
+
+    def test_junction_pinned_outer_edge_and_original_kept(self):
+        src, out = self._outpainted(100, 115)   # +15: under the cap
+        fixed, steps = quality.harmonize_margins(out, src, (64, 0, 64, 0))
+        self.assertEqual(sorted(steps), ["left", "right"])
+        self.assertAlmostEqual(steps["left"], 15.0, delta=0.1)
+        # margin column adjacent to the junction now matches the source
+        self.assertLess(abs(fixed.getpixel((63, 150))[0] - 100), 3)
+        # outer edge keeps the margin's own tone (falloff -> 0)
+        self.assertGreater(fixed.getpixel((0, 150))[0], 113)
+        # the original region is byte-identical
+        self.assertEqual(fixed.getpixel((164, 150)), (100, 100, 100))
+
+    def test_noise_floor_returns_the_same_object(self):
+        src, out = self._outpainted(100, 102)
+        fixed, steps = quality.harmonize_margins(out, src, (64, 0, 64, 0))
+        self.assertIs(fixed, out)
+        self.assertEqual(steps, {})
+
+    def test_no_pads_is_identity(self):
+        src = Image.new("RGB", (50, 50), (9, 9, 9))
+        fixed, steps = quality.harmonize_margins(src, src, (0, 0, 0, 0))
+        self.assertIs(fixed, src)
+        self.assertEqual(steps, {})
+
+    def test_correction_is_capped_for_content_differences(self):
+        # a 45-step is beyond the 28 ceiling: the junction is softened,
+        # never fully repainted (legitimate content may simply differ)
+        src, out = self._outpainted(100, 145)
+        fixed, _steps = quality.harmonize_margins(out, src, (64, 0, 64, 0))
+        px = fixed.getpixel((63, 150))[0]
+        self.assertLess(abs(px - 117), 3)   # 145 - cap(28)
+
+    def test_vertical_margin_pinned_via_the_top_junction(self):
+        src, out = self._outpainted(100, 115, pads=(0, 64, 0, 0))
+        fixed, steps = quality.harmonize_margins(out, src, (0, 64, 0, 0))
+        self.assertEqual(list(steps), ["top"])
+        self.assertLess(abs(fixed.getpixel((100, 63))[0] - 100), 3)
+        self.assertEqual(fixed.getpixel((100, 200)), (100, 100, 100))
+
+    def test_feather_contamination_fades_without_a_junction_edge(self):
+        # the render's blend zone (first original columns) carries the old
+        # margin tone; pinning only the margin to the source left a faint
+        # 1px edge against it (measured p99.9 column-delta on the first
+        # live run) — the inland tail must make the junction continuous
+        src, out = self._outpainted(100, 115)
+        out.paste(Image.new("RGB", (32, 300), (110,) * 3), (64, 0))
+        fixed, _steps = quality.harmonize_margins(out, src, (64, 0, 64, 0))
+        a = fixed.getpixel((63, 150))[0]   # margin side of the junction
+        b = fixed.getpixel((64, 150))[0]   # original side (was 110)
+        self.assertLess(abs(a - b), 4)
+        self.assertLess(b, 106)            # contamination corrected toward
+        self.assertLess(abs(a - 100), 3)   # ...the source's own tone
+        # beyond the feather's reach the original stays byte-identical
+        self.assertEqual(fixed.getpixel((170, 150)), (100, 100, 100))
 
 
 if __name__ == "__main__":
