@@ -352,6 +352,23 @@ never-mask-the-face rule). Do not "extend" it to image_edit.
   STRIPED render artifact_free 97 — whole-frame scoring is insensitive
   to junction defects; candidate: feed per-band issues into scoring.
   972 tests.
+- **Cycle 29 (0990e35)** Measured junction defects cap artifact_free.
+  The cycle-28 finding closed: quality.junction_flaws is the
+  deterministic verdict (cycle-21 doctrine — exact measurement outranks
+  the judge). Two signals per junction, each DOUBLE-gated magnitude AND
+  percentile vs the image's OWN interior (self-calibrating): hard edge
+  (col-delta ≥6 at ≥p99.5; worst clean 3.4@p86.7, stripes 11.1+@p99.9)
+  → cap 55; exposure wall (strip16 ≥12 at ≥p98; clean 8.8@p93.2, walls
+  14.9+@p99.4+) → cap 70. Calibration 11/11 TOTAL separation: 3 raw
+  walls→70, rev-1 stripe→55, harmonized raws→None, live renders→None,
+  mild top-pad→None (~0.5s/check). _ground_scores wired at BOTH scoring
+  sites (first pass + ladder), lower-only, honest log when it bites;
+  last_outpaint carries pre_size for exact geometry. LIVE healthy
+  render: no overrule line, artifact_free 97 stands, delivered file
+  measures None — correct negative path (positive path = offline 11/11
+  + unit tests). Harmonize guard 4th consecutive live fire (L16/R28);
+  deglyph guard hit its keep-first branch live this run ("re-render no
+  cleaner" — first live sighting). 976 tests.
 Candidates, roughly ranked (artifact focus first per 2026-08-18 mandate):
 - **Cycle 23 (0079083)** Outpaint glyph guard SHIPPED and live-proven.
   Detection calibrated on 16 real margins (per-row density of >40 grey
