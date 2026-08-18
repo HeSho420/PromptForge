@@ -299,20 +299,19 @@ never-mask-the-face rule). Do not "extend" it to image_edit.
   the commit message says 2212 — erratum, 2020 is correct), settled
   by the axis-pinned arithmetic, best of 1, no retry. 956 tests.
 Candidates, roughly ranked (artifact focus first per 2026-08-18 mandate):
-- IN PROGRESS (cycle 23) — Outpaint caption-band continuation (4/4
-  measured). DESIGN SETTLED + CALIBRATED: detect glyph soup in the
-  RENDERED L/R margins deterministically (per-row density of >40 grey
-  gradients; bottom 12% of rows; flag at ≥3 rows over 0.08 — measured:
-  all 4 real bands show 8-14 hot rows incl. the faintest, all 12 clean
-  bottoms 0; top-edge check EXCLUDED, its one calibration signal was
-  branch texture). On hit: re-render the extension from a copy of the
-  source whose band rows (mapped 1:1 by y for L/R margins) are
-  replaced by the stretched+blurred row above; then byte-restore the
-  ORIGINAL band over the center (the graph composites over the padded
-  input, so the neutralized rows land in the output center otherwise).
-  Original pixels fully preserved; keep whichever render has fewer
-  soupy rows; L/R margins only this cycle. Extract _margin_geometry
-  shared with _margin_intruders.
+- **Cycle 23 (0079083)** Outpaint glyph guard SHIPPED and live-proven.
+  Detection calibrated on 16 real margins (per-row density of >40 grey
+  gradients, bottom 12%, ≥3 rows over 0.08: all 4 real bands 8-14 hot
+  rows incl. the faintest, all 12 clean bottoms 0; top-edge check
+  excluded — its one calibration signal was branch texture). On hit:
+  ONE re-render from a band-neutralized source copy (band rows filled
+  with the stretched+blurred row above), keep the cleaner render,
+  byte-restore the ORIGINAL band over the center. _margin_geometry
+  extracted, shared with the person guard. Live E2E on the affected
+  photo: guard fired, re-render clean, band restored, judging chain
+  ran once (no ladder retry), visual check: margins glyph-free with
+  the overlay intact. 959 tests. Scope note: L/R margins only;
+  top/bottom-margin bands need their own calibration set.
 - Garment-replacement masks cover the OLD garment, not where the NEW one
   goes ("bikini top → t-shirt" can only paint inside the bikini-shaped
   region; checklist honestly reports the miss). Target-extent masks for
