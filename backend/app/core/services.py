@@ -7827,40 +7827,57 @@ class Services:
         # what was asked — and every rung it climbs changes something real:
         # the emphasis, then the MODEL, then the WORKFLOW. Re-rolling the seed
         # of a recipe that already missed is a coin flip on the same coin.
-        job.log("info", "[stage] check — judging realism and whether the "
-                        "render did what the prompt asked")
-        crit = self._critique(job, image, prompt)
-        checklist = (quality.request_checklist(self.llm, prompt)
-                     if self.critic is not None else [])
-        if checklist:
-            job.log("info", "[llm] the render must deliver: "
-                            + " · ".join(c["need"] for c in checklist))
-        adh = self._adherence(job, image, prompt, checklist)
-        rounds, chose = self._pursue_request(
-            job, task=task, prompt=prompt, prompt_used=prompt_used,
-            context=context, image_context=image_context,
-            triage=triage, used_template=used_template,
-            image_name=uploaded_image, ckpts=ckpts, current_model=chosen,
-            errors_seen=errors_seen,
-            state=_Attempt(image=image, prompt_id=prompt_id, gen=gen,
-                           crit=crit, adherence=adh, repairs=repairs,
-                           checklist=checklist))
-        image, prompt_id, gen = chose.image, chose.prompt_id, chose.gen
-        crit, repairs = chose.crit, chose.repairs
-        if chose.strategy:
-            model_note = f"{model_note} → {chose.strategy}"
+        # A DRAFT is explicitly a preview: measured on a live draft job,
+        # the quality ladder (critic + checklist + adherence + verify)
+        # cost 62 s on top of a ~5 s render — twelve times the render it
+        # was judging. Drafts skip the ladder and the polish; the honest
+        # trade is stated in the log.
+        is_draft = (used_template
+                    and (triage or {}).get("workflow") == "generate_draft")
+        if is_draft:
+            job.log("info", "Draft mode — skipping quality checks and "
+                            "retries (a draft is for iterating on the "
+                            "wording; ask for a final when it is right)")
+            crit = None
+            rounds = 0
+        else:
+            job.log("info", "[stage] check — judging realism and whether "
+                            "the render did what the prompt asked")
+            crit = self._critique(job, image, prompt)
+            checklist = (quality.request_checklist(self.llm, prompt)
+                         if self.critic is not None else [])
+            if checklist:
+                job.log("info", "[llm] the render must deliver: "
+                                + " · ".join(c["need"] for c in checklist))
+            adh = self._adherence(job, image, prompt, checklist)
+            rounds, chose = self._pursue_request(
+                job, task=task, prompt=prompt, prompt_used=prompt_used,
+                context=context, image_context=image_context,
+                triage=triage, used_template=used_template,
+                image_name=uploaded_image, ckpts=ckpts, current_model=chosen,
+                errors_seen=errors_seen,
+                state=_Attempt(image=image, prompt_id=prompt_id, gen=gen,
+                               crit=crit, adherence=adh, repairs=repairs,
+                               checklist=checklist))
+            image, prompt_id, gen = chose.image, chose.prompt_id, chose.gen
+            crit, repairs = chose.crit, chose.repairs
+            if chose.strategy:
+                model_note = f"{model_note} → {chose.strategy}"
 
         # Faces get one native-resolution refinement pass before saving —
-        # judged, so it can only ever improve the shipped image.
-        own_ckpt = next(
-            (n["inputs"].get("ckpt_name") for n in gen.graph.values()
-             if isinstance(n, dict)
-             and n.get("class_type") == "CheckpointLoaderSimple"
-             and n.get("inputs", {}).get("ckpt_name")), None)
-        polished = self._face_polish(job, image, prompt_used,
-                                     checkpoint=own_ckpt)
-        if polished is not None:
-            image = polished
+        # judged, so it can only ever improve the shipped image. Drafts
+        # skip it: polish belongs on finals.
+        polished = None
+        if not is_draft:
+            own_ckpt = next(
+                (n["inputs"].get("ckpt_name") for n in gen.graph.values()
+                 if isinstance(n, dict)
+                 and n.get("class_type") == "CheckpointLoaderSimple"
+                 and n.get("inputs", {}).get("ckpt_name")), None)
+            polished = self._face_polish(job, image, prompt_used,
+                                         checkpoint=own_ckpt)
+            if polished is not None:
+                image = polished
 
         job.log("info", "[stage] save — storing the result")
         # The recipe card: how this exact image was made — the workflow
@@ -7883,6 +7900,7 @@ class Services:
             "repairs": repairs,
             "strategy_rounds": rounds,
             "face_refined": polished is not None,
+            "draft": is_draft,
             "realism": crit.score if crit else None,
             **self._recipe_facts(gen.graph),
             "trail": self._recipe_steps(job),

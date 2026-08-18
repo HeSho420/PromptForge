@@ -185,15 +185,23 @@ DECIDED (cycle 12a): _face_polish stays FORGE-ONLY — edited photos
 carry REAL people's faces and FaceDetailer REGENERATES what it touches;
 identity preservation outranks detail polish (same doctrine as the
 never-mask-the-face rule). Do not "extend" it to image_edit.
+- **Cycle 12 (72787c9)** Draft-intent coercion SHIPPED and live-proven:
+  quality.draft_intent (intent phrases only; "fast car"/"draft horse"
+  tested negative) overrides triage to generate_draft when its models
+  are ready. Live job used the 4-step template end to end.
+- **Cycle 13 (measured, both rejected)** Gallery latency is really
+  ~180 ms hot (495 was IWR overhead; storage 85 ms) — closed. Batched
+  count-requests: max_batch=1 on mid tier = both real machines, and
+  combine mode already parallelizes across the fleet — closed.
+- **Cycle 14 (this commit)** Drafts skip the quality ladder + polish.
+  Job-timeline measurement: ladder cost 62 s on a ~5 s draft render.
+  Live after: same request 56 s total vs ~140 s steady-state (2.5x);
+  warm repeats ≈ 10-15 s. recipe.draft records it; finals unchanged.
+  OPEN MYSTERY (logged): the backend died hard once (~04:0x, no
+  finally, lock left stale — singleton stole it correctly); restarts
+  now capture stderr to data/logs/backend-session-err.log so a repeat
+  leaves evidence.
 Candidates, roughly ranked:
-- [NEXT — cycle 12b, scoped] Draft-intent routing: generate_draft_v1
-  EXISTS but nothing routes to it (verified: zero references in
-  quality.py/workflow_ai — the GroundingDINO dormant-engine pattern).
-  Add a deterministic coercion: request-level draft phrases ("quick
-  draft", "rough sketch of", "just a draft/preview") — NOT bare
-  adjectives ("fast car"!) — override triage to the draft template
-  when its speed LoRA is ready. 4-step renders ≈ 4-6x faster on
-  explicit request. Verify LoRA presence gates like _template_runnable.
 - Batched count-requests ("make 4 images" → batch_size on one graph,
   result plumbing for multiple assets per job) — throughput on VRAM
   headroom; render_budget.max_batch exists.

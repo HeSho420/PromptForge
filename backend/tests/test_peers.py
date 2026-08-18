@@ -2301,6 +2301,17 @@ class DraftIntent(unittest.TestCase):
         self.assertLess(src.index("draft_intent"),
                         src.index("_template_workflow"))
 
+    def test_drafts_skip_the_quality_ladder_and_the_polish(self):
+        """Measured live: the ladder cost 62 s on top of a ~5 s draft
+        render. A draft skips critique/checklist/adherence/retries AND
+        the face polish; finals keep all of it."""
+        src = inspect.getsource(Services._workflow_inner)
+        self.assertIn("is_draft", src)
+        # The skip gates the check stage and the polish, not the save.
+        self.assertLess(src.index("is_draft"), src.index('"[stage] check'))
+        self.assertIn("if not is_draft:", src)
+        self.assertIn('"draft": is_draft', src)
+
 
 class FacePolish(unittest.TestCase):
     """The automatic face-refinement pass: judged, fail-open, and wired at
