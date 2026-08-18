@@ -248,7 +248,42 @@ never-mask-the-face rule). Do not "extend" it to image_edit.
   video_inpaint/video_outpaint templates still roundtrip whole frames
   (chunked pipeline — needs its own measurement); kontext whole-image
   edits are inherently uncomposited.
-Candidates, roughly ranked:
+  E2E postscript (fffa575 verified live): masked hires edit at
+  1471×1828 (odd size) changed 4.64% of pixels, ALL inside the drawn
+  region, 0 outside — through the full plan→mask→judge→retry→save
+  pipeline. Learned en route: /api/assets/<id>/file serves the WORKING
+  image (original until the user promotes a result) BY DESIGN — E2E
+  before/after must fetch version files, not the asset file.
+- **Cycle 20 (this commit)** Outpaint person guard. MEASURED first: 8
+  production-style outpaints (2 photos × 4 seeds) → 1/8 grew a full
+  standalone man in the new margin (plus the cycle-19 baseline hit =
+  2/9 that day). Deterministic guard shipped: after each outpaint,
+  every new margin + a 96px inland slab is matted with
+  BiRefNet-portrait; CALIBRATED on the same data (15/15 clean margins
+  matted 0.0%, the intruder 24.6% → floor 6%); mass continuing inland
+  past the junction = legitimate subject completion (ceiling 2%),
+  mass only in the margin = invented stranger → ONE fresh-seed
+  re-render, keep the cleaner. Fail-open (pack off/errors/mock).
+  Live-proven on the measured renders (pool_s44 → ['left'] at
+  margin 31.9%/inner 0.9%; clean + completion patterns pass);
+  E2E outpaint job through /api/edits on the new code. 945 tests.
+  ALSO MEASURED (ledgered): caption/watermark bands in the SOURCE get
+  continued into margins as garbled glyphs 4/4 seeds on the affected
+  photo — retry cannot fix that class; needs source-edge text
+  detection BEFORE padding (next artifact candidate).
+Candidates, roughly ranked (artifact focus first per 2026-08-18 mandate):
+- Outpaint text-band continuation (measured 4/4 on caption-bearing
+  sources): detect text/UI glyphs on the source's outer edge strips
+  BEFORE ImagePadForOutpaint (vl probe or edge-glyph heuristic); on
+  hit, either warn honestly + auto-trim the band, or mask the band
+  out of the pad seed. Design carefully — trimming user pixels is a
+  scope decision.
+- Garment-replacement masks cover the OLD garment, not where the NEW one
+  goes ("bikini top → t-shirt" can only paint inside the bikini-shaped
+  region; checklist honestly reports the miss). Target-extent masks for
+  REPLACE_OBJECT on clothing.
+- video_inpaint/video_outpaint: whole-clip VAE roundtrip (same class as
+  cycle 19 but per-frame in the chunk loop) — measure with a real clip.
 - Batched count-requests ("make 4 images" → batch_size on one graph,
   result plumbing for multiple assets per job) — throughput on VRAM
   headroom; render_budget.max_batch exists.

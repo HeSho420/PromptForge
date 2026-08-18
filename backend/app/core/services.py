@@ -3002,9 +3002,8 @@ class Services:
                                         "(soft-inpaint blending)")
                         model_name = out_ckpt
                     pre_size = current.size
-                    current = self._render_template_step(
-                        job, "outpaint", current, out_pos, out_neg,
-                        checkpoint=out_ckpt)
+                    current = self._guarded_outpaint(
+                        job, current, out_pos, out_neg, out_ckpt, real)
                     last_mask = self._pad_mask(pre_size, current.size)
                     if i == n - 1:
                         last_positive = out_pos
@@ -4023,6 +4022,109 @@ class Services:
         mask = Image.new("L", (aw, ah), 255)
         mask.paste(0, (left, top, min(aw, left + bw), min(ah, top + bh)))
         return mask
+
+    # Outpainting occasionally paints a NEW person into the fresh margin —
+    # the continuation prompt and the negative both fight it, yet measured
+    # 2026-08-18 (8 production-style renders): 1 in 8 grew a standalone man.
+    # BiRefNet-portrait separates the cases perfectly on the same data:
+    # every clean margin matted 0.0% person, the intruder 24.6% — so the
+    # floor below is nowhere near a judgement call. The inner-slab ceiling
+    # tells an INVENTED person (mass only in the margin) from a legitimate
+    # completion of a subject who runs off the original edge (mass continues
+    # inland past the junction).
+    _MARGIN_PERSON_MIN = 0.06
+    _MARGIN_INNER_MAX = 0.02
+    _MARGIN_INNER_SLAB = 96
+
+    def _margin_intruders(self, image: Image.Image,
+                          pre_size: tuple[int, int]) -> list[str]:
+        """Names of outpaint margins holding a STANDALONE person the render
+        invented. Deterministic (BiRefNet-portrait matte per margin, plus an
+        inner slab of the original for the continuation test); empty when the
+        canvas did not grow, the rmbg pack is off, or matting fails — the
+        guard never blocks an outpaint, it only asks for one re-render."""
+        import numpy as np
+        if not self._pack_active("rmbg"):
+            return []
+        aw, ah = image.size
+        bw, bh = pre_size
+        left = max(0, (aw - bw) // 2)
+        top = max(0, (ah - bh) // 2)
+        right, bottom = aw - bw - left, ah - bh - top
+        slab = self._MARGIN_INNER_SLAB
+        checks: list[tuple[str, tuple[int, int, int, int], int, str]] = []
+        if left >= 32:
+            checks.append(("left", (0, 0, min(aw, left + slab), ah),
+                           left, "x"))
+        if right >= 32:
+            checks.append(("right", (max(0, aw - right - slab), 0, aw, ah),
+                           right, "x2"))
+        if top >= 32:
+            checks.append(("top", (0, 0, aw, min(ah, top + slab)),
+                           top, "y"))
+        if bottom >= 32:
+            checks.append(("bottom", (0, max(0, ah - bottom - slab), aw, ah),
+                           bottom, "y2"))
+        hits: list[str] = []
+        for name, box, extent, axis in checks:
+            matte = self._region_mask(image.crop(box), "BiRefNetRMBG", {
+                "model": self._MATTE_PORTRAIT, "sensitivity": 1.0,
+                "mask_blur": 0, "mask_offset": 0, "invert_output": False,
+                "refine_foreground": True, "background": "Alpha",
+                "background_color": "#222222"})
+            if matte is None:  # empty matte or engine hiccup: fail open
+                continue
+            a = np.asarray(matte) > 127
+            if axis == "x":
+                margin_part, inner_part = a[:, :extent], a[:, extent:]
+            elif axis == "x2":
+                margin_part, inner_part = a[:, -extent:], a[:, :-extent]
+            elif axis == "y":
+                margin_part, inner_part = a[:extent, :], a[extent:, :]
+            else:
+                margin_part, inner_part = a[-extent:, :], a[:-extent, :]
+            if margin_part.size == 0 or inner_part.size == 0:
+                continue
+            if (float(margin_part.mean()) >= self._MARGIN_PERSON_MIN
+                    and float(inner_part.mean()) <= self._MARGIN_INNER_MAX):
+                hits.append(name)
+        return hits
+
+    def _guarded_outpaint(self, job: Job, src: Image.Image, positive: str,
+                          negative: str, checkpoint: str | None,
+                          real: bool) -> Image.Image:
+        """One outpaint render, person-guarded: when a margin grew a
+        standalone person, re-render ONCE with a fresh seed and keep the
+        cleaner of the two. Honest logs either way."""
+        rendered = self._render_template_step(
+            job, "outpaint", src, positive, negative, checkpoint=checkpoint)
+        if not real:
+            return rendered
+        try:
+            intruders = self._margin_intruders(rendered, src.size)
+        except Exception:  # noqa: BLE001 — the guard must never kill a render
+            return rendered
+        if not intruders:
+            return rendered
+        job.log("info", "[stage] guard — the outpaint invented a person in "
+                        f"the {' and '.join(intruders)} margin; re-rendering "
+                        "the extension with a fresh seed")
+        try:
+            second = self._render_template_step(
+                job, "outpaint", src, positive, negative,
+                checkpoint=checkpoint)
+            second_hits = self._margin_intruders(second, src.size)
+        except Exception:  # noqa: BLE001 — keep the result we have
+            job.log("info", "[stage] guard — the re-render failed; keeping "
+                            "the first extension")
+            return rendered
+        if len(second_hits) < len(intruders):
+            job.log("info", "[stage] guard — the re-rendered margins are "
+                            "clean; keeping the re-render")
+            return second
+        job.log("info", "[stage] guard — the re-render was no better; "
+                        "keeping the first extension")
+        return rendered
 
     def _best_outpaint_checkpoint(self) -> str | None:
         """The best installed INPAINT checkpoint for outpainting (outpaint IS

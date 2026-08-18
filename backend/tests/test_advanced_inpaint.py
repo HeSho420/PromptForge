@@ -588,5 +588,124 @@ class InpaintModelPolicyTests(unittest.TestCase):
         self.assertNotIn(a.id, ids)
 
 
+class MarginPersonGuardTests(unittest.TestCase):
+    """The outpaint person guard: a STANDALONE person matted in a new margin
+    (mass in the margin, none continuing inland past the junction) triggers
+    exactly one fresh-seed re-render; everything else passes untouched.
+    Thresholds come from live calibration (2026-08-18): 15/15 clean margins
+    matted 0.0% person, the one real intruder 24.6% with a clean slab."""
+
+    def _services(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        s = Services(Settings(
+            data_dir=Path(self.tmp.name), inpaint_backend="mock",
+            segment_backend="mock", critic_model="",
+            first_run_setup=False, comfyui_dir=""))
+        self.addCleanup(s.stop)
+        s._pack_active = lambda slug: True
+        return s
+
+    @staticmethod
+    def _matte_stub(blobs):
+        """_region_mask stand-in: consumes one blob per check, in check
+        order (left, then right). Each blob is a box in that check's crop
+        coordinates painted white; None means an empty matte."""
+        seq = list(blobs)
+
+        def region_mask(image, node, inputs):
+            blob = seq.pop(0)
+            if blob is None:
+                return None
+            m = Image.new("L", image.size, 0)
+            m.paste(255, blob)
+            return m
+        return region_mask
+
+    def test_standalone_person_in_left_margin_is_flagged(self):
+        s = self._services()
+        # left check crop is (margin 192 + slab 96) x 1200; the blob lives
+        # entirely inside the margin columns, nothing continues inland
+        s._region_mask = self._matte_stub([(20, 300, 150, 900), None])
+        out = Image.new("RGB", (1024 + 384, 1200))
+        self.assertEqual(s._margin_intruders(out, (1024, 1200)), ["left"])
+
+    def test_subject_continuing_inland_is_not_an_intruder(self):
+        s = self._services()
+        # mass straddles the junction: margin cols 150-191 AND slab cols
+        # 192-260 — a subject being completed, not an invented stranger
+        s._region_mask = self._matte_stub([(150, 300, 260, 900), None])
+        out = Image.new("RGB", (1024 + 384, 1200))
+        self.assertEqual(s._margin_intruders(out, (1024, 1200)), [])
+
+    def test_tiny_blob_and_empty_matte_pass(self):
+        s = self._services()
+        s._region_mask = self._matte_stub(
+            [(30, 30, 42, 42), (30, 30, 42, 42)])  # ~0.05% of the strip
+        out = Image.new("RGB", (1024 + 384, 1200))
+        self.assertEqual(s._margin_intruders(out, (1024, 1200)), [])
+        s._region_mask = self._matte_stub([None, None])  # empty mattes
+        self.assertEqual(s._margin_intruders(out, (1024, 1200)), [])
+
+    def test_unchanged_canvas_checks_nothing(self):
+        s = self._services()
+        called = []
+        s._region_mask = lambda *a, **k: called.append(1)
+        self.assertEqual(
+            s._margin_intruders(Image.new("RGB", (640, 480)), (640, 480)), [])
+        self.assertEqual(called, [])
+
+    def _guard_harness(self, s, hits_sequence):
+        renders = []
+        outs = [Image.new("RGB", (704, 480), (i, i, i)) for i in (10, 20)]
+
+        def render(job, task, src, pos, neg, denoise=None, checkpoint=None):
+            renders.append(task)
+            return outs[min(len(renders) - 1, 1)]
+
+        seq = list(hits_sequence)
+        s._render_template_step = render
+        s._margin_intruders = lambda image, pre: seq.pop(0)
+        return renders, outs
+
+    class _Job:
+        def __init__(self):
+            self.logs = []
+
+        def log(self, level, msg):
+            self.logs.append(msg)
+
+    def test_guard_keeps_the_clean_rerender(self):
+        s = self._services()
+        renders, outs = self._guard_harness(s, [["left"], []])
+        job = self._Job()
+        got = s._guarded_outpaint(job, Image.new("RGB", (512, 480)),
+                                  "p", "n", None, real=True)
+        self.assertIs(got, outs[1])
+        self.assertEqual(len(renders), 2)
+        self.assertTrue(any("invented a person" in m for m in job.logs))
+        self.assertTrue(any("keeping the re-render" in m for m in job.logs))
+
+    def test_guard_keeps_the_first_when_rerender_is_no_better(self):
+        s = self._services()
+        renders, outs = self._guard_harness(s, [["left"], ["right"]])
+        job = self._Job()
+        got = s._guarded_outpaint(job, Image.new("RGB", (512, 480)),
+                                  "p", "n", None, real=True)
+        self.assertIs(got, outs[0])
+        self.assertEqual(len(renders), 2)
+        self.assertTrue(any("no better" in m for m in job.logs))
+
+    def test_guard_skips_mock_runs_entirely(self):
+        s = self._services()
+        renders, outs = self._guard_harness(s, [])  # intruder check must
+        job = self._Job()                           # never be consulted
+        got = s._guarded_outpaint(job, Image.new("RGB", (512, 480)),
+                                  "p", "n", None, real=False)
+        self.assertIs(got, outs[0])
+        self.assertEqual(len(renders), 1)
+        self.assertEqual(job.logs, [])
+
+
 if __name__ == "__main__":
     unittest.main()
