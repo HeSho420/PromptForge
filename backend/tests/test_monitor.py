@@ -43,6 +43,10 @@ class _MonitorHarness(unittest.TestCase):
 
         self.s.comfy.is_up = probe
         self.s._spawn_comfy = lambda: False
+        # The clean respawn wraps _spawn_comfy with a REAL process sweep
+        # (_comfy_pids + taskkill) — stubbed, or the harness's 10ms ticks
+        # would fire actual taskkills at the machine's live ComfyUI.
+        self.s._respawn_comfy_clean = lambda: False
         self.s._spawn_ollama = lambda exe: self.spawned_ollama.append(exe)
 
     def run_monitor(self, seconds: float) -> None:

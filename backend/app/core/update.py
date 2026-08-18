@@ -252,17 +252,22 @@ function Test-Health {{
         return $true
     }} catch {{ return $false }}
 }}
-Start-Process -WindowStyle Hidden -WorkingDirectory '{self.root / "backend"}' `
+$proc = Start-Process -WindowStyle Hidden -WorkingDirectory '{self.root / "backend"}' `
     -RedirectStandardOutput '{self.root / "data" / "logs" / "backend-live.log"}' `
     -RedirectStandardError '{self.root / "data" / "logs" / "backend-live-err.log"}' `
-    '{python}' -ArgumentList 'run.py' | Out-Null
+    '{python}' -ArgumentList 'run.py' -PassThru
 $up = $false
 for ($i = 0; $i -lt 30; $i++) {{
     Start-Sleep -Seconds 2
     if (Test-Health) {{ $up = $true; break }}
 }}
 if (-not $up) {{
-    # The new version never answered: put the old one back.
+    # The new version never answered: put the old one back. The slow
+    # instance is KILLED first — measured live: leaving it booting while
+    # the rollback started produced two backends sharing :8000, and the
+    # loser lived on as a zombie spawning duplicate ComfyUI processes.
+    try {{ Stop-Process -Id $proc.Id -Force -ErrorAction Stop }} catch {{}}
+    Start-Sleep -Seconds 2
     Set-Location '{self.root}'
     git reset --hard {old_commit} 2>&1 | Out-Null
     Start-Process -WindowStyle Hidden -WorkingDirectory '{self.root / "backend"}' `

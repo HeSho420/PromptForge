@@ -2001,8 +2001,7 @@ class Services:
                         # it skipped both the counter and the re-arm, and
                         # the loop went silently dead at comfy_down > 2.
                         try:
-                            revived = (self._spawn_comfy()
-                                       and self._wait_comfy(120))
+                            revived = self._respawn_comfy_clean()
                         except Exception:  # noqa: BLE001
                             revived = False
                         if revived:
@@ -6933,6 +6932,26 @@ class Services:
                 except ValueError:
                     continue
         return pids
+
+    def _respawn_comfy_clean(self) -> bool:
+        """Clear stray ComfyUI processes, then spawn ONE and wait for it.
+
+        The monitor's revive used to spawn without looking. Strays are
+        real: a killed instance loses :8188 but keeps its CUDA context
+        and its share of an 8 GB card (seen live: three at once), and a
+        half-killed venv PAIR (the 3.13 launcher shim and its child
+        share one fate — killing either strands nothing, but killing by
+        wrong process-picking has) leaves the survivor holding memory.
+        In this path ComfyUI is DOWN by definition, so everything
+        matching its command line is safe to clear before the one fresh
+        spawn."""
+        for pid in self._comfy_pids():
+            try:
+                subprocess.run(["taskkill", "/PID", str(pid), "/F"],
+                               capture_output=True, timeout=15)
+            except Exception:  # noqa: BLE001 — spawn is still attempted
+                pass
+        return self._spawn_comfy() and self._wait_comfy(120)
 
     def _restart_comfy(self, job: Job,
                        why: str = "to load the new nodes") -> None:
