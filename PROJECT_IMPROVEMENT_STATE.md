@@ -286,10 +286,19 @@ never-mask-the-face rule). Do not "extend" it to image_edit.
   outpaint step always pads left+right; planner-driven directional
   padding is a ledgered candidate). Verified live on the identical
   request: settles by measurement, no retry. 949 tests.
+- **Cycle 22 (b34b5d6)** Directional outpainting shipped. quality.
+  outpaint_directions() maps the instruction's side words to explicit
+  four-side pads (unnamed sides pinned to 0 — the template defaults
+  left+right to 192, so "upward" must not also grow sideways; no
+  direction → None → template default). Threaded through the template
+  render (`extra` declared-slots pass-through), the person guard's
+  margin geometry, _pad_mask (both assumed a CENTERED original —
+  wrong for one-sided pads), and the ladder's outpaint retry.
+  Live E2E: "extend the picture upward" → "Extending the canvas on
+  the requested side: top" → 1471×1828 → 1471×2020 (top-only, +192;
+  the commit message says 2212 — erratum, 2020 is correct), settled
+  by the axis-pinned arithmetic, best of 1, no retry. 956 tests.
 Candidates, roughly ranked (artifact focus first per 2026-08-18 mandate):
-- Directional outpainting: the template step always pads 192px
-  left+right; "extend upward" renders the wrong axis. Plan slot →
-  left/right/top/bottom params from the instruction's direction words.
 - Outpaint text-band continuation (measured 4/4 on caption-bearing
   sources): detect text/UI glyphs on the source's outer edge strips
   BEFORE ImagePadForOutpaint (vl probe or edge-glyph heuristic); on
