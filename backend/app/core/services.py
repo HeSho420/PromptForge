@@ -2198,6 +2198,10 @@ class Services:
         image = self.open_asset_image(asset_id)
         real = not self.inpainting.is_mock
         user_mask_b64 = p.get("mask_b64")
+        # The payload fact, kept separately: user_mask_b64 is cleared once
+        # the drawn mask is consumed by its step, so it cannot answer "did
+        # the user draw one?" at verify time.
+        drew_mask = bool(user_mask_b64)
         # Extra photos to draw FROM. Their presence is the whole reason the
         # user attached them, so it also decides the route below.
         references: list[Image.Image] = []
@@ -3508,6 +3512,24 @@ class Services:
                     job.log("info", f"[stage] verify — best of {rounds + 1} "
                                     f"attempt(s) kept; still missing: "
                                     + "; ".join(best_missing[:3]))
+                    # A drawn mask is an instruction, so the pipeline never
+                    # enlarges it — but a REPLACEMENT that needs more room
+                    # than the old object (a t-shirt over a bikini top) can
+                    # only appear inside the drawn region. Seen live: the
+                    # render reshaped the top inside the ellipse and the
+                    # checklist honestly reported the t-shirt missing. Say
+                    # WHY, so the miss is actionable instead of mysterious.
+                    if (drew_mask
+                            and last_step["task"] == "inpaint"
+                            and last_step.get("operation")
+                            == "REPLACE_OBJECT"):
+                        job.log("info", "[stage] verify — note: the drawn "
+                                        "region covers the OLD object, and "
+                                        "a replacement that needs more room "
+                                        "can only appear inside it. Draw a "
+                                        "roomier region, or clear the mask "
+                                        "to let the app choose the region "
+                                        "and engine.")
                 elif quality.meets_target(scores, target):
                     job.log("info", f"[stage] verify — the edit does what was "
                                     f"asked and every category ≥ "

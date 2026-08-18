@@ -312,10 +312,17 @@ Candidates, roughly ranked (artifact focus first per 2026-08-18 mandate):
   ran once (no ladder retry), visual check: margins glyph-free with
   the overlay intact. 959 tests. Scope note: L/R margins only;
   top/bottom-margin bands need their own calibration set.
-- Garment-replacement masks cover the OLD garment, not where the NEW one
-  goes ("bikini top → t-shirt" can only paint inside the bikini-shaped
-  region; checklist honestly reports the miss). Target-extent masks for
-  REPLACE_OBJECT on clothing.
+- **Cycle 24 (this commit)** Drawn-mask replacements explain their
+  misses. Scope collapsed on inspection: WITHOUT a drawn mask, object
+  replacement already routes to Kontext (no mask at all; measured
+  accuracy 100 on the same request) — the extent gap only bites
+  USER-DRAWN masks, and silently enlarging a drawn region would break
+  the "your mask is an instruction" doctrine. Shipped the honest
+  alternative: when a REPLACE_OBJECT inpaint with a drawn mask still
+  misses requirements, the verify log explains the drawn region covers
+  the OLD object and suggests a roomier region or clearing the mask.
+  drew_mask captured at payload time (user_mask_b64 is cleared on
+  consumption and cannot answer this at verify time). Log-only.
 - video_inpaint/video_outpaint: whole-clip VAE roundtrip (same class as
   cycle 19 but per-frame in the chunk loop) — measure with a real clip.
 - Batched count-requests ("make 4 images" → batch_size on one graph,
