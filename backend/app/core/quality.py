@@ -1749,6 +1749,39 @@ def objective_flags(report: dict[str, Any], task: str = "inpaint") -> list[str]:
     return flags
 
 
+# Glyph-soup detection in an outpainted margin. When the source carries a
+# caption/watermark/UI band at its bottom edge, the pad replicates those
+# rows and the model "continues" them as unreadable text — measured 4/4
+# seeds on the affected photo, and a plain seed retry cannot fix it.
+_GLYPH_EDGE_FRAC = 0.12
+_GLYPH_ROW_DENSITY = 0.08
+_GLYPH_MIN_ROWS = 3
+
+
+def glyph_band_rows(strip: Image.Image) -> tuple[int, int] | None:
+    """Row range (absolute y in the strip) of a text-soup band hugging the
+    strip's BOTTOM, or None when none stands out.
+
+    Signal: per-row density of strong horizontal gradients — glyph strokes
+    are dense high-frequency transitions at row scale, photo content is
+    not. Calibrated 2026-08-18 on 16 real outpaint margins: every clean
+    margin's densest bottom row measured 0.016; the four real glyph bands
+    showed 8-14 rows over 0.08 (faintest peak 0.115, strongest 0.581) —
+    the thresholds sit mid-gap with 5x headroom each way. Top-edge bands
+    are deliberately NOT checked: the calibration set's one top signal was
+    fine branch texture (a false positive)."""
+    import numpy as np
+    g = np.asarray(strip.convert("L"), dtype=np.float32)
+    if g.shape[0] < 32 or g.shape[1] < 16:
+        return None
+    density = (np.abs(np.diff(g, axis=1)) > 40).mean(axis=1)
+    start = int(len(density) * (1 - _GLYPH_EDGE_FRAC))
+    hot = np.nonzero(density[start:] > _GLYPH_ROW_DENSITY)[0]
+    if len(hot) < _GLYPH_MIN_ROWS:
+        return None
+    return (start + int(hot[0]), start + int(hot[-1]))
+
+
 # Which margins an outpaint request names. The template's default is a
 # left+right extension; when the words pick an axis or a side the pad must
 # follow them — "extend the picture upward" rendered left+right grows the

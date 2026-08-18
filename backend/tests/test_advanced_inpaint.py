@@ -715,6 +715,64 @@ class MarginPersonGuardTests(unittest.TestCase):
                             "p", "n", None, real=True, dirs=dirs)
         self.assertEqual([extra for _t, extra in renders], [dirs, dirs])
 
+    def test_deglyph_rerenders_and_restores_the_original_band(self):
+        s = self._services()
+        # src: red photo with a distinctive green "caption band" at rows
+        # 440-480; margins in the render are 96px each side
+        src = Image.new("RGB", (512, 480), (200, 30, 30))
+        src.paste((30, 200, 30), (0, 440, 512, 480))
+        outs = [Image.new("RGB", (704, 480), (90, 90, 90)),
+                Image.new("RGB", (704, 480), (120, 120, 120))]
+        renders = []
+
+        def render(job, task, image, pos, neg, denoise=None, checkpoint=None,
+                   extra=None):
+            renders.append(image)
+            return outs[len(renders)]  # the one re-render returns outs[1]
+
+        s._render_template_step = render
+        soup_seq = [(440, 460), None, None, None]  # 2 strips per image
+        s._glyph_rows = lambda strip: soup_seq.pop(0)
+        job = self._Job()
+        got = s._deglyph_outpaint(job, outs[0], src, "p", "n", None, None)
+        # the re-render won: margins from it, the ORIGINAL band restored
+        self.assertEqual(got.getpixel((10, 450)), (120, 120, 120))  # margin
+        self.assertEqual(got.getpixel((96 + 10, 450)), (30, 200, 30))  # band
+        # the re-render was fed a NEUTRALIZED copy: its band rows are no
+        # longer the green band
+        self.assertEqual(len(renders), 1)
+        self.assertNotEqual(renders[0].getpixel((10, 450)), (30, 200, 30))
+        self.assertTrue(any("caption/watermark band" in m for m in job.logs))
+        self.assertTrue(any("restored unchanged" in m for m in job.logs))
+
+    def test_deglyph_keeps_first_when_rerender_is_no_cleaner(self):
+        s = self._services()
+        src = Image.new("RGB", (512, 480), (200, 30, 30))
+        first = Image.new("RGB", (704, 480), (90, 90, 90))
+        s._render_template_step = (
+            lambda *a, **k: Image.new("RGB", (704, 480), (120, 120, 120)))
+        soup_seq = [(440, 460), None, (438, 462), None]  # second no cleaner
+        s._glyph_rows = lambda strip: soup_seq.pop(0)
+        job = self._Job()
+        got = s._deglyph_outpaint(job, first, src, "p", "n", None, None)
+        self.assertIs(got, first)
+        self.assertTrue(any("no cleaner" in m for m in job.logs))
+
+    def test_deglyph_passes_clean_margins_untouched(self):
+        s = self._services()
+        src = Image.new("RGB", (512, 480), (200, 30, 30))
+        first = Image.new("RGB", (704, 480), (90, 90, 90))
+
+        def boom(*a, **k):
+            raise AssertionError("no re-render for clean margins")
+
+        s._render_template_step = boom
+        s._glyph_rows = lambda strip: None
+        job = self._Job()
+        got = s._deglyph_outpaint(job, first, src, "p", "n", None, None)
+        self.assertIs(got, first)
+        self.assertEqual(job.logs, [])
+
     def test_pad_mask_directional_geometry(self):
         # upward-only: the new margin is the TOP band, not centered halves
         mask = Services._pad_mask(

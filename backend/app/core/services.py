@@ -4053,20 +4053,17 @@ class Services:
     _MARGIN_INNER_MAX = 0.02
     _MARGIN_INNER_SLAB = 96
 
-    def _margin_intruders(self, image: Image.Image,
-                          pre_size: tuple[int, int],
-                          dirs: dict[str, int] | None = None) -> list[str]:
-        """Names of outpaint margins holding a STANDALONE person the render
-        invented. Deterministic (BiRefNet-portrait matte per margin, plus an
-        inner slab of the original for the continuation test); empty when the
-        canvas did not grow, the rmbg pack is off, or matting fails — the
-        guard never blocks an outpaint, it only asks for one re-render.
+    @staticmethod
+    def _margin_geometry(image_size: tuple[int, int],
+                         pre_size: tuple[int, int],
+                         dirs: dict[str, int] | None
+                         ) -> tuple[int, int, int, int]:
+        """(left, top, right, bottom) margin extents of an outpainted frame.
         `dirs` carries directional padding; without it the original is
-        assumed centered (the template's symmetric default)."""
-        import numpy as np
-        if not self._pack_active("rmbg"):
-            return []
-        aw, ah = image.size
+        assumed centered (the template's symmetric left+right default).
+        Shared by the person guard and the glyph guard so their geometry
+        can never drift apart."""
+        aw, ah = image_size
         bw, bh = pre_size
         if dirs:
             left = min(max(0, dirs.get("left", 0)), max(0, aw - bw))
@@ -4074,7 +4071,22 @@ class Services:
         else:
             left = max(0, (aw - bw) // 2)
             top = max(0, (ah - bh) // 2)
-        right, bottom = aw - bw - left, ah - bh - top
+        return left, top, aw - bw - left, ah - bh - top
+
+    def _margin_intruders(self, image: Image.Image,
+                          pre_size: tuple[int, int],
+                          dirs: dict[str, int] | None = None) -> list[str]:
+        """Names of outpaint margins holding a STANDALONE person the render
+        invented. Deterministic (BiRefNet-portrait matte per margin, plus an
+        inner slab of the original for the continuation test); empty when the
+        canvas did not grow, the rmbg pack is off, or matting fails — the
+        guard never blocks an outpaint, it only asks for one re-render."""
+        import numpy as np
+        if not self._pack_active("rmbg"):
+            return []
+        aw, ah = image.size
+        left, top, right, bottom = self._margin_geometry(
+            image.size, pre_size, dirs)
         slab = self._MARGIN_INNER_SLAB
         checks: list[tuple[str, tuple[int, int, int, int], int, str]] = []
         if left >= 32:
@@ -4127,31 +4139,112 @@ class Services:
             extra=dirs)
         if not real:
             return rendered
+        chosen = rendered
         try:
             intruders = self._margin_intruders(rendered, src.size, dirs)
         except Exception:  # noqa: BLE001 — the guard must never kill a render
+            intruders = []
+        if intruders:
+            job.log("info", "[stage] guard — the outpaint invented a person "
+                            f"in the {' and '.join(intruders)} margin; "
+                            "re-rendering the extension with a fresh seed")
+            try:
+                second = self._render_template_step(
+                    job, "outpaint", src, positive, negative,
+                    checkpoint=checkpoint, extra=dirs)
+                second_hits = self._margin_intruders(second, src.size, dirs)
+                if len(second_hits) < len(intruders):
+                    job.log("info", "[stage] guard — the re-rendered "
+                                    "margins are clean; keeping the "
+                                    "re-render")
+                    chosen = second
+                else:
+                    job.log("info", "[stage] guard — the re-render was no "
+                                    "better; keeping the first extension")
+            except Exception:  # noqa: BLE001 — keep the result we have
+                job.log("info", "[stage] guard — the re-render failed; "
+                                "keeping the first extension")
+        return self._deglyph_outpaint(job, chosen, src, positive, negative,
+                                      checkpoint, dirs)
+
+    # Testability seam: the glyph detector, overridable per instance.
+    _glyph_rows = staticmethod(quality.glyph_band_rows)
+
+    def _margin_glyph_rows(self, image: Image.Image,
+                           pre_size: tuple[int, int],
+                           dirs: dict[str, int] | None
+                           ) -> tuple[int, int] | None:
+        """The union row range of glyph soup across the LEFT/RIGHT margins
+        of an outpainted frame, or None when both are clean."""
+        left, top, right, _bottom = self._margin_geometry(
+            image.size, pre_size, dirs)
+        found: list[tuple[int, int]] = []
+        for extent, box in (
+                (left, (0, 0, left, image.height)),
+                (right, (image.width - right, 0, image.width,
+                         image.height))):
+            if extent < 32:
+                continue
+            rows = self._glyph_rows(image.crop(box))
+            if rows is not None:
+                found.append(rows)
+        if not found:
+            return None
+        return (min(r[0] for r in found), max(r[1] for r in found))
+
+    def _deglyph_outpaint(self, job: Job, rendered: Image.Image,
+                          src: Image.Image, positive: str, negative: str,
+                          checkpoint: str | None,
+                          dirs: dict[str, int] | None) -> Image.Image:
+        """When the extension continued the source's caption/watermark band
+        into a new margin as unreadable glyph soup (measured 4/4 seeds on an
+        affected photo — a plain seed retry cannot fix it), re-render ONCE
+        from a copy whose band rows are neutralized with the content just
+        above them, then restore the ORIGINAL band over the center
+        byte-exactly. The photo keeps its overlay; only the margins stop
+        pretending to continue it."""
+        try:
+            soup = self._margin_glyph_rows(rendered, src.size, dirs)
+        except Exception:  # noqa: BLE001 — the guard must never kill a render
             return rendered
-        if not intruders:
+        if soup is None:
             return rendered
-        job.log("info", "[stage] guard — the outpaint invented a person in "
-                        f"the {' and '.join(intruders)} margin; re-rendering "
-                        "the extension with a fresh seed")
+        band_top = max(0, soup[0] - 8)
+        if band_top < 1:  # the "band" is the whole strip: not a band
+            return rendered
+        job.log("info", "[stage] guard — the extension continued the "
+                        "picture's caption/watermark band as unreadable "
+                        "text; re-rendering from a band-neutralized copy "
+                        "(the original band itself is kept)")
+        neutral = src.copy()
+        fill = (src.crop((0, band_top - 1, src.width, band_top))
+                .resize((src.width, src.height - band_top),
+                        Image.Resampling.NEAREST)
+                .filter(ImageFilter.GaussianBlur(3)))
+        neutral.paste(fill, (0, band_top))
         try:
             second = self._render_template_step(
-                job, "outpaint", src, positive, negative,
+                job, "outpaint", neutral, positive, negative,
                 checkpoint=checkpoint, extra=dirs)
-            second_hits = self._margin_intruders(second, src.size, dirs)
+            soup2 = self._margin_glyph_rows(second, src.size, dirs)
         except Exception:  # noqa: BLE001 — keep the result we have
-            job.log("info", "[stage] guard — the re-render failed; keeping "
-                            "the first extension")
+            job.log("info", "[stage] guard — the band-neutralized re-render "
+                            "failed; keeping the first extension")
             return rendered
-        if len(second_hits) < len(intruders):
-            job.log("info", "[stage] guard — the re-rendered margins are "
-                            "clean; keeping the re-render")
-            return second
-        job.log("info", "[stage] guard — the re-render was no better; "
-                        "keeping the first extension")
-        return rendered
+        if soup2 is not None and (soup2[1] - soup2[0]) >= (soup[1] - soup[0]):
+            job.log("info", "[stage] guard — the re-render was no cleaner; "
+                            "keeping the first extension")
+            return rendered
+        # The graph composited the render over the padded NEUTRAL copy, so
+        # the neutralized rows sit in the output's center — put the real
+        # band back, byte-exact.
+        left, top, _r, _b = self._margin_geometry(second.size, src.size, dirs)
+        second.paste(src.crop((0, band_top, src.width, src.height)),
+                     (left, top + band_top))
+        job.log("info", "[stage] guard — margins re-rendered without the "
+                        "text soup; the picture's own band is restored "
+                        "unchanged")
+        return second
 
     def _best_outpaint_checkpoint(self) -> str | None:
         """The best installed INPAINT checkpoint for outpainting (outpaint IS
