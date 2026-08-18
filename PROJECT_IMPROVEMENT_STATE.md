@@ -142,6 +142,25 @@ Machines: HerlockLaptop2 (RTX 4060 8GB, CUDA) and HerlockGame (RX 6700 XT
   assets ~215 ms over 464 assets (per-file existence checks suspected
   — measure before touching).
 
+- **Cycle 7 (9275ab8)** Backend singleton (pid-file lock, Windows-true
+  liveness via OpenProcess/GetExitCodeProcess), updater rollback now
+  kills the slow instance before starting the old one, monitor revive
+  clears stray ComfyUI processes first. KEY PROCESS-MODEL LESSON: a
+  Python 3.13 venv python.exe is a launcher SHIM whose child is the
+  real interpreter — every backend/ComfyUI is a two-process PAIR with
+  one fate. Count pairs, kill by cmdline (both members), never
+  "keep the listener".
+- **Cycle 8 (measured, rejected)** ComfyUI --fast on the RTX 4060:
+  baseline 512²@22st median 8.20 s, 768² 10.23 s; with --fast 8.21 s /
+  10.28 s (5-sample tiebreak). ZERO gain — fp16 SD15 with sage
+  attention already saturates Ada; flag not adopted (it can also shift
+  outputs slightly, and quality outranks a null win).
+- **Cycle 9 (this commit)** Delegated renders no longer unload the
+  LOCAL Ollama: _free_vram returns early when the render is bound to a
+  peer proxy (the peer's own render proxy unloads ITS Ollama). Saves
+  up to a measured 18.8 s cold reload of qwen2.5:7b per delegated job
+  — every helper-carried job in combine mode.
+
 ## Next priorities
 
 1. Live E2Es when HerlockGame reappears: miopen tiled-VAE retry (video),

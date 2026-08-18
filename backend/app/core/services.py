@@ -6613,7 +6613,15 @@ class Services:
 
     def _free_vram(self, job: Job) -> None:
         """Unload LLMs (and idle SAM weights) from the shared GPU/RAM so the
-        renderer gets as much of the machine as possible."""
+        renderer gets as much of the machine as possible.
+
+        DELEGATED renders skip it entirely: the pixels are computed on the
+        peer's GPU (which does its own unload in the render proxy), so
+        unloading here only forced a pointless cold reload of the local
+        planner — paid once per delegated job, and in combine mode that is
+        every job the helpers carry."""
+        if "/pf-peer/comfy" in str(getattr(self.comfy, "base_url", "")):
+            return
         freed = ollama_unload_all(self.settings.llm_url)
         if freed:
             job.log("info", "Freed GPU memory for rendering "

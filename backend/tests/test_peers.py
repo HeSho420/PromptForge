@@ -2234,6 +2234,44 @@ class CriticSelection(unittest.TestCase):
         self.assertNotIn("self.settings.critic_model", src)
 
 
+class DelegatedRendersKeepTheLocalPlannerWarm(unittest.TestCase):
+    """_free_vram exists to hand the LOCAL GPU to the LOCAL renderer. A
+    delegated render computes its pixels on the peer (whose render proxy
+    does its own unload), so unloading here only forced a cold reload of
+    the local planner — measured 18.8 s for qwen2.5:7b — once per
+    delegated job, every job in combine mode."""
+
+    def test_peer_bound_render_skips_the_unload(self):
+        from types import SimpleNamespace
+        from unittest import mock
+
+        from app.core import services as services_mod
+
+        stub = SimpleNamespace(comfy=SimpleNamespace(
+            base_url="http://192.168.1.101:8765/pf-peer/comfy"))
+        job = SimpleNamespace(log=lambda *_a: None)
+        with mock.patch.object(services_mod, "ollama_unload_all") as unload:
+            Services._free_vram(stub, job)
+            unload.assert_not_called()
+
+    def test_local_render_still_frees_the_gpu(self):
+        from types import SimpleNamespace
+        from unittest import mock
+
+        from app.core import services as services_mod
+
+        stub = SimpleNamespace(
+            comfy=SimpleNamespace(base_url="http://127.0.0.1:8188"),
+            segmentation=SimpleNamespace(release=None, is_loaded=False),
+            settings=SimpleNamespace(llm_url="http://127.0.0.1:9/v1"),
+            _text_mask_worker=None)
+        job = SimpleNamespace(log=lambda *_a: None)
+        with mock.patch.object(services_mod, "ollama_unload_all",
+                               return_value=[]) as unload:
+            Services._free_vram(stub, job)
+            unload.assert_called_once()
+
+
 class MiopenTiledRetry(unittest.TestCase):
     """AMD's MIOpen fails inside VAEDecode where CUDA raises a clean OOM —
     ComfyUI's own tiled fallback never fires there (measured live: a WAN
