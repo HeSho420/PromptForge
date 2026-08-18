@@ -298,6 +298,16 @@ never-mask-the-face rule). Do not "extend" it to image_edit.
   the requested side: top" → 1471×1828 → 1471×2020 (top-only, +192;
   the commit message says 2212 — erratum, 2020 is correct), settled
   by the axis-pinned arithmetic, best of 1, no retry. 956 tests.
+- **Cycle 26 (870e3e9)** Checklist built at PLAN time. The judging
+  chain ping-ponged models: scorecard(vl) → checklist(TEXT, 17s reload
+  that also evicts vl) → probes(vl again, 22s reload) ≈ 39s of swaps
+  per judged edit (measured on the deglyph E2E). request_checklist
+  reads only the instruction → moved into cycle-18's warm-text batch
+  (s["_checklist"] on the last step; presence-checked consume with a
+  live fallback; plan_report can't leak underscore keys). MEASURED
+  after, same request: scores → checklist SAME SECOND, probes +3s on
+  the still-warm vl — 39s → 3s. Glyph guard also fired again on this
+  run (consistent). 959 tests.
 Candidates, roughly ranked (artifact focus first per 2026-08-18 mandate):
 - **Cycle 23 (0079083)** Outpaint glyph guard SHIPPED and live-proven.
   Detection calibrated on 16 real margins (per-row density of >40 grey
