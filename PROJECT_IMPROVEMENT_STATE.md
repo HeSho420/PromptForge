@@ -161,6 +161,43 @@ Machines: HerlockLaptop2 (RTX 4060 8GB, CUDA) and HerlockGame (RX 6700 XT
   up to a measured 18.8 s cold reload of qwen2.5:7b per delegated job
   — every helper-carried job in combine mode.
 
+- **Cycle 10 (780ebfa)** hires_split_graph: oversized single-pass
+  txt2img on SD1.5-class checkpoints auto-rewrites to 640-base +
+  latent-upscale + 14-step denoise-0.55 refine. Measured trio at 1024²:
+  single-pass broke (doubled irises, waxy skin) at 21.6 s; the split
+  produced a clean image at 22.6 s. Wired at _apply_hardware_limits
+  AFTER the VRAM clamp. Native-1024 families/img2img/small/two-pass
+  graphs untouched.
+- **Cycle 11 (a1def69)** Automatic judged face-refinement pass
+  (FaceDetailer): facedetail_v1 template + _face_polish at the forge
+  save; fail-open everywhere; judge discards a worse polish. Detector
+  face_yolov8m sha-pinned in the registry (auto-downloads);
+  ultralytics_bbox/segm folder keys added to the launcher yaml (newer
+  Impact-Subpack ignores the legacy combined key — found live).
+  Side-by-side verified: smeared face → clean eyes/smile. ~17 s per
+  portrait pass, ~6 s passthrough without faces.
+
+## Cycle ledger for 12-30 (mandate: quality, efficiency, hardware max)
+
+Done: 7 singleton/updater/revive, 8 --fast rejected-by-measurement,
+9 delegated-render planner stays warm, 10 hires split, 11 face polish.
+Candidates, roughly ranked:
+- image_edit final-best should ALSO get _face_polish (forge only now).
+- Batched count-requests ("make 4 images" → batch_size on one graph,
+  result plumbing for multiple assets per job) — throughput on VRAM
+  headroom; render_budget.max_batch exists.
+- Gallery/assets endpoint latency (495/215 ms @ 464 assets) — profile
+  the per-file exists() suspicion first.
+- Draft-mode default routing (DMD2/LCM speed LoRAs exist since T11 —
+  are they ever picked automatically? verify like hires was).
+- Ollama reload cost per job (~6-19 s) — measure the full job timeline
+  first (instrument [eta] logs already exist).
+- VAE dtype flags (--bf16-vae) — measure like --fast was.
+- Peer pairing secret (security; rolling-migration design needed).
+- HerlockGame E2Es when it appears (miopen tiled retry, missing-node
+  heal, critic auto-migration, and now: does its combine-mode helper
+  benefit from cycle 9's warm-planner skip).
+
 ## Next priorities
 
 1. Live E2Es when HerlockGame reappears: miopen tiled-VAE retry (video),
