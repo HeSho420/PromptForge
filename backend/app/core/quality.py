@@ -1749,6 +1749,47 @@ def objective_flags(report: dict[str, Any], task: str = "inpaint") -> list[str]:
     return flags
 
 
+# Which margins an outpaint request names. The template's default is a
+# left+right extension; when the words pick an axis or a side the pad must
+# follow them — "extend the picture upward" rendered left+right grows the
+# canvas without doing what was asked (cycle 21 made that an honest
+# failure; the directions make it a delivery).
+_OUTPAINT_PAD = 192
+_DIR_ALL = re.compile(
+    r"\b(?:all (?:four )?sides|every side|all directions|zoom\s*out|"
+    r"uncrop|all around)\b", re.IGNORECASE)
+_DIR_LEFT = re.compile(r"\bleft\b", re.IGNORECASE)
+_DIR_RIGHT = re.compile(r"\bright\b", re.IGNORECASE)
+_DIR_TOP = re.compile(r"\b(?:top|upwards?|up)\b", re.IGNORECASE)
+_DIR_BOTTOM = re.compile(r"\b(?:bottom|downwards?|down)\b", re.IGNORECASE)
+_DIR_HORIZ = re.compile(r"\b(?:wider|horizontal(?:ly)?|both sides|"
+                        r"sideways)\b", re.IGNORECASE)
+_DIR_VERT = re.compile(r"\b(?:taller|vertical(?:ly)?)\b", re.IGNORECASE)
+
+
+def outpaint_directions(text: str) -> dict[str, int] | None:
+    """The pad-per-side an outpaint instruction names, or None when it
+    names no direction (the template default — left+right — applies).
+
+    When ANY direction is named, all four sides are returned explicitly:
+    the template graph defaults left+right to 192, so an unnamed side must
+    be pinned to 0 or "extend upward" would still grow sideways too."""
+    t = text or ""
+    if _DIR_ALL.search(t):
+        return {"left": _OUTPAINT_PAD, "right": _OUTPAINT_PAD,
+                "top": _OUTPAINT_PAD, "bottom": _OUTPAINT_PAD}
+    named: dict[str, bool] = {
+        "left": bool(_DIR_LEFT.search(t) or _DIR_HORIZ.search(t)),
+        "right": bool(_DIR_RIGHT.search(t) or _DIR_HORIZ.search(t)),
+        "top": bool(_DIR_TOP.search(t) or _DIR_VERT.search(t)),
+        "bottom": bool(_DIR_BOTTOM.search(t) or _DIR_VERT.search(t)),
+    }
+    if not any(named.values()):
+        return None
+    return {side: (_OUTPAINT_PAD if hit else 0)
+            for side, hit in named.items()}
+
+
 # Canvas-scoped growth phrasings. format_delivered used to gate on the loose
 # _CANVAS_INTENT (bare "extend"), which let CONTENT edits in: "extend her
 # dress to the floor" measured the unchanged canvas as a failed format

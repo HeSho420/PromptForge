@@ -291,6 +291,36 @@ class FormatArithmeticTests(unittest.TestCase):
             "make her smile bigger", (1000, 1000), (1000, 1000)))
 
 
+class OutpaintDirectionTests(unittest.TestCase):
+    """The words name the sides; unnamed sides are pinned to 0 so the
+    template's left+right default cannot leak into an upward request."""
+
+    def test_upward_pads_only_the_top(self):
+        self.assertEqual(
+            quality.outpaint_directions("extend the picture upward"),
+            {"left": 0, "right": 0, "top": 192, "bottom": 0})
+
+    def test_left_and_right(self):
+        self.assertEqual(
+            quality.outpaint_directions(
+                "extend the picture to the left and right"),
+            {"left": 192, "right": 192, "top": 0, "bottom": 0})
+
+    def test_taller_means_both_vertical_sides(self):
+        self.assertEqual(
+            quality.outpaint_directions("make the image taller"),
+            {"left": 0, "right": 0, "top": 192, "bottom": 192})
+
+    def test_zoom_out_pads_all_sides(self):
+        self.assertEqual(
+            quality.outpaint_directions("zoom out a little"),
+            {"left": 192, "right": 192, "top": 192, "bottom": 192})
+
+    def test_no_direction_keeps_the_template_default(self):
+        self.assertIsNone(quality.outpaint_directions("extend the canvas"))
+        self.assertIsNone(quality.outpaint_directions(""))
+
+
 class ObjectiveChecksTests(unittest.TestCase):
     """Step 5b / D20 — arithmetic that catches what the model scored 90."""
 

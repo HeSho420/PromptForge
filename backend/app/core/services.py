@@ -3001,15 +3001,25 @@ class Services:
                         job.log("info", f"Outpaint model: {out_ckpt} "
                                         "(soft-inpaint blending)")
                         model_name = out_ckpt
+                    out_dirs = quality.outpaint_directions(
+                        step["instruction"])
+                    if out_dirs:
+                        named = [s for s, px in out_dirs.items() if px]
+                        job.log("info", "Extending the canvas on the "
+                                        f"requested side{'s' if len(named) > 1 else ''}: "
+                                        + ", ".join(named))
                     pre_size = current.size
                     current = self._guarded_outpaint(
-                        job, current, out_pos, out_neg, out_ckpt, real)
-                    last_mask = self._pad_mask(pre_size, current.size)
+                        job, current, out_pos, out_neg, out_ckpt, real,
+                        dirs=out_dirs)
+                    last_mask = self._pad_mask(pre_size, current.size,
+                                               out_dirs)
                     if i == n - 1:
                         last_positive = out_pos
                         last_outpaint = {"positive": out_pos,
                                          "negative": out_neg,
-                                         "checkpoint": out_ckpt}
+                                         "checkpoint": out_ckpt,
+                                         "dirs": out_dirs}
                     result_adapter = "comfyui-outpaint"
                     result_is_mock = False
                 else:
@@ -3359,16 +3369,17 @@ class Services:
                                 job, last_step["instruction"], final_input,
                                 with_scene(emphasized), last_negative)
                         elif last_step["task"] == "outpaint" and last_outpaint:
-                            # Same continuation prompts + model, new seed —
-                            # the subject-emphasized prompt would invite the
-                            # extra people the outpaint prompt is built to
-                            # avoid.
+                            # Same continuation prompts + model + directions,
+                            # new seed — the subject-emphasized prompt would
+                            # invite the extra people the outpaint prompt is
+                            # built to avoid.
                             candidate = self._render_template_step(
                                 job, "outpaint", final_input,
                                 last_outpaint["positive"],
                                 last_outpaint["negative"],
                                 checkpoint=swap_ckpt
-                                or last_outpaint["checkpoint"])
+                                or last_outpaint["checkpoint"],
+                                extra=last_outpaint.get("dirs"))
                             if swap_ckpt:
                                 tried_ckpts.add(swap_ckpt)
                         else:
@@ -4008,17 +4019,23 @@ class Services:
         return True, ""
 
     @staticmethod
-    def _pad_mask(before: tuple[int, int],
-                  after: tuple[int, int]) -> Image.Image | None:
-        """White mask over the margins an outpaint added (original content
-        centered) — lets the seam inspector examine the outpaint boundary.
-        None when the canvas did not grow."""
+    def _pad_mask(before: tuple[int, int], after: tuple[int, int],
+                  dirs: dict[str, int] | None = None) -> Image.Image | None:
+        """White mask over the margins an outpaint added — lets the seam
+        inspector examine the outpaint boundary. None when the canvas did
+        not grow. Without `dirs` the original is assumed centered (the
+        template's symmetric left+right default); with directional padding
+        the named sides carry the whole offset."""
         bw, bh = before
         aw, ah = after
         if aw <= bw and ah <= bh:
             return None
-        left = max(0, (aw - bw) // 2)
-        top = max(0, (ah - bh) // 2)
+        if dirs:
+            left = min(max(0, dirs.get("left", 0)), max(0, aw - bw))
+            top = min(max(0, dirs.get("top", 0)), max(0, ah - bh))
+        else:
+            left = max(0, (aw - bw) // 2)
+            top = max(0, (ah - bh) // 2)
         mask = Image.new("L", (aw, ah), 255)
         mask.paste(0, (left, top, min(aw, left + bw), min(ah, top + bh)))
         return mask
@@ -4037,19 +4054,26 @@ class Services:
     _MARGIN_INNER_SLAB = 96
 
     def _margin_intruders(self, image: Image.Image,
-                          pre_size: tuple[int, int]) -> list[str]:
+                          pre_size: tuple[int, int],
+                          dirs: dict[str, int] | None = None) -> list[str]:
         """Names of outpaint margins holding a STANDALONE person the render
         invented. Deterministic (BiRefNet-portrait matte per margin, plus an
         inner slab of the original for the continuation test); empty when the
         canvas did not grow, the rmbg pack is off, or matting fails — the
-        guard never blocks an outpaint, it only asks for one re-render."""
+        guard never blocks an outpaint, it only asks for one re-render.
+        `dirs` carries directional padding; without it the original is
+        assumed centered (the template's symmetric default)."""
         import numpy as np
         if not self._pack_active("rmbg"):
             return []
         aw, ah = image.size
         bw, bh = pre_size
-        left = max(0, (aw - bw) // 2)
-        top = max(0, (ah - bh) // 2)
+        if dirs:
+            left = min(max(0, dirs.get("left", 0)), max(0, aw - bw))
+            top = min(max(0, dirs.get("top", 0)), max(0, ah - bh))
+        else:
+            left = max(0, (aw - bw) // 2)
+            top = max(0, (ah - bh) // 2)
         right, bottom = aw - bw - left, ah - bh - top
         slab = self._MARGIN_INNER_SLAB
         checks: list[tuple[str, tuple[int, int, int, int], int, str]] = []
@@ -4092,16 +4116,19 @@ class Services:
 
     def _guarded_outpaint(self, job: Job, src: Image.Image, positive: str,
                           negative: str, checkpoint: str | None,
-                          real: bool) -> Image.Image:
+                          real: bool,
+                          dirs: dict[str, int] | None = None) -> Image.Image:
         """One outpaint render, person-guarded: when a margin grew a
         standalone person, re-render ONCE with a fresh seed and keep the
-        cleaner of the two. Honest logs either way."""
+        cleaner of the two. Honest logs either way. `dirs` = directional
+        padding, threaded to the template and the margin geometry alike."""
         rendered = self._render_template_step(
-            job, "outpaint", src, positive, negative, checkpoint=checkpoint)
+            job, "outpaint", src, positive, negative, checkpoint=checkpoint,
+            extra=dirs)
         if not real:
             return rendered
         try:
-            intruders = self._margin_intruders(rendered, src.size)
+            intruders = self._margin_intruders(rendered, src.size, dirs)
         except Exception:  # noqa: BLE001 — the guard must never kill a render
             return rendered
         if not intruders:
@@ -4112,8 +4139,8 @@ class Services:
         try:
             second = self._render_template_step(
                 job, "outpaint", src, positive, negative,
-                checkpoint=checkpoint)
-            second_hits = self._margin_intruders(second, src.size)
+                checkpoint=checkpoint, extra=dirs)
+            second_hits = self._margin_intruders(second, src.size, dirs)
         except Exception:  # noqa: BLE001 — keep the result we have
             job.log("info", "[stage] guard — the re-render failed; keeping "
                             "the first extension")
@@ -5549,9 +5576,13 @@ class Services:
     def _render_template_step(self, job: Job, task: str, image: Image.Image,
                               positive: str, negative: str = "",
                               denoise: float | None = None,
-                              checkpoint: str | None = None) -> Image.Image:
+                              checkpoint: str | None = None,
+                              extra: dict[str, Any] | None = None
+                              ) -> Image.Image:
         """Run one non-inpaint edit step (img2img / outpaint) through its
-        validated template on an in-memory image; returns the result image."""
+        validated template on an in-memory image; returns the result image.
+        `extra` carries template-specific slots the caller computed (the
+        outpaint direction paddings) — only declared slots are passed."""
         self._require_comfy(job)
         template = self.workflows.load(task)
         image_name = self.comfy.upload_image(image, "edit_src")
@@ -5570,6 +5601,9 @@ class Services:
             params["denoise"] = denoise
         if checkpoint and "checkpoint" in tparams:
             params["checkpoint"] = checkpoint
+        for key, value in (extra or {}).items():
+            if key in tparams:
+                params[key] = value
         try:
             graph = build_workflow(template, params)
         except WorkflowValidationError as exc:

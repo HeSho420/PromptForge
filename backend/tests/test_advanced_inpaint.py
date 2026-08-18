@@ -659,13 +659,14 @@ class MarginPersonGuardTests(unittest.TestCase):
         renders = []
         outs = [Image.new("RGB", (704, 480), (i, i, i)) for i in (10, 20)]
 
-        def render(job, task, src, pos, neg, denoise=None, checkpoint=None):
-            renders.append(task)
+        def render(job, task, src, pos, neg, denoise=None, checkpoint=None,
+                   extra=None):
+            renders.append((task, extra))
             return outs[min(len(renders) - 1, 1)]
 
         seq = list(hits_sequence)
         s._render_template_step = render
-        s._margin_intruders = lambda image, pre: seq.pop(0)
+        s._margin_intruders = lambda image, pre, dirs=None: seq.pop(0)
         return renders, outs
 
     class _Job:
@@ -705,6 +706,26 @@ class MarginPersonGuardTests(unittest.TestCase):
         self.assertIs(got, outs[0])
         self.assertEqual(len(renders), 1)
         self.assertEqual(job.logs, [])
+
+    def test_guard_threads_directions_to_every_render(self):
+        s = self._services()
+        renders, _outs = self._guard_harness(s, [["left"], []])
+        dirs = {"left": 0, "right": 0, "top": 192, "bottom": 0}
+        s._guarded_outpaint(self._Job(), Image.new("RGB", (512, 480)),
+                            "p", "n", None, real=True, dirs=dirs)
+        self.assertEqual([extra for _t, extra in renders], [dirs, dirs])
+
+    def test_pad_mask_directional_geometry(self):
+        # upward-only: the new margin is the TOP band, not centered halves
+        mask = Services._pad_mask(
+            (100, 100), (100, 292),
+            {"left": 0, "right": 0, "top": 192, "bottom": 0})
+        self.assertEqual(mask.getpixel((50, 50)), 255)   # new margin
+        self.assertEqual(mask.getpixel((50, 250)), 0)    # original area
+        # no dirs: symmetric left+right assumption stands
+        centered = Services._pad_mask((100, 100), (292, 100))
+        self.assertEqual(centered.getpixel((50, 50)), 255)
+        self.assertEqual(centered.getpixel((150, 50)), 0)
 
 
 if __name__ == "__main__":
