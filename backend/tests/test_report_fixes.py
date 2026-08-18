@@ -258,6 +258,38 @@ class FormatArithmeticTests(unittest.TestCase):
         self.assertTrue(quality.about_format("a wide landscape format"))
         self.assertFalse(quality.about_format("the hat is gone"))
 
+    def test_live_extend_left_right_settles_by_width(self):
+        # The live outpaint (2026-08-18): 1471->1855 wide, and the vision
+        # verifier still reported 0% twice, burning a full retry render.
+        req = "extend the picture to the left and right"
+        self.assertTrue(quality.format_delivered(
+            req, (1471, 1828), (1855, 1828)))
+        self.assertTrue(quality.about_format(req))
+
+    def test_growth_on_the_wrong_axis_is_not_delivery(self):
+        # The words name the axis: a left+right extension does not deliver
+        # "extend the picture upward".
+        self.assertFalse(quality.format_delivered(
+            "extend the picture upward", (1471, 1828), (1855, 1828)))
+        self.assertTrue(quality.format_delivered(
+            "extend the picture upward", (1471, 1828), (1471, 2212)))
+
+    def test_content_extends_are_not_format_requests(self):
+        # "extend her dress" measured the unchanged canvas as a FAILED
+        # format request and appended a phantom, never-satisfiable missing
+        # entry — a content edit must return None here.
+        self.assertIsNone(quality.format_delivered(
+            "extend her dress to the floor", (1024, 1024), (1024, 1024)))
+        self.assertIsNone(quality.format_delivered(
+            "extend her dress and make the left sleeve red",
+            (1024, 1024), (1024, 1024)))
+
+    def test_comparative_picture_phrasings_stay_covered(self):
+        self.assertTrue(quality.format_delivered(
+            "make the picture wider", (1000, 1000), (1400, 1000)))
+        self.assertIsNone(quality.format_delivered(
+            "make her smile bigger", (1000, 1000), (1000, 1000)))
+
 
 class ObjectiveChecksTests(unittest.TestCase):
     """Step 5b / D20 — arithmetic that catches what the model scored 90."""

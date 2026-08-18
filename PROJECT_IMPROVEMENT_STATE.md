@@ -271,7 +271,25 @@ never-mask-the-face rule). Do not "extend" it to image_edit.
   continued into margins as garbled glyphs 4/4 seeds on the affected
   photo — retry cannot fix that class; needs source-edge text
   detection BEFORE padding (next artifact candidate).
+- **Cycle 21 (this commit)** Canvas-growth verification is arithmetic.
+  The cycle-20 E2E delivered 1471→1855 wide and the vision checklist
+  still said "matches 0%; missing: extend the picture to the left and
+  right" twice, burning a retry (~2.5 min) on a succeeded job. D7's
+  format_delivered HAD fired — but about_format had no growth verbs, so
+  the settled item was never retired. Fixed: about_format recognises
+  growth phrasings; format_delivered gates on canvas-scoped
+  _CANVAS_GROWTH instead of the loose _CANVAS_INTENT (bare "extend"
+  meant "extend her dress to the floor" measured the unchanged canvas
+  as a FAILED format request → phantom missing entry on content edits);
+  a named direction pins the axis (upward request answered sideways
+  returns False honestly — which also documents the real gap: the
+  outpaint step always pads left+right; planner-driven directional
+  padding is a ledgered candidate). Verified live on the identical
+  request: settles by measurement, no retry. 949 tests.
 Candidates, roughly ranked (artifact focus first per 2026-08-18 mandate):
+- Directional outpainting: the template step always pads 192px
+  left+right; "extend upward" renders the wrong axis. Plan slot →
+  left/right/top/bottom params from the instruction's direction words.
 - Outpaint text-band continuation (measured 4/4 on caption-bearing
   sources): detect text/UI glyphs on the source's outer edge strips
   BEFORE ImagePadForOutpaint (vl probe or edge-glyph heuristic); on

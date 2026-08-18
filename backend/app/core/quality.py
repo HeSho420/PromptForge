@@ -1749,6 +1749,38 @@ def objective_flags(report: dict[str, Any], task: str = "inpaint") -> list[str]:
     return flags
 
 
+# Canvas-scoped growth phrasings. format_delivered used to gate on the loose
+# _CANVAS_INTENT (bare "extend"), which let CONTENT edits in: "extend her
+# dress to the floor" measured the unchanged canvas as a failed format
+# request and appended a phantom, never-satisfiable missing entry. The verb
+# must be aimed at the picture itself or at a canvas direction.
+_GROW_VERBS = r"(?:extend|expand|widen|enlarge|stretch|grow)"
+_CANVAS_NOUNS = r"(?:image|photo|picture|canvas|frame|scene|shot|view|borders?|it)"
+_CANVAS_GROWTH = re.compile(
+    # a growth verb aimed at the picture itself ("extend the picture ...")
+    _GROW_VERBS + r"\w*[^.;,]{0,30}\b" + _CANVAS_NOUNS + r"\b|"
+    # ... or at a canvas direction, prepositional so "extend her dress and
+    # make the left sleeve red" cannot cross-match ("to the left", "upward")
+    + _GROW_VERBS + r"\w*[^.;,]{0,30}"
+    r"\b(?:(?:to|towards?|on|at)\s+(?:the\s+)?(?:left|right|top|bottom)|"
+    r"upwards?|downwards?|both\s+sides|sideways)\b|"
+    # orientation-word requests ("a wide landscape format")
+    r"(?:wide|landscape|portrait|square|vertical|horizontal)\s+"
+    r"(?:format|orientation|mode|version|crop|image|photo|picture)|"
+    # comparative aimed at the picture ("make the picture wider")
+    r"\b(?:wider|taller|bigger|larger)\b[^.;,]{0,20}\b" + _CANVAS_NOUNS
+    + r"\b|\b" + _CANVAS_NOUNS + r"\b[^.;,]{0,20}"
+    r"\b(?:wider|taller|bigger|larger)\b|"
+    r"beyond the (?:edge|border|frame)|more (?:background|room|space)",
+    re.IGNORECASE)
+# Which axis the words name. Growth on the WRONG axis is not delivery:
+# "extend the picture upward" answered with a left+right extension grew the
+# canvas without doing what was asked.
+_WANT_HORIZ = re.compile(
+    r"\b(?:left|right|both sides|sideways|horizontal(?:ly)?)\b",
+    re.IGNORECASE)
+_WANT_VERT = re.compile(
+    r"\b(?:top|bottom|upwards?|downwards?|vertical(?:ly)?)\b", re.IGNORECASE)
 _WANT_RATIO = re.compile(r"\b(\d{1,2})\s*[:x]\s*(\d{1,2})\b")
 _WANT_LANDSCAPE = re.compile(r"\b(wide|wider|landscape|horizontal|panoram\w*)\b",
                              re.IGNORECASE)
@@ -1767,7 +1799,7 @@ def format_delivered(request: str, before_size: tuple[int, int],
     landscape and the checklist verifier still reported "still missing: a
     wide landscape format", which cost two full re-renders."""
     text = request or ""
-    if not (_FORMAT_COERCE.search(text) or _CANVAS_INTENT.search(text)):
+    if not (_FORMAT_COERCE.search(text) or _CANVAS_GROWTH.search(text)):
         return None
     bw, bh = before_size
     aw, ah = after_size
@@ -1783,6 +1815,13 @@ def format_delivered(request: str, before_size: tuple[int, int],
         return after_aspect > max(1.0, before_aspect + 0.05)
     if _WANT_PORTRAIT.search(text):
         return after_aspect < min(1.0, before_aspect - 0.05)
+    # A named direction pins the axis: growth the request never asked for
+    # does not count as delivery.
+    horiz, vert = _WANT_HORIZ.search(text), _WANT_VERT.search(text)
+    if horiz and not vert:
+        return aw > bw * 1.02
+    if vert and not horiz:
+        return ah > bh * 1.02
     # A bare "extend/expand the canvas": delivered when the canvas grew.
     return (aw * ah) > (bw * bh) * 1.05
 
@@ -1794,8 +1833,16 @@ _FORMAT_WORDS = re.compile(
 
 def about_format(text: str) -> bool:
     """True when a checklist requirement is about the image's format — used
-    to retire such items once the aspect arithmetic has settled them."""
-    return bool(_FORMAT_WORDS.search(text or ""))
+    to retire such items once the aspect arithmetic has settled them.
+
+    Extension phrasings count too: the live outpaint "extend the picture to
+    the left and right" measurably delivered (1471→1855 wide) while the
+    vision verifier reported 0% twice and burned a full retry — a checklist
+    item worded with a growth verb is exactly what the size arithmetic has
+    already settled. Only consulted after format_delivered returned a
+    verdict, so a growth verb here is canvas-scoped by context."""
+    return bool(_FORMAT_WORDS.search(text or "")
+                or _CANVAS_GROWTH.search(text or ""))
 
 
 # HSV ranges on PIL's 0-255 hue wheel. Deliberately wide: a red shirt spans
