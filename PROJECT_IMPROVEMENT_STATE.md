@@ -202,6 +202,19 @@ never-mask-the-face rule). Do not "extend" it to image_edit.
   finally, lock left stale — singleton stole it correctly); restarts
   now capture stderr to data/logs/backend-session-err.log so a repeat
   leaves evidence.
+- **Cycle 15 (dd52c1f)** Ready drafts skip the triage LLM call (its 33 s
+  routing was overridden by the coercion anyway): 56 → 41 s cold. Warm
+  floor ~40 s explained structurally: --disable-smart-memory reloads
+  SDXL per render on 8 GB/16 GB (crash protection); ~10 s on 12/64 GB.
+- **Cycle 16 (57e3e23)** Opt-in pairing secret (PROMPTFORGE_PEER_SECRET)
+  guards /pf-peer/pull, /pf-peer/install-pack, /pf-peer/log/* via
+  X-PF-Secret; discovery + render/LLM proxies stay open (rolling-safe).
+  Loopback-tested all three states. Default off.
+- **Cycle 17 (this commit)** Drafts render the user's words VERBATIM —
+  the enhancement call was the draft path's last LLM touch (~19 s cold),
+  and enhancing changes the wording a draft exists to preview. The
+  draft path is now LLM-free: measured 24 s total (arc: 140 → 56 → 41
+  → 24 s, 5.8x).
 Candidates, roughly ranked:
 - Batched count-requests ("make 4 images" → batch_size on one graph,
   result plumbing for multiple assets per job) — throughput on VRAM

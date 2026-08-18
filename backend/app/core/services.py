@@ -7741,11 +7741,20 @@ class Services:
 
         # Default prompt optimization: quality boosters are APPENDED — the
         # user's words always survive verbatim (only safety.py filters).
-        enh = quality.enhance_prompt(self.llm, prompt, task)
-        prompt_used = enh["positive"]
-        added = prompt_used[len(prompt):].lstrip(", ")
-        if added:
-            job.log("info", f"[llm] prompt enhanced: +{added[:120]}")
+        # A DRAFT skips it twice over: the enhancement LLM call was the
+        # draft path's last model load (~19 s cold), and a draft exists to
+        # preview YOUR wording — enhancing it changes the thing being
+        # tested. With this skip the whole draft path is LLM-free.
+        if draft_ready:
+            prompt_used = prompt
+            job.log("info", "Draft renders your words verbatim — no "
+                            "enhancement pass")
+        else:
+            enh = quality.enhance_prompt(self.llm, prompt, task)
+            prompt_used = enh["positive"]
+            added = prompt_used[len(prompt):].lstrip(", ")
+            if added:
+                job.log("info", f"[llm] prompt enhanced: +{added[:120]}")
 
         # Attach the input image for image-transform tasks so the LLM plans
         # around a real uploaded file instead of inventing a filename.
