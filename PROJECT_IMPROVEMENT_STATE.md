@@ -330,6 +330,28 @@ never-mask-the-face rule). Do not "extend" it to image_edit.
   sharp p31.5/p72.1 (≤ raw baseline), deep interior byte-identical,
   junction invisible in crops; inspector dropped its across-the-seam
   complaint. Glyph guard fired on both runs (5 consecutive). 966 tests.
+- **Cycle 28 (807279b)** Inspector judges only regions the edit could
+  touch. The inspect zoom used the mask BBOX — an L+R outpaint's two
+  bands make that the whole frame, so the vision model judged the
+  byte-identical subject: on the CLEAN cycle-27 render 3/3 runs gave
+  the identical four "bikini top" complaints (100% about provably
+  unchanged pixels, 0 about the junctions), and on a render with a
+  REAL stripe artifact (rev-1 params re-applied) the full view MISSED
+  it 2/2 while repeating the same four complaints — blind to real
+  defects AND a reliable false generator, feeding the ladder's
+  "avoid:" clause. _mask_view_boxes: split on column/row projection
+  gaps (proportional threshold), hollow ring (all-side outpaint) → its
+  4 edge bands, single compact region → bbox zoom unchanged; one
+  vision call per view, issues prefixed with the view's side. Per-band
+  on the same evidence: subject complaints structurally impossible,
+  stripe caught 2/2 both sides, remaining observations track measured
+  residuals; band calls faster (273px vs 1855px views). LIVE: "Issues
+  found: left region: Seam between the wall and the plant; right
+  region: Color mismatch" in the same ~24s the full-frame call took.
+  NOTE for later: scorecard still sees the whole frame and scored the
+  STRIPED render artifact_free 97 — whole-frame scoring is insensitive
+  to junction defects; candidate: feed per-band issues into scoring.
+  972 tests.
 Candidates, roughly ranked (artifact focus first per 2026-08-18 mandate):
 - **Cycle 23 (0079083)** Outpaint glyph guard SHIPPED and live-proven.
   Detection calibrated on 16 real margins (per-row density of >40 grey
