@@ -215,6 +215,15 @@ never-mask-the-face rule). Do not "extend" it to image_edit.
   and enhancing changes the wording a draft exists to preview. The
   draft path is now LLM-free: measured 24 s total (arc: 140 → 56 → 41
   → 24 s, 5.8x).
+- **Cycle 18 (adb7b7e)** Edit jobs batch text-model calls (plan +
+  per-step enhance) BEFORE the vision scene pass — on one 8 GB GPU the
+  two models evict each other, so every swap was a full reload
+  (measured 17.1 s mid-job). Verified same-prompt/same-asset: the
+  separate enhance gap vanished from the timeline; 369.6 → 314.5 s
+  total (retry-luck noisy). FUTURE candidate from the same timeline:
+  the judging chain (scorecard=vision, checklist-build=text,
+  probes=vision, disagreement-check=text) still ping-pongs — but its
+  ordering is semantically constrained; needs careful design.
 Candidates, roughly ranked:
 - Batched count-requests ("make 4 images" → batch_size on one graph,
   result plumbing for multiple assets per job) — throughput on VRAM
