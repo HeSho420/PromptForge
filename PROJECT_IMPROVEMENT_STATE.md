@@ -323,8 +323,19 @@ Candidates, roughly ranked (artifact focus first per 2026-08-18 mandate):
   the OLD object and suggests a roomier region or clearing the mask.
   drew_mask captured at payload time (user_mask_b64 is cleared on
   consumption and cannot answer this at verify time). Log-only.
-- video_inpaint/video_outpaint: whole-clip VAE roundtrip (same class as
-  cycle 19 but per-frame in the chunk loop) — measure with a real clip.
+- **Cycle 25 (measured, REJECTED)** Video background composite-back.
+  Hypothesis: preserved-background motion transfer ships VACE's
+  generative approximation of the scene (cycle-19 class, per-frame).
+  MEASURED live (21 frames, 384², seed 777, dance.mp4 + real person
+  matte): background outside the grown matte differs mean 3.4/255 with
+  0.1% of pixels >8 and worst 20 — while the MP4 CODEC FLOOR alone
+  (driving frames re-encoded, no render) measures mean 1.41, 0.34%>8,
+  worst 48. The rendered background is AT the compression floor; VACE's
+  mask-0 copy is faithful to within codec noise. The drafted per-frame
+  composite (implemented during the render) was REVERTED unshipped: it
+  would add silhouette-clipping risk for a gain buried under H.264
+  noise. Same doctrine as --fast (cycle 8): rejected by measurement,
+  closed without churn.
 - Batched count-requests ("make 4 images" → batch_size on one graph,
   result plumbing for multiple assets per job) — throughput on VRAM
   headroom; render_budget.max_batch exists.
