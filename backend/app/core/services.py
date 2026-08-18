@@ -55,6 +55,7 @@ from ..adapters.comfyui import (
     WorkflowRuntimeError,
     WorkflowValidationError,
     build_workflow,
+    hires_split_graph,
     tiled_vae_graph,
     validate_workflow,
 )
@@ -7381,6 +7382,18 @@ class Services:
                         job.log("info", f"Clamped the clip to {fitted} frames "
                                         f"— {w}×{h}×{n} is more than this "
                                         "machine can hold at once")
+        # An SD1.5-class model asked for a big canvas in ONE pass breaks
+        # down beyond its native scale (measured 2026-08-18: doubled
+        # irises, waxy skin, duplicated objects at 1024² — while a
+        # 512-base + refine of the same seed was both better AND
+        # faster). Oversized single-pass txt2img becomes two-pass.
+        split = hires_split_graph(graph)
+        if split is not None:
+            job.log("info", "Large canvas on an SD1.5-class model — "
+                            "rendering base-then-refine (hires fix): "
+                            "single-pass at this size deforms anatomy "
+                            "and duplicates detail")
+            return split
         return graph
 
     def _render(self, job: Job, task: str, gen, context: str,

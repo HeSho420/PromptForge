@@ -2272,6 +2272,82 @@ class DelegatedRendersKeepTheLocalPlannerWarm(unittest.TestCase):
             unload.assert_called_once()
 
 
+class HiresSplit(unittest.TestCase):
+    """An SD1.5-class model asked for a big canvas in ONE pass breaks down
+    beyond its native scale (measured: doubled irises, waxy skin,
+    duplicated objects at 1024², while a 512-base + refine of the same
+    seed was better AND faster). Oversized single-pass txt2img graphs are
+    rewritten into that two-pass shape; everything else is left alone."""
+
+    @staticmethod
+    def _graph(w=1024, h=1024, ckpt="photoreal_v5.safetensors",
+               latent="EmptyLatentImage"):
+        return {
+            "1": {"class_type": "CheckpointLoaderSimple",
+                  "inputs": {"ckpt_name": ckpt}},
+            "2": {"class_type": "CLIPTextEncode",
+                  "inputs": {"clip": ["1", 1], "text": "p"}},
+            "3": {"class_type": "CLIPTextEncode",
+                  "inputs": {"clip": ["1", 1], "text": "n"}},
+            "4": {"class_type": latent,
+                  "inputs": {"width": w, "height": h, "batch_size": 1}},
+            "5": {"class_type": "KSampler",
+                  "inputs": {"model": ["1", 0], "positive": ["2", 0],
+                             "negative": ["3", 0], "latent_image": ["4", 0],
+                             "seed": 9, "steps": 22, "cfg": 7.0,
+                             "sampler_name": "dpmpp_2m",
+                             "scheduler": "karras", "denoise": 1.0}},
+            "6": {"class_type": "VAEDecode",
+                  "inputs": {"samples": ["5", 0], "vae": ["1", 2]}},
+            "7": {"class_type": "SaveImage",
+                  "inputs": {"images": ["6", 0], "filename_prefix": "x"}},
+        }
+
+    def test_an_oversized_single_pass_becomes_base_then_refine(self):
+        from app.adapters.comfyui import hires_split_graph, validate_workflow
+
+        out = hires_split_graph(self._graph())
+        self.assertIsNotNone(out)
+        self.assertLessEqual(max(out["4"]["inputs"]["width"],
+                                 out["4"]["inputs"]["height"]), 640)
+        self.assertEqual(out["hires_up"]["inputs"]["samples"], ["5", 0])
+        self.assertEqual(out["hires_up"]["inputs"]["width"], 1024)
+        refine = out["hires_ks"]["inputs"]
+        self.assertEqual(refine["latent_image"], ["hires_up", 0])
+        self.assertEqual(refine["denoise"], 0.55)
+        self.assertEqual(refine["seed"], 10)
+        # The decode now reads the REFINE, and the graph still validates.
+        self.assertEqual(out["6"]["inputs"]["samples"], ["hires_ks", 0])
+        validate_workflow(out)
+        # The original graph was not mutated.
+        self.assertEqual(self._graph()["4"]["inputs"]["width"], 1024)
+
+    def test_native_1024_families_are_left_alone(self):
+        from app.adapters.comfyui import hires_split_graph
+
+        for ckpt in ("juggernaut_XL.safetensors", "flux1-dev.safetensors",
+                     "sd3_medium.safetensors"):
+            self.assertIsNone(hires_split_graph(self._graph(ckpt=ckpt)))
+
+    def test_small_canvases_and_img2img_are_left_alone(self):
+        from app.adapters.comfyui import hires_split_graph
+
+        self.assertIsNone(hires_split_graph(self._graph(w=768, h=768)))
+        self.assertIsNone(hires_split_graph(
+            self._graph(latent="VAEEncode")))
+
+    def test_an_already_two_pass_graph_is_left_alone(self):
+        from app.adapters.comfyui import hires_split_graph
+
+        g = self._graph()
+        out = hires_split_graph(g)
+        self.assertIsNone(hires_split_graph(out))  # two samplers now
+
+    def test_the_hardware_clamp_applies_the_split(self):
+        src = inspect.getsource(Services._apply_hardware_limits)
+        self.assertIn("hires_split_graph", src)
+
+
 class MiopenTiledRetry(unittest.TestCase):
     """AMD's MIOpen fails inside VAEDecode where CUDA raises a clean OOM —
     ComfyUI's own tiled fallback never fires there (measured live: a WAN

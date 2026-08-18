@@ -316,6 +316,100 @@ def tiled_vae_graph(graph: dict[str, Any],
     return out if swapped else None
 
 
+# Checkpoints whose NATIVE resolution covers 1024²+ — a single pass there
+# is correct and the hires split must leave them alone. SD1.5-class names
+# rarely self-identify, so the list names the families that do.
+_HIRES_NATIVE = re.compile(r"xl|sdxl|flux|kontext|cascade|sd3|playground|"
+                           r"pony|illustrious", re.IGNORECASE)
+
+
+def hires_split_graph(graph: dict[str, Any],
+                      max_single_pass: int = 832) -> dict[str, Any] | None:
+    """Rewrite a large single-pass txt2img graph into a two-pass hires fix.
+
+    Measured on the RX-class judge cases (2026-08-18): an SD1.5-class
+    checkpoint asked for 1024² in ONE pass produced the classic
+    beyond-native breakdown — doubled irises, waxy skin, duplicated
+    limbs/objects — while a 512-base + latent-upscale + low-denoise
+    refine of the SAME seed was the best image of the trio AND faster
+    than the broken single pass. This turns every oversized single-pass
+    graph into that two-pass shape.
+
+    Only graphs that are unambiguously the case are touched: exactly one
+    KSampler, fed by EmptyLatentImage (txt2img — img2img keeps its
+    latents), on a checkpoint that is not a 1024-native family, above
+    `max_single_pass` on the long side. Returns None when no rewrite
+    applies."""
+    samplers = [(nid, node) for nid, node in graph.items()
+                if isinstance(node, dict)
+                and node.get("class_type") == "KSampler"]
+    if len(samplers) != 1:
+        return None
+    sid, sampler = samplers[0]
+    ins = sampler.get("inputs", {})
+    latent_ref = ins.get("latent_image")
+    if not (isinstance(latent_ref, list) and latent_ref
+            and str(latent_ref[0]) in graph):
+        return None
+    latent_id = str(latent_ref[0])
+    latent = graph[latent_id]
+    if latent.get("class_type") != "EmptyLatentImage":
+        return None
+    for node in graph.values():
+        if (isinstance(node, dict)
+                and node.get("class_type") == "CheckpointLoaderSimple"
+                and _HIRES_NATIVE.search(
+                    str(node.get("inputs", {}).get("ckpt_name", "")))):
+            return None
+    try:
+        w = int(latent["inputs"].get("width", 512))
+        h = int(latent["inputs"].get("height", 512))
+    except (TypeError, ValueError):
+        return None
+    if max(w, h) <= max_single_pass:
+        return None
+
+    out = copy.deepcopy(graph)
+    scale = 640 / max(w, h)
+    base_w = max(448, int(w * scale) // 8 * 8)
+    base_h = max(448, int(h * scale) // 8 * 8)
+    out[latent_id]["inputs"]["width"] = base_w
+    out[latent_id]["inputs"]["height"] = base_h
+    base = out[sid]["inputs"]
+    out["hires_up"] = {"class_type": "LatentUpscale",
+                       "inputs": {"samples": [sid, 0],
+                                  "upscale_method": "nearest-exact",
+                                  "width": w, "height": h,
+                                  "crop": "disabled"}}
+    try:
+        seed = int(base.get("seed", 0) or 0)
+    except (TypeError, ValueError):
+        seed = 0
+    out["hires_ks"] = {"class_type": "KSampler",
+                       "inputs": {"model": base.get("model"),
+                                  "positive": base.get("positive"),
+                                  "negative": base.get("negative"),
+                                  "latent_image": ["hires_up", 0],
+                                  "seed": seed + 1, "steps": 14,
+                                  "cfg": base.get("cfg", 7.0),
+                                  "sampler_name": base.get(
+                                      "sampler_name", "dpmpp_2m"),
+                                  "scheduler": base.get(
+                                      "scheduler", "karras"),
+                                  "denoise": 0.55}}
+    # Everything that consumed the single pass now consumes the refine.
+    for nid, node in out.items():
+        if nid in ("hires_up", "hires_ks") or not isinstance(node, dict):
+            continue
+        for key, value in list(node.get("inputs", {}).items()):
+            if (isinstance(value, list) and len(value) == 2
+                    and str(value[0]) == sid):
+                node["inputs"][key] = ["hires_ks", value[1]]
+    # hires_up must keep reading the BASE pass, not itself-after-rewire.
+    out["hires_up"]["inputs"]["samples"] = [sid, 0]
+    return out
+
+
 def build_workflow(template: dict[str, Any], params: dict[str, Any]) -> dict[str, Any]:
     """Fill a template's declared parameter slots. Unknown params are
     rejected. A slot may be a single {node, input} or a LIST of them — one
