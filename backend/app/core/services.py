@@ -7744,6 +7744,29 @@ class Services:
                 f"The '{task}' task transforms an existing image — upload "
                 "one first.")
 
+        # Draft intent is a CAPABILITY, not a phrasing (the background/
+        # animate/viewpoint doctrine): "a quick draft of X" must reach the
+        # 4-step speed template deterministically, never depend on the 7B
+        # router noticing. Content words never trigger it — "fast car" and
+        # "draft horse" stay on the normal path.
+        if task == "generate" and quality.draft_intent(prompt):
+            try:
+                needed = (self.workflows.load_named("generate_draft")
+                          .get("required_models") or [])
+                if all(self.registry.is_ready(m) for m in needed):
+                    triage = dict(triage or {})
+                    triage["workflow"] = "generate_draft"
+                    job.log("info", "Draft requested — the 4-step speed "
+                                    "template renders this (~6x faster); "
+                                    "ask again without 'draft' for a "
+                                    "final-quality image")
+                else:
+                    job.log("info", "Draft requested, but the speed "
+                                    "model(s) are not downloaded yet — "
+                                    "rendering normal quality")
+            except Exception:  # noqa: BLE001 — the normal path always works
+                pass
+
         # BEST-WORKFLOW FAST PATH: if triage chose a validated template whose
         # models are ready, render THAT template's tuned graph — a custom LLM
         # design only happens when no template fits. Without this, triage's

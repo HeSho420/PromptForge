@@ -2272,6 +2272,36 @@ class DelegatedRendersKeepTheLocalPlannerWarm(unittest.TestCase):
             unload.assert_called_once()
 
 
+class DraftIntent(unittest.TestCase):
+    """'a quick draft of X' reaches the 4-step speed template
+    deterministically; content words never trigger it."""
+
+    def test_intent_phrases_match_and_content_words_do_not(self):
+        from app.core.quality import draft_intent
+
+        for yes in ("a quick draft of a red barn",
+                    "rough sketch of a house by the sea",
+                    "just a preview of the poster",
+                    "render it in draft quality",
+                    "draft mode: a castle at dawn",
+                    "as a mockup of the landing page"):
+            self.assertTrue(draft_intent(yes), yes)
+        for no in ("a fast car on a highway",
+                   "a draft horse pulling a cart",
+                   "draft beer on a wooden bar",
+                   "a pencil sketch of a cat",   # art style, not speed
+                   "a quick brown fox"):
+            self.assertFalse(draft_intent(no), no)
+
+    def test_the_generate_route_coerces_to_the_draft_template(self):
+        src = inspect.getsource(Services._workflow_inner)
+        self.assertIn("draft_intent", src)
+        self.assertIn('"generate_draft"', src)
+        # The coercion happens BEFORE the template fast path consumes it.
+        self.assertLess(src.index("draft_intent"),
+                        src.index("_template_workflow"))
+
+
 class FacePolish(unittest.TestCase):
     """The automatic face-refinement pass: judged, fail-open, and wired at
     the forge save — the mushy-face-in-full-body-shots fix."""

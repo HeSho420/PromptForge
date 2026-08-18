@@ -922,6 +922,22 @@ def default_edit_step(prompt: str) -> dict[str, Any]:
     return {**base, "task": "inpaint", "operation": op}
 
 
+# Draft INTENT, not draft-the-word: a qualifier + a draft noun ("quick
+# draft", "rough sketch", "just a preview") or an explicit draft mode.
+# Content phrases never match — "fast car", "draft horse", "draft beer"
+# and a bare artistic "sketch of a cat" all stay on the normal path.
+_DRAFT_INTENT = re.compile(
+    r"\b(?:quick|rough|fast|speedy|just\s+a|as\s+a)\s+"
+    r"(?:draft|sketch|preview|mock-?up)\b"
+    r"|\bdraft\s+(?:version|quality|mode)\b",
+    re.IGNORECASE)
+
+
+def draft_intent(prompt: str) -> bool:
+    """Does the request ask for a fast draft rather than a final image?"""
+    return bool(_DRAFT_INTENT.search(prompt or ""))
+
+
 # The planner's reply as a grammar the LLM server ENFORCES (Ollama
 # structured outputs). Shape errors — bare objects, missing keys, invented
 # operations — become impossible on servers that support it; everything
