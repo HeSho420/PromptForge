@@ -308,6 +308,28 @@ never-mask-the-face rule). Do not "extend" it to image_edit.
   after, same request: scores → checklist SAME SECOND, probes +3s on
   the still-warm vl — 39s → 3s. Glyph guard also fired again on this
   run (consistent). 959 tests.
+- **Cycle 27 (f1b8666)** Outpaint junction exposure harmonization.
+  Measured 3 independent renders of the same L+R outpaint: no sharp
+  seam (feather works, col-deltas p57-p87), but the 16px strip step at
+  the RIGHT junction sat p99.4-p100 of the interior distribution every
+  time (14.9-16.5 vs median 2.7; margins ~2x brighter) — the recurring
+  "lighting/colour mismatch" in inspections, visible as a tonal wall.
+  quality.harmonize_margins: pin margin low-freq colour to the SOURCE's
+  edge strip, 361-row smoothing, cap 28, smoothstep falloff to the
+  outer edge, plus a 24px inland tail whose junction value is
+  CONSTRUCTED as E−d (margin correction minus the junction's own raw
+  step) so both sides land on the same tone by definition. FOUR
+  parameter revisions, each killed by a measurement: k65/cap48 painted
+  a visible stripe (eye); margin-only introduced a 1px edge (sharp
+  metric p99.9); per-column inland source-diff MOVED the edge; 96px
+  tail overdarkened correct interior (profile: tone reach ~16px though
+  byte reach 64px). Wired post-deglyph in _guarded_outpaint + ladder
+  outpaint retry, fail-safe, logs measured step/side. LIVE fresh seed:
+  guard logged left 12/right 28; delivered file: left strip p2.3
+  (0.31!), right p93.2 (8.79, halved; residual = deliberate cap),
+  sharp p31.5/p72.1 (≤ raw baseline), deep interior byte-identical,
+  junction invisible in crops; inspector dropped its across-the-seam
+  complaint. Glyph guard fired on both runs (5 consecutive). 966 tests.
 Candidates, roughly ranked (artifact focus first per 2026-08-18 mandate):
 - **Cycle 23 (0079083)** Outpaint glyph guard SHIPPED and live-proven.
   Detection calibrated on 16 real margins (per-row density of >40 grey
