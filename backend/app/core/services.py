@@ -2375,6 +2375,17 @@ class Services:
                 f"({s.get('target') or '—'})"
                 for i, s in enumerate(steps)))
 
+        # Batch the TEXT-model work before the VISION pass. On a single
+        # 8 GB GPU the two models evict each other, and every swap is a
+        # full reload — measured on a live edit: plan (text, 21.6 s load)
+        # → scene (vision, 22.5 s) → enhance (text AGAIN, 17.1 s reload).
+        # Enhancing every step here, while the text model is still warm
+        # from planning, removes one whole reload per edit job.
+        if real and steps:
+            for s in steps:
+                s["_enh"] = quality.enhance_prompt(
+                    self.llm, s["instruction"], s["task"])
+
         # Image Understanding: one rich scene graph is built per image and
         # reused by every step — planning context, placement, targeted
         # masking, and prompt grounding all read it. A diffusion model told
@@ -2437,10 +2448,11 @@ class Services:
                 n = len(steps)
                 # Prompt optimization (append-only — the user's words always
                 # survive verbatim; only safety.py may ever filter content).
+                # Enhanced up front, before the vision pass, so the text
+                # model is not reloaded mid-job (see the batch above).
                 if real:
-                    enh = quality.enhance_prompt(self.llm,
-                                                 step["instruction"],
-                                                 step["task"])
+                    enh = step.get("_enh") or quality.enhance_prompt(
+                        self.llm, step["instruction"], step["task"])
                     added = enh["positive"][len(step["instruction"]):]
                     if added:
                         job.log("info", "[llm] prompt enhanced: "
