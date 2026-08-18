@@ -2347,6 +2347,89 @@ _INSPECT_QUESTION = (
     'JSON: {"issues": ["<short issue>", ...]} — an empty list if it looks clean.')
 
 
+def _grow_box(box: tuple[int, int, int, int],
+              size: tuple[int, int]) -> tuple[int, int, int, int]:
+    """The inspector's zoom: the region plus a generous context margin."""
+    left, top, right, bottom = box
+    mw = int((right - left) * 0.3) + 24
+    mh = int((bottom - top) * 0.3) + 24
+    return (max(0, left - mw), max(0, top - mh),
+            min(size[0], right + mw), min(size[1], bottom + mh))
+
+
+def _runs(flags: Any, gap: int) -> list[tuple[int, int]]:
+    """Contiguous True runs of a 1-D bool array, merging gaps below `gap`."""
+    import numpy as np
+    idx = np.nonzero(flags)[0]
+    if not len(idx):
+        return []
+    runs: list[tuple[int, int]] = []
+    start = prev = int(idx[0])
+    for i in idx[1:]:
+        i = int(i)
+        if i - prev > gap:
+            runs.append((start, prev + 1))
+            start = i
+        prev = i
+    runs.append((start, prev + 1))
+    return runs
+
+
+def _mask_view_boxes(mask: Image.Image) -> list[tuple[int, int, int, int]]:
+    """One inspection box per far-apart region of the mask.
+
+    The inspector used to zoom to the mask's single bbox — but a
+    left+right outpaint's two bands span the whole canvas, so the "zoom"
+    degenerated to the full frame and the model judged the byte-identical
+    subject instead of the edit. Measured on the same render 3/3 runs:
+    the full view produced only complaints about the untouched subject
+    ("seam on the bikini top") and MISSED a real junction stripe 2/2,
+    while per-band views caught the stripe 2/2 and cannot name what they
+    are never shown. Splits on column/row projection gaps; a hollow ring
+    (all-side outpaint) becomes its four edge bands; anything else keeps
+    the plain bbox zoom."""
+    import numpy as np
+    box = mask.getbbox()
+    if box is None:
+        return []
+    a = np.asarray(mask) > 127
+    h, w = a.shape
+    cols = _runs(a.any(axis=0), max(16, w // 12))
+    rows = _runs(a.any(axis=1), max(16, h // 12))
+    if len(cols) > 1 or len(rows) > 1:
+        boxes = [(c0, r0, c1, r1)
+                 for c0, c1 in cols for r0, r1 in rows
+                 if a[r0:r1, c0:c1].any()]
+        return boxes if len(boxes) <= 4 else [box]
+    # hollow ring (every side padded): the bbox is full but the middle is
+    # empty — inspect each edge band instead of the whole frame
+    left, top, right, bottom = box
+    iw, ih = right - left, bottom - top
+    inner = a[top + ih // 4:bottom - ih // 4,
+              left + iw // 4:right - iw // 4]
+    if inner.size and not inner.any():
+        mid_r, mid_c = a[(top + bottom) // 2], a[:, (left + right) // 2]
+        bands: list[tuple[int, int, int, int]] = []
+        edges = _runs(mid_r, 8), _runs(mid_c, 8)
+        for c0, c1 in edges[0]:
+            bands.append((c0, 0, c1, h))
+        for r0, r1 in edges[1]:
+            bands.append((0, r0, w, r1))
+        if 2 <= len(bands) <= 4:
+            return bands
+    return [box]
+
+
+def _view_side(box: tuple[int, int, int, int],
+               size: tuple[int, int]) -> str:
+    """Rough location label for a multi-view issue prefix."""
+    cx = (box[0] + box[2]) / 2 / size[0]
+    cy = (box[1] + box[3]) / 2 / size[1]
+    if abs(cx - 0.5) >= abs(cy - 0.5):
+        return "left" if cx < 0.5 else "right"
+    return "top" if cy < 0.5 else "bottom"
+
+
 def inspect_seams(critic: Any, edited: Image.Image,
                   mask: Image.Image | None) -> list[str]:
     """Stage 4: model inspection of the edited region + deterministic stats.
@@ -2361,22 +2444,33 @@ def inspect_seams(critic: Any, edited: Image.Image,
             pass
     ask = getattr(critic, "ask", None)
     if ask is not None:
-        try:
-            view = edited
-            if aligned is not None and aligned.getbbox():
-                # zoom the model in on the edit (plus generous margin)
-                left, top, right, bottom = cast(
-                    "tuple[int, int, int, int]", aligned.getbbox())
-                mw = int((right - left) * 0.3) + 24
-                mh = int((bottom - top) * 0.3) + 24
-                view = edited.crop((max(0, left - mw), max(0, top - mh),
-                                    min(edited.width, right + mw),
-                                    min(edited.height, bottom + mh)))
-            data = _parse_json(ask(view, _INSPECT_QUESTION))
-            if data and isinstance(data.get("issues"), list):
-                issues.extend(str(i)[:120] for i in data["issues"][:6])
-        except Exception:  # noqa: BLE001 — inspection is advisory
-            pass
+        # zoom the model in on the edit (plus generous margin) — one view
+        # per far-apart mask region, so it can only judge pixels the edit
+        # could actually have touched
+        boxes: list[tuple[int, int, int, int] | None] = [None]
+        if aligned is not None:
+            try:
+                found = _mask_view_boxes(aligned)
+                if found:
+                    boxes = list(found)
+            except Exception:  # noqa: BLE001 — inspection is advisory
+                pass
+        multi = len(boxes) > 1
+        per_view = 4 if multi else 6
+        for box in boxes:
+            try:
+                view = edited
+                prefix = ""
+                if box is not None:
+                    view = edited.crop(_grow_box(box, edited.size))
+                    if multi:
+                        prefix = _view_side(box, edited.size) + " region: "
+                data = _parse_json(ask(view, _INSPECT_QUESTION))
+                if data and isinstance(data.get("issues"), list):
+                    issues.extend(prefix + str(i)[:120]
+                                  for i in data["issues"][:per_view])
+            except Exception:  # noqa: BLE001 — inspection is advisory
+                continue
     # de-duplicate, keep order
     return list(dict.fromkeys(i for i in issues if i.strip()))
 

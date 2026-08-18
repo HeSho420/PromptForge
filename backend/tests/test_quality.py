@@ -669,7 +669,8 @@ class EditPipelineIntegrationTests(unittest.TestCase):
         ]})
         self.s.critic = ScriptedCritic([
             '{"match": true, "why": "ok"}',   # mask check (step 1)
-            '{"issues": []}',                 # outpaint seam inspection
+            '{"issues": []}',                 # seam inspection: left band
+            '{"issues": []}',                 # seam inspection: right band
             self._score_json(96),             # final scorecard
         ])
         self.s.start()
@@ -922,6 +923,77 @@ class EditPipelineIntegrationTests(unittest.TestCase):
         self.assertEqual(done.state.value, "completed")
         self.assertNotIn("route", done.result)          # stayed on inpaint
         self.assertGreaterEqual(self.RealishInpaint.calls, 1)
+
+
+class MaskViewBoxTests(unittest.TestCase):
+    """The inspector's zoom must follow the mask's SHAPE, not its bbox.
+    Measured 2026-08-18 on a real left+right outpaint: the two bands'
+    joint bbox is the whole frame, and the full-frame view produced only
+    complaints about the untouched (byte-identical) subject 3/3 runs while
+    MISSING a real junction stripe 2/2 — the per-band views caught the
+    stripe 2/2 and cannot name pixels they are never shown."""
+
+    class _Recorder:
+        def __init__(self, reply='{"issues": ["spot"]}'):
+            self.sizes = []
+            self.reply = reply
+
+        def ask(self, image, question):
+            self.sizes.append(image.size)
+            return self.reply
+
+    @staticmethod
+    def _bands_mask(w=800, h=600, pad=100):
+        m = Image.new("L", (w, h), 0)
+        m.paste(255, (0, 0, pad, h))
+        m.paste(255, (w - pad, 0, w, h))
+        return m
+
+    def test_two_bands_become_two_views(self):
+        boxes = quality._mask_view_boxes(self._bands_mask())
+        self.assertEqual(boxes, [(0, 0, 100, 600), (700, 0, 800, 600)])
+
+    def test_center_blob_keeps_the_single_bbox_zoom(self):
+        m = Image.new("L", (800, 600), 0)
+        m.paste(255, (300, 200, 500, 400))
+        self.assertEqual(quality._mask_view_boxes(m),
+                         [(300, 200, 500, 400)])
+
+    def test_hollow_ring_becomes_its_edge_bands(self):
+        m = Image.new("L", (800, 600), 255)
+        m.paste(0, (100, 100, 700, 500))   # all-side outpaint ring
+        boxes = quality._mask_view_boxes(m)
+        self.assertEqual(len(boxes), 4)
+        self.assertIn((0, 0, 100, 600), boxes)     # left band
+        self.assertIn((700, 0, 800, 600), boxes)   # right band
+        self.assertIn((0, 0, 800, 100), boxes)     # top band
+        self.assertIn((0, 500, 800, 600), boxes)   # bottom band
+
+    def test_single_side_band_stays_one_tight_view(self):
+        m = Image.new("L", (800, 600), 0)
+        m.paste(255, (0, 0, 800, 120))     # top-only outpaint
+        self.assertEqual(quality._mask_view_boxes(m), [(0, 0, 800, 120)])
+
+    def test_inspect_asks_once_per_band_with_located_issues(self):
+        critic = self._Recorder()
+        edited = Image.new("RGB", (800, 600), (20, 20, 20))
+        issues = quality.inspect_seams(critic, edited, self._bands_mask())
+        self.assertEqual(len(critic.sizes), 2)
+        # each view is band + 30% context, never the full frame
+        self.assertTrue(all(w < 300 for w, _h in critic.sizes),
+                        critic.sizes)
+        self.assertIn("left region: spot", issues)
+        self.assertIn("right region: spot", issues)
+
+    def test_inspect_single_view_issues_stay_unprefixed(self):
+        critic = self._Recorder()
+        m = Image.new("L", (800, 600), 0)
+        m.paste(255, (300, 200, 500, 400))
+        issues = quality.inspect_seams(
+            critic, Image.new("RGB", (800, 600), (20, 20, 20)), m)
+        self.assertEqual(len(critic.sizes), 1)
+        self.assertIn("spot", issues)
+        self.assertNotIn("middle region: spot", issues)
 
 
 if __name__ == "__main__":
