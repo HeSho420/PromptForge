@@ -718,6 +718,22 @@ class MarginPersonGuardTests(unittest.TestCase):
                             "p", "n", None, real=True, dirs=dirs)
         self.assertEqual([extra for _t, extra in renders], [dirs, dirs])
 
+    def test_measured_junction_overrules_the_artifact_score(self):
+        s = self._services()
+        job = self._Job()
+        out = Image.new("RGB", (328, 300), (130, 130, 130))
+        out.paste(Image.new("RGB", (200, 300), (100,) * 3), (64, 0))
+        scores = dict.fromkeys(quality.SCORE_KEYS, 97)
+        grounded = s._ground_scores(job, scores, out, {
+            "pre_size": (200, 300),
+            "dirs": {"left": 64, "right": 64, "top": 0, "bottom": 0}})
+        self.assertEqual(grounded["artifact_free"], 70)
+        self.assertEqual(scores["artifact_free"], 97)   # input not mutated
+        self.assertTrue(any("overrules the artifact score" in m
+                            for m in job.logs))
+        # no outpaint in the job → untouched, same object
+        self.assertIs(s._ground_scores(job, scores, out, None), scores)
+
     def test_guard_hands_the_deglyphed_result_to_harmonize(self):
         # harmonize runs LAST: it must see the deglyphed image, and its
         # return value is what the guard hands back
@@ -867,6 +883,29 @@ class MarginHarmonyTests(unittest.TestCase):
         self.assertEqual(list(steps), ["top"])
         self.assertLess(abs(fixed.getpixel((100, 63))[0] - 100), 3)
         self.assertEqual(fixed.getpixel((100, 200)), (100, 100, 100))
+
+    def test_wall_junction_caps_the_artifact_score(self):
+        # the whole-frame scorecard rated a striped render artifact_free
+        # 97 (measured 2026-08-18) — the deterministic junction verdict
+        # is the gate that can actually see this artifact class
+        src, out = self._outpainted(100, 130)
+        flaw = quality.junction_flaws(out, (64, 0, 64, 0))
+        self.assertIsNotNone(flaw)
+        self.assertEqual(flaw[0], 70)
+        self.assertIn("junction", flaw[1])
+
+    def test_hard_edge_at_the_junction_caps_harder(self):
+        src, out = self._outpainted(100, 100, size=(600, 300))
+        out.paste(Image.new("RGB", (1, 300), (160,) * 3), (63, 0))
+        flaw = quality.junction_flaws(out, (64, 0, 64, 0))
+        self.assertIsNotNone(flaw)
+        self.assertEqual(flaw[0], 55)
+        self.assertIn("hard edge", flaw[1])
+
+    def test_clean_junctions_and_no_pads_report_nothing(self):
+        src, out = self._outpainted(100, 100)
+        self.assertIsNone(quality.junction_flaws(out, (64, 0, 64, 0)))
+        self.assertIsNone(quality.junction_flaws(src, (0, 0, 0, 0)))
 
     def test_feather_contamination_fades_without_a_junction_edge(self):
         # the render's blend zone (first original columns) carries the old

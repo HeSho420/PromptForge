@@ -1920,6 +1920,86 @@ def harmonize_margins(image: Image.Image, src: Image.Image,
             steps)
 
 
+# junction_flaws gates, each DOUBLE-gated (magnitude AND percentile) and set
+# mid-gap in the measured evidence (2026-08-18): clean harmonized junctions
+# measured strip steps <= 8.8/255 at <= p93.2 and column-deltas <= 3.4 at
+# <= p86.7; un-harmonized exposure walls measured 14.9-16.5 at p99.4-p100;
+# a real correction-stripe defect measured column-deltas 11.1-12.4 at p99.9.
+_JUNCTION_EDGE_MAG = 6.0     # hard-edge magnitude floor (worst clean 3.4)
+_JUNCTION_EDGE_PCT = 99.5    # hard-edge percentile floor (worst clean p86.7)
+_JUNCTION_WALL_MAG = 12.0    # exposure-wall floor (clean 8.8 / walls 14.9+)
+_JUNCTION_WALL_PCT = 98.0    # exposure-wall percentile (p93.2 / p99.4+)
+
+
+def junction_flaws(image: Image.Image,
+                   pads: tuple[int, int, int, int]
+                   ) -> tuple[int, str] | None:
+    """Deterministic outpaint-junction verdict: an artifact_free ceiling
+    plus the reason, or None when every junction sits inside the image's
+    own statistics.
+
+    The whole-frame scorecard was measured scoring a render with a REAL
+    junction stripe artifact_free 97 — at frame scale the judge cannot
+    see the one artifact class outpaints actually produce. Same doctrine
+    as the format arithmetic (cycle 21): a cheap measurement outranks the
+    vision judge where the measurement is exact. Both signals compare the
+    junction against the image's OWN interior distribution, so busy
+    photos self-calibrate; each gate needs magnitude AND percentile, so
+    neither noisy small numbers nor legitimately busy content can trip
+    it. A hard edge (correction stripe, missing feather) caps at 55; a
+    low-frequency exposure wall caps at 70. Fail-safe: any hiccup means
+    None."""
+    import numpy as np
+    if not any(p >= 24 for p in pads):
+        return None
+    a = np.asarray(image.convert("RGB"), dtype=np.float32)
+    strip = 16
+
+    def axis_flaws(arr: Any, p0: int, p1: int,
+                   names: tuple[str, str]) -> list[tuple[int, str]]:
+        if p0 < 24 and p1 < 24:
+            return []
+        w = arr.shape[1]
+        x0, x1 = p0, w - p1                     # the original's span
+        if x1 - x0 < 6 * strip:
+            return []
+
+        def sdiff(x: int) -> float:
+            lo = arr[:, x - strip:x].mean(axis=(0, 1))
+            hi = arr[:, x:x + strip].mean(axis=(0, 1))
+            return float(np.abs(lo - hi).mean())
+
+        base = np.array([sdiff(x)
+                         for x in range(x0 + 2 * strip, x1 - 2 * strip, 8)])
+        dcol = np.abs(np.diff(arr, axis=1)).mean(axis=(0, 2))
+        found: list[tuple[int, str]] = []
+        for pad, xj, name in ((p0, x0, names[0]), (p1, x1, names[1])):
+            if pad < 24:
+                continue
+            jd = float(max(dcol[xj - 1], dcol[xj]))
+            jp = float((dcol < jd).mean() * 100)
+            v = sdiff(xj)
+            vp = float((base < v).mean() * 100)
+            if jd >= _JUNCTION_EDGE_MAG and jp >= _JUNCTION_EDGE_PCT:
+                found.append((55, f"a hard edge runs along the {name} "
+                                  f"junction ({jd:.1f}/255, p{jp:.1f} of "
+                                  "the image's own columns)"))
+            elif v >= _JUNCTION_WALL_MAG and vp >= _JUNCTION_WALL_PCT:
+                found.append((70, f"the exposure steps {v:.1f}/255 at the "
+                                  f"{name} junction (p{vp:.1f} of the "
+                                  "interior)"))
+        return found
+
+    left, top, right, bottom = pads
+    try:
+        flaws = axis_flaws(a, left, right, ("left", "right"))
+        flaws += axis_flaws(np.transpose(a, (1, 0, 2)), top, bottom,
+                            ("top", "bottom"))
+    except Exception:  # noqa: BLE001 — a score guard must never raise
+        return None
+    return min(flaws) if flaws else None
+
+
 # Which margins an outpaint request names. The template's default is a
 # left+right extension; when the words pick an axis or a side the pad must
 # follow them — "extend the picture upward" rendered left+right grows the

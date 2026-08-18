@@ -3030,7 +3030,8 @@ class Services:
                         last_outpaint = {"positive": out_pos,
                                          "negative": out_neg,
                                          "checkpoint": out_ckpt,
-                                         "dirs": out_dirs}
+                                         "dirs": out_dirs,
+                                         "pre_size": pre_size}
                     result_adapter = "comfyui-outpaint"
                     result_is_mock = False
                 else:
@@ -3081,6 +3082,8 @@ class Services:
                 job.log("info", "[stage] score — grading realism, accuracy "
                                 "and consistency")
                 scores = quality.scorecard(self.critic, current, prompt)
+                scores = self._ground_scores(job, scores, current,
+                                             last_outpaint)
                 self._log_scores(job, scores)
                 # Did the edit DO what was asked? The checklist names the
                 # parts that are missing, and those names decide what the
@@ -3432,6 +3435,8 @@ class Services:
                                    if last_mask is not None else [])
                     scores2 = quality.scorecard(self.critic, candidate,
                                                 prompt)
+                    scores2 = self._ground_scores(job, scores2, candidate,
+                                                  last_outpaint)
                     o2 = quality.overall(scores2)
                     ob = quality.overall(best_scores)
                     if o2 is None:
@@ -4232,6 +4237,36 @@ class Services:
                             "exposure to the picture at the junction "
                             f"(measured step: {pretty})")
         return fixed
+
+    def _ground_scores(self, job: Job, scores: dict[str, int] | None,
+                       image: Image.Image,
+                       last_outpaint: dict[str, Any] | None
+                       ) -> dict[str, int] | None:
+        """Measured junction defects overrule the whole-frame artifact
+        score. The scorecard rated a render carrying a REAL junction
+        stripe artifact_free 97 — at frame scale the judge cannot see the
+        artifact class outpaints produce, and that score is the gate that
+        decides pass/retry. Cycle-21 doctrine: where a cheap measurement
+        is exact, it outranks the vision judge — here it can only LOWER
+        the score, never raise it."""
+        if not scores or not last_outpaint:
+            return scores
+        try:
+            pads = self._margin_geometry(image.size,
+                                         last_outpaint["pre_size"],
+                                         last_outpaint.get("dirs"))
+            flaw = quality.junction_flaws(image, pads)
+        except Exception:  # noqa: BLE001 — a score guard must never raise
+            return scores
+        if flaw and scores.get("artifact_free", 0) > flaw[0]:
+            cap, why = flaw
+            job.log("info", "[stage] score — the measured junction "
+                            f"overrules the artifact score: {why} "
+                            f"(artifact_free {scores['artifact_free']} "
+                            f"→ {cap})")
+            scores = dict(scores)
+            scores["artifact_free"] = cap
+        return scores
 
     # Testability seam: the glyph detector, overridable per instance.
     _glyph_rows = staticmethod(quality.glyph_band_rows)
