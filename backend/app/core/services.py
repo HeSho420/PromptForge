@@ -2389,6 +2389,13 @@ class Services:
             for s in steps:
                 s["_enh"] = quality.enhance_prompt(
                     self.llm, s["instruction"], s["task"])
+            # The adherence checklist reads only the INSTRUCTION, so it
+            # belongs in this warm-text batch too. Built after the render
+            # it was the judging chain's text-model reload: scorecard
+            # (vision) → checklist (text, full reload) → probes (vision
+            # AGAIN). Verify falls back if the plan mutated.
+            steps[-1]["_checklist"] = quality.request_checklist(
+                self.llm, steps[-1].get("instruction") or prompt)
 
         # Image Understanding: one rich scene graph is built per image and
         # reused by every step — planning context, placement, targeted
@@ -3084,8 +3091,16 @@ class Services:
                 # retry re-runs the night restyle; feeding it "no car in the
                 # driveway" would push a car INTO the positive prompt of the
                 # step whose job was the sky.
-                checklist = quality.request_checklist(
-                    self.llm, last_step.get("instruction") or prompt)
+                # Prefer the checklist built at PLAN time, while the text
+                # model was warm (the warm-text batch): building it here,
+                # between two vision calls, cost a full text-model reload
+                # on 8 GB. Presence-checked, not truth-checked — an empty
+                # batched checklist is an answer, not a miss.
+                if "_checklist" in last_step:
+                    checklist = last_step["_checklist"]
+                else:
+                    checklist = quality.request_checklist(
+                        self.llm, last_step.get("instruction") or prompt)
                 if checklist:
                     job.log("info", "[llm] the edit must deliver: "
                                     + " · ".join(c["need"] for c in checklist))
