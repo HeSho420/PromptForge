@@ -2,7 +2,7 @@
   "template": "inpaint",
   "version": 3,
   "task": "inpaint",
-  "description": "Modern soft inpainting: InpaintModelConditioning + DifferentialDiffusion (per-pixel denoise strength = seamless blends), grown+feathered mask, dpmpp_2m/karras. Checkpoint is swappable so the LLM can pick the model.",
+  "description": "Modern soft inpainting: InpaintModelConditioning + DifferentialDiffusion (per-pixel denoise strength = seamless blends), grown+feathered mask, dpmpp_2m/karras. Checkpoint is swappable so the LLM can pick the model. The decoded frame is composited back over the ORIGINAL pixels with the same feathered mask, so everything outside the edit region stays byte-identical (no whole-frame VAE softening).",
   "required_models": [
     "sd15-inpaint"
   ],
@@ -180,7 +180,27 @@
       "inputs": {
         "filename_prefix": "promptforge",
         "images": [
+          "13",
+          0
+        ]
+      }
+    },
+    "13": {
+      "class_type": "ImageCompositeMasked",
+      "inputs": {
+        "destination": [
+          "2",
+          0
+        ],
+        "source": [
           "11",
+          0
+        ],
+        "x": 0,
+        "y": 0,
+        "resize_source": false,
+        "mask": [
+          "5",
           0
         ]
       }

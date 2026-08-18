@@ -56,6 +56,31 @@ class TemplateLibraryTests(unittest.TestCase):
     def test_allowlist_and_output_table_stay_in_sync(self):
         self.assertEqual(set(NODE_OUTPUTS), ALLOWED_NODE_TYPES)
 
+    def test_masked_edits_composite_back_over_the_original(self):
+        """Every current inpaint/outpaint template must end by compositing
+        the decoded frame back over the original pixels. Without it the
+        WHOLE frame takes a VAE encode/decode round trip: measured live
+        (2026-08-18, 832x1216) 13-28% of the untouched image shifted by
+        more than 8/255 on every single edit — the whole-photo shimmer on
+        hair/foliage/fabric users read as artifacts, compounding per step."""
+        for t in self.lib.list_all():
+            if t.get("task") not in ("inpaint", "outpaint"):
+                continue
+            graph = t["graph"]
+            save = next(n for n in graph.values()
+                        if n["class_type"] == "SaveImage")
+            feeder = graph[save["inputs"]["images"][0]]
+            self.assertEqual(feeder["class_type"], "ImageCompositeMasked",
+                             f"{t['template']}: SaveImage must read from the "
+                             "composite-back, not the raw VAE decode")
+            dest = graph[feeder["inputs"]["destination"][0]]["class_type"]
+            self.assertIn(dest, ("LoadImage", "ImagePadForOutpaint"),
+                          f"{t['template']}: composite destination must be "
+                          "the original (or padded original) pixels")
+            self.assertIsInstance(feeder["inputs"]["mask"], list,
+                                  f"{t['template']}: composite needs the "
+                                  "same mask chain the sampler used")
+
     def test_knowledge_teaches_guide_plus_example(self):
         k = self.lib.knowledge("outpaint")
         self.assertIn("ImagePadForOutpaint", k)

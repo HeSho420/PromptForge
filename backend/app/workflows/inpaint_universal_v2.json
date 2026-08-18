@@ -2,7 +2,7 @@
   "template": "inpaint_universal",
   "version": 2,
   "task": "inpaint",
-  "description": "Universal SOFT inpainting: SetLatentNoiseMask + DifferentialDiffusion (per-pixel denoise over the feathered mask) \u2014 works with ANY checkpoint, so the LLM can inpaint with photoreal community models. denoise 0.75-0.9 keeps composition from the original pixels.",
+  "description": "Universal SOFT inpainting: SetLatentNoiseMask + DifferentialDiffusion (per-pixel denoise over the feathered mask) \u2014 works with ANY checkpoint, so the LLM can inpaint with photoreal community models. denoise 0.75-0.9 keeps composition from the original pixels. The decoded frame is composited back over the ORIGINAL pixels with the same feathered mask, so everything outside the edit region stays byte-identical (no whole-frame VAE softening).",
   "required_models": [],
   "parameters": {
     "checkpoint": {
@@ -173,7 +173,7 @@
       "inputs": {
         "filename_prefix": "promptforge",
         "images": [
-          "11",
+          "14",
           0
         ]
       }
@@ -183,6 +183,26 @@
       "inputs": {
         "model": [
           "1",
+          0
+        ]
+      }
+    },
+    "14": {
+      "class_type": "ImageCompositeMasked",
+      "inputs": {
+        "destination": [
+          "2",
+          0
+        ],
+        "source": [
+          "11",
+          0
+        ],
+        "x": 0,
+        "y": 0,
+        "resize_source": false,
+        "mask": [
+          "5",
           0
         ]
       }

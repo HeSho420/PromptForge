@@ -83,6 +83,14 @@ Growing + feathering the mask hides seams — the single most common inpaint
 failure. For object REMOVAL, prompt the background, not the object. For
 background REPLACEMENT, InvertMask first.
 
+ALWAYS end an inpaint graph with ImageCompositeMasked (destination = the
+ORIGINAL LoadImage output, source = the VAEDecode output, mask = the same
+grown+feathered mask the sampler used) → SaveImage. Without it the whole
+frame takes a VAE encode/decode round trip and every untouched pixel
+degrades (measured: 13–28% of the untouched image shifts by more than
+8/255 — visible shimmer on hair, foliage and fabric, compounding on every
+edit step). The composite keeps everything outside the mask byte-identical.
+
 ## Task: outpaint
 
 Extend the canvas with the SOFT recipe: LoadImage → ImagePadForOutpaint
@@ -96,6 +104,11 @@ subject in the prompt gets painted AGAIN in the new space (extra people bug).
 Negative must include: extra person, additional people, duplicated person,
 cloned subject, split image, seam, border. Prefer a dedicated inpaint
 checkpoint. Keep total canvas within the machine budget.
+
+ALWAYS end an outpaint graph with ImageCompositeMasked (destination = the
+padded image, pad output 0; source = the VAEDecode output; mask = the pad
+mask, pad output 1) → SaveImage — the original image area then stays
+byte-identical instead of taking a whole-frame VAE round trip.
 
 ## Draft mode (speed LoRAs)
 

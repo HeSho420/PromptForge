@@ -2,7 +2,7 @@
  "template": "replace_background",
  "version": 1,
  "task": "inpaint",
- "description": "Background replacement: mask the SUBJECT, the inverted mask repaints everything around it with the prompted scene.",
+ "description": "Background replacement: mask the SUBJECT, the inverted mask repaints everything around it with the prompted scene. The decoded frame is composited back over the original with the same inverted mask, so the subject's pixels stay byte-identical (identity preserved, no whole-frame VAE softening).",
  "required_models": [
   "sd15-inpaint"
  ],
@@ -155,7 +155,27 @@
    "inputs": {
     "filename_prefix": "promptforge_inpaint",
     "images": [
+     "12",
+     0
+    ]
+   }
+  },
+  "12": {
+   "class_type": "ImageCompositeMasked",
+   "inputs": {
+    "destination": [
+     "2",
+     0
+    ],
+    "source": [
      "10",
+     0
+    ],
+    "x": 0,
+    "y": 0,
+    "resize_source": false,
+    "mask": [
+     "5",
      0
     ]
    }

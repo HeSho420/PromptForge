@@ -2,7 +2,7 @@
  "template": "outpaint",
  "version": 2,
  "task": "outpaint",
- "description": "Soft outpainting: extends the canvas (default 192 px left+right) and continues the scene with the modern soft-inpaint recipe (DifferentialDiffusion + InpaintModelConditioning over a feathered pad mask) so the boundary blends without a visible seam. The prompt must describe the CONTINUATION of the existing scene (background, setting, lighting) - never name the subject, or the model paints a second copy of it in the new space; the negative blocks extra people. Adjust left/top/right/bottom on ImagePadForOutpaint for other directions. Set 'checkpoint' to a dedicated INPAINT model for the best blending.",
+ "description": "Soft outpainting: extends the canvas (default 192 px left+right) and continues the scene with the modern soft-inpaint recipe (DifferentialDiffusion + InpaintModelConditioning over a feathered pad mask) so the boundary blends without a visible seam. The prompt must describe the CONTINUATION of the existing scene (background, setting, lighting) - never name the subject, or the model paints a second copy of it in the new space; the negative blocks extra people. Adjust left/top/right/bottom on ImagePadForOutpaint for other directions. Set 'checkpoint' to a dedicated INPAINT model for the best blending. The decoded frame is composited back over the padded original with the pad mask, so the ORIGINAL image area stays byte-identical (no whole-frame VAE softening).",
  "required_models": [
   "sd15-inpaint"
  ],
@@ -171,8 +171,28 @@
    "inputs": {
     "filename_prefix": "promptforge_outpaint",
     "images": [
+     "11",
+     0
+    ]
+   }
+  },
+  "11": {
+   "class_type": "ImageCompositeMasked",
+   "inputs": {
+    "destination": [
+     "3",
+     0
+    ],
+    "source": [
      "9",
      0
+    ],
+    "x": 0,
+    "y": 0,
+    "resize_source": false,
+    "mask": [
+     "3",
+     1
     ]
    }
   }

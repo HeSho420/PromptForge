@@ -8,7 +8,11 @@ this file is engineering state, not documentation.)
 
 Run the loop **indefinitely** (user: "keep continueing indefinetely"),
 focused on: **output quality**, **efficiency**, and **maximization of
-processing power**. Every cycle:
+processing power**. REFOCUSED 2026-08-18 (user): "some images still have
+weird artefacts with inpainting and outpainting, focus on improving
+this... keep working untill you are done and the software is perfect" —
+inpaint/outpaint output quality leads the queue until measured clean.
+Every cycle:
 measure → change → verify (tests+lint) → measure again → commit → update
 this file. Cycle counter continues from 6. Candidate ledger (adapt as
 measurements dictate): render-speed flags on Ada (--fast/fp8, VAE dtype),
@@ -224,6 +228,26 @@ never-mask-the-face rule). Do not "extend" it to image_edit.
   the judging chain (scorecard=vision, checklist-build=text,
   probes=vision, disagreement-check=text) still ping-pongs — but its
   ordering is semantically constrained; needs careful design.
+- **Cycle 19 (this commit)** Composite-back: every masked-edit template
+  now ends ImageCompositeMasked(original, decoded, same feathered mask)
+  → SaveImage. MEASURED CAUSE of the user-reported "weird artefacts":
+  inpaint/outpaint returned the whole VAE-roundtripped frame, so EVERY
+  edit shifted 13.5-27.7% of the pixels it had no business touching by
+  >8/255 (mean 5-7.5, p99 27-32, max 163-189; PSNR 28-31 dB) — visible
+  shimmer on hair/foliage/fabric, compounding per plan step, and even
+  counted as mask leak by objective_report. Fixed in inpaint_v3,
+  inpaint_universal_v2, outpaint_v2 (pad mask), remove_object_v1,
+  replace_background_v1 (subject stays byte-identical), face_detail_v1;
+  WORKFLOW_GUIDE teaches the pattern to LLM-authored graphs; blanket
+  structural test pins every current+future inpaint/outpaint template.
+  RE-MEASURED: outside-mask pixels byte-identical (max diff 0.0) on all
+  three paths at no speed cost; seams clean (feather band blends).
+  Live E2E through /api/edits verified. 938 tests.
+  NOTED for later: outpaint still paints EXTRA PEOPLE in new margins at
+  the model level (template negative + judge-retry is the only defence);
+  video_inpaint/video_outpaint templates still roundtrip whole frames
+  (chunked pipeline — needs its own measurement); kontext whole-image
+  edits are inherently uncomposited.
 Candidates, roughly ranked:
 - Batched count-requests ("make 4 images" → batch_size on one graph,
   result plumbing for multiple assets per job) — throughput on VRAM
