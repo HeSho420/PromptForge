@@ -2300,6 +2300,11 @@ class DraftIntent(unittest.TestCase):
         # The coercion happens BEFORE the template fast path consumes it.
         self.assertLess(src.index("draft_intent"),
                         src.index("_template_workflow"))
+        # A READY draft skips the triage LLM call entirely (measured 33 s
+        # of routing on a ~5 s render) — the decision is deterministic.
+        self.assertIn("skipping workflow triage", src)
+        self.assertLess(src.index("draft_intent"),
+                        src.index("self._triage(job, task, prompt)"))
 
     def test_drafts_skip_the_quality_ladder_and_the_polish(self):
         """Measured live: the ladder cost 62 s on top of a ~5 s draft

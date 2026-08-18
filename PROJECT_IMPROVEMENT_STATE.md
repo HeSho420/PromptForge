@@ -4,10 +4,11 @@ Working memory for the autonomous improvement loop. Updated after every
 meaningful cycle. (User docs live in docs/PromptForge-Documentation.pdf —
 this file is engineering state, not documentation.)
 
-## ACTIVE MANDATE (2026-08-18, user-issued)
+## ACTIVE MANDATE (2026-08-18, user-issued; extended to INDEFINITE)
 
-Run the loop through **cycle 30**, focused on: **output quality**,
-**efficiency**, and **maximization of processing power**. Every cycle:
+Run the loop **indefinitely** (user: "keep continueing indefinetely"),
+focused on: **output quality**, **efficiency**, and **maximization of
+processing power**. Every cycle:
 measure → change → verify (tests+lint) → measure again → commit → update
 this file. Cycle counter continues from 6. Candidate ledger (adapt as
 measurements dictate): render-speed flags on Ada (--fast/fp8, VAE dtype),

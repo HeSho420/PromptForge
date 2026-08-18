@@ -7718,7 +7718,25 @@ class Services:
 
         # Let the LLM read the prompt FIRST: pick the fitting workflow and
         # pre-fetch any models it decides are needed, before planning.
-        triage = self._triage(job, task, prompt)
+        # EXCEPT a ready draft: the deterministic coercion below would
+        # override triage's answer anyway, and the triage call itself was
+        # measured at 33 s (cold planner load + routing) on a job whose
+        # render takes ~5 s.
+        triage: dict[str, Any] | None = None
+        draft_ready = False
+        if task == "generate" and quality.draft_intent(prompt):
+            try:
+                needed = (self.workflows.load_named("generate_draft")
+                          .get("required_models") or [])
+                draft_ready = all(self.registry.is_ready(m) for m in needed)
+            except Exception:  # noqa: BLE001 — the normal path always works
+                draft_ready = False
+        if draft_ready:
+            triage = {"workflow": "generate_draft"}
+            job.log("info", "Draft requested — skipping workflow triage, "
+                            "the 4-step speed template renders this")
+        else:
+            triage = self._triage(job, task, prompt)
 
         # Default prompt optimization: quality boosters are APPENDED — the
         # user's words always survive verbatim (only safety.py filters).
@@ -7745,27 +7763,12 @@ class Services:
                 "one first.")
 
         # Draft intent is a CAPABILITY, not a phrasing (the background/
-        # animate/viewpoint doctrine): "a quick draft of X" must reach the
-        # 4-step speed template deterministically, never depend on the 7B
-        # router noticing. Content words never trigger it — "fast car" and
-        # "draft horse" stay on the normal path.
-        if task == "generate" and quality.draft_intent(prompt):
-            try:
-                needed = (self.workflows.load_named("generate_draft")
-                          .get("required_models") or [])
-                if all(self.registry.is_ready(m) for m in needed):
-                    triage = dict(triage or {})
-                    triage["workflow"] = "generate_draft"
-                    job.log("info", "Draft requested — the 4-step speed "
-                                    "template renders this (~6x faster); "
-                                    "ask again without 'draft' for a "
-                                    "final-quality image")
-                else:
-                    job.log("info", "Draft requested, but the speed "
-                                    "model(s) are not downloaded yet — "
-                                    "rendering normal quality")
-            except Exception:  # noqa: BLE001 — the normal path always works
-                pass
+        # animate/viewpoint doctrine): a READY draft already skipped triage
+        # above; this is only the honest message for the not-ready case.
+        if (task == "generate" and not draft_ready
+                and quality.draft_intent(prompt)):
+            job.log("info", "Draft requested, but the speed model(s) are "
+                            "not downloaded yet — rendering normal quality")
 
         # BEST-WORKFLOW FAST PATH: if triage chose a validated template whose
         # models are ready, render THAT template's tuned graph — a custom LLM
