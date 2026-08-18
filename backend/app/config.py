@@ -111,6 +111,12 @@ class Settings:
     workflow_max_repairs: int = field(
         default_factory=lambda: int(os.environ.get("PROMPTFORGE_WORKFLOW_REPAIRS", "2"))
     )
+    # Automatic face-refinement pass (FaceDetailer) on finished renders —
+    # the mushy-face-in-full-body-shots fix. The judged result must not be
+    # worse than the original or the original ships.
+    face_detail: bool = field(
+        default_factory=lambda: os.environ.get(
+            "PROMPTFORGE_FACE_DETAIL", "1") not in ("0", "false"))
     # Vision model (Ollama) that judges photorealism of results; "" disables.
     # "auto" (the default) picks by hardware — qwen2.5-vl 7B on machines
     # with >=6 GB VRAM or >=12 GB RAM, 3B below — with llava as the live

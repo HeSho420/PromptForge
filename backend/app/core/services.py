@@ -296,6 +296,18 @@ DEFAULT_MODELS = [
         meta={"repo": "Kim2091/UltraSharp", "file": "4x-UltraSharp.safetensors",
               "folder": "upscale_models"},
     ),
+    # Face detector for the FaceDetailer polish pass (Impact Pack).
+    ModelInfo(
+        name="face-yolov8m",
+        purpose="YOLOv8m face detector — finds faces for the automatic "
+                "face-refinement pass after renders with people",
+        license="AGPL-3.0 (Ultralytics weights via Bingsu/adetailer; ~52 MB)",
+        url=("https://huggingface.co/Bingsu/adetailer/resolve/main/"
+             "face_yolov8m.pt"),
+        sha256="717923c19b3f4bbf5250b728f1fa6b2cb72a33aed1d236ea9caf0e21ad943e5f",
+        meta={"repo": "Bingsu/adetailer", "file": "face_yolov8m.pt",
+              "folder": "ultralytics/bbox", "allow_pickle": True},
+    ),
     # WAN 2.1 VACE: video inpainting/outpainting (control video + masks).
     ModelInfo(
         name="wan21-vace-1.3b",
@@ -655,6 +667,8 @@ MODEL_USAGE |= {
                         "(needs the ic-light pack AND sd15-base)",
     "photomaker-v1": "identity renders from reference photos (SDXL)",
     "upscale-ultrasharp": "faithful 4x pixel upscale, no prompt",
+    "face-yolov8m": "face detector for the automatic FaceDetailer "
+                    "refinement pass — never a render model itself",
     "dmd2-sdxl-lora": "SPEED: 4-step drafts on SDXL checkpoints ONLY "
                       "(cfg 1, euler/sgm_uniform) — never on SD15",
     "lcm-lora-sd15": "SPEED: 4-step drafts on SD15 checkpoints ONLY "
@@ -1145,6 +1159,8 @@ class Services:
         # Better-inpaint-model downloads already queued this session.
         self._inpaint_staged: set[str] = set()
         self._packs_queued: set[str] = set()
+        # Face-polish support downloads already queued this session.
+        self._polish_staged: set[str] = set()
         # Combine mode: peers currently carrying one of OUR delegated jobs.
         # Reserved by _delegate_wrap for the render's duration so parallel
         # delegation workers never double-book a machine in the seconds
@@ -3856,6 +3872,68 @@ class Services:
         except Exception:  # noqa: BLE001 — honest refusal beats a crash
             self._packs_queued.discard(slug)
             return {"queued": False, "error": "queueing failed"}
+
+    def _face_polish(self, job: Job, image: Image.Image, prompt: str,
+                     checkpoint: str | None = None) -> Image.Image | None:
+        """FaceDetailer pass over a finished render — the mushy-face fix.
+
+        Every detected face is re-rendered at guide resolution and blended
+        back; images without faces pass through nearly untouched (the
+        detector decides). The polished image must PROVE itself: the judge
+        scores both versions and a worse polish is discarded. Fail-open at
+        every miss — flag off, pack absent, detector model still
+        downloading, engine errors — the original ships untouched."""
+        if (not self.settings.face_detail
+                or self.settings.inpaint_backend == "mock"):
+            return None
+        try:
+            if not self._pack_active("impact-pack"):
+                return None
+            if not self.registry.is_ready("face-yolov8m"):
+                # Same self-heal as models everywhere: queue the download
+                # once; this render ships unpolished, the next gets it.
+                if (self.settings.auto_install
+                        and "face-yolov8m" not in self._polish_staged):
+                    self._polish_staged.add("face-yolov8m")
+                    self.queue.enqueue("model_download",
+                                       {"model": "face-yolov8m"})
+                    job.log("info", "Face detector is downloading — this "
+                                    "render ships as-is, the next gets "
+                                    "the face-refinement pass")
+                return None
+            template = self.workflows.load("facedetail")
+            ckpt = checkpoint or next(iter(self._image_checkpoints()), None)
+            if not ckpt:
+                return None
+            job.log("info", "[stage] faces — refining every detected face "
+                            "at native resolution")
+            graph = build_workflow(template, {
+                "image": self.comfy.upload_image(image, "facedetail_src"),
+                "checkpoint": ckpt,
+                "prompt": (prompt or "")[:300] or "detailed natural face",
+                "seed": int.from_bytes(os.urandom(4), "big") & 0x7FFFFFFF,
+            })
+            polished, _pid = self.comfy.run_graph(graph)
+            if polished.size != image.size:
+                return None
+            if self.critic is not None:
+                try:
+                    subject = (prompt or "a photo")[:200]
+                    before = self.critic.critique(image, subject).score
+                    after = self.critic.critique(polished, subject).score
+                    if after + 0.5 < before:
+                        job.log("info", "Face refinement judged worse "
+                                        f"({after:g} vs {before:g}) — "
+                                        "keeping the original")
+                        return None
+                    job.log("info", f"Face refinement kept "
+                                    f"({after:g} vs {before:g})")
+                except CriticUnavailable:
+                    pass  # unjudged polish still ships — denoise is gentle
+            return polished
+        except Exception as exc:  # noqa: BLE001 — polish must never break a render
+            job.log("info", f"Face refinement skipped: {str(exc)[:120]}")
+            return None
 
     def _miopen_tiled_retry(self, job: Job, graph: dict[str, Any],
                             exc: Exception) -> dict[str, Any] | None:
@@ -7749,6 +7827,18 @@ class Services:
         if chose.strategy:
             model_note = f"{model_note} → {chose.strategy}"
 
+        # Faces get one native-resolution refinement pass before saving —
+        # judged, so it can only ever improve the shipped image.
+        own_ckpt = next(
+            (n["inputs"].get("ckpt_name") for n in gen.graph.values()
+             if isinstance(n, dict)
+             and n.get("class_type") == "CheckpointLoaderSimple"
+             and n.get("inputs", {}).get("ckpt_name")), None)
+        polished = self._face_polish(job, image, prompt_used,
+                                     checkpoint=own_ckpt)
+        if polished is not None:
+            image = polished
+
         job.log("info", "[stage] save — storing the result")
         # The recipe card: how this exact image was made — the workflow
         # decision, the models/params actually executed, and the step trail.
@@ -7769,6 +7859,7 @@ class Services:
             "nodes": len(gen.graph),
             "repairs": repairs,
             "strategy_rounds": rounds,
+            "face_refined": polished is not None,
             "realism": crit.score if crit else None,
             **self._recipe_facts(gen.graph),
             "trail": self._recipe_steps(job),

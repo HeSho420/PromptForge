@@ -2272,6 +2272,58 @@ class DelegatedRendersKeepTheLocalPlannerWarm(unittest.TestCase):
             unload.assert_called_once()
 
 
+class FacePolish(unittest.TestCase):
+    """The automatic face-refinement pass: judged, fail-open, and wired at
+    the forge save — the mushy-face-in-full-body-shots fix."""
+
+    def test_the_template_is_valid_and_parameterized(self):
+        from pathlib import Path as _P
+
+        from app.adapters.comfyui import WorkflowLibrary, build_workflow
+
+        lib = WorkflowLibrary(
+            _P(__file__).resolve().parents[1] / "app" / "workflows")
+        tpl = lib.load("facedetail")
+        graph = build_workflow(tpl, {
+            "image": "x.png", "checkpoint": "m.safetensors",
+            "prompt": "portrait", "seed": 7})
+        detailer = next(n for n in graph.values()
+                        if n["class_type"] == "FaceDetailer")
+        self.assertEqual(detailer["inputs"]["denoise"], 0.45)
+        self.assertEqual(graph["5"]["inputs"]["model_name"],
+                         "bbox/face_yolov8m.pt")
+        self.assertIn("face-yolov8m", tpl.get("required_models", []))
+
+    def test_polish_is_fail_open(self):
+        from types import SimpleNamespace
+
+        from PIL import Image as _Image
+
+        img = _Image.new("RGB", (64, 64))
+        job = SimpleNamespace(log=lambda *_a: None)
+        # Flag off → untouched.
+        stub = SimpleNamespace(settings=SimpleNamespace(
+            face_detail=False, inpaint_backend="comfyui"))
+        self.assertIsNone(Services._face_polish(stub, job, img, "p"))
+        # Mock mode means OFFLINE → untouched.
+        stub = SimpleNamespace(settings=SimpleNamespace(
+            face_detail=True, inpaint_backend="mock"))
+        self.assertIsNone(Services._face_polish(stub, job, img, "p"))
+        # Pack missing → untouched (and nothing raises).
+        stub = SimpleNamespace(
+            settings=SimpleNamespace(face_detail=True,
+                                     inpaint_backend="comfyui"),
+            _pack_active=lambda slug: False)
+        self.assertIsNone(Services._face_polish(stub, job, img, "p"))
+
+    def test_the_forge_route_polishes_before_saving(self):
+        src = inspect.getsource(Services._workflow_inner)
+        self.assertIn("_face_polish", src)
+        # The pass runs BEFORE the save stage, on the image that ships.
+        self.assertLess(src.index("_face_polish"),
+                        src.index('"[stage] save'))
+
+
 class HiresSplit(unittest.TestCase):
     """An SD1.5-class model asked for a big canvas in ONE pass breaks down
     beyond its native scale (measured: doubled irises, waxy skin,

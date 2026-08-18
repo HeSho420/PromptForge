@@ -105,6 +105,11 @@ NODE_OUTPUTS: dict[str, list[str]] = {
     "ICLightConditioning": ["CONDITIONING", "CONDITIONING", "LATENT"],
     # image, mask, mask_image — output 1 is the matte you actually want.
     "BiRefNetRMBG": ["IMAGE", "MASK", "IMAGE"],
+    # Face refinement (impact pack): output 0 is the finished image with
+    # every detected face re-rendered and blended back.
+    "FaceDetailer": ["IMAGE", "IMAGE", "IMAGE", "MASK", "DETAILER_PIPE",
+                     "IMAGE"],
+    "UltralyticsDetectorProvider": ["BBOX_DETECTOR", "SEGM_DETECTOR"],
     # Image → 3D mesh (Hunyuan3D v2, ComfyUI core). Signatures read off the
     # live /object_info, not guessed.
     "CLIPVisionEncode": ["CLIP_VISION_OUTPUT"],
@@ -247,6 +252,15 @@ NODE_GUIDE: dict[str, str] = {
     "BiRefNetRMBG": "COMPOSITING: cuts a whole SUBJECT out of a photo "
                     "(output 1 is the matte). Use this, never SAM, when the "
                     "goal is the whole person or object; needs the rmbg pack",
+    "FaceDetailer": "FACES: detects every face and re-renders each at guide "
+                    "resolution with low denoise (0.45), blending it back — "
+                    "the mushy-face fix for full-body shots. Output 0 is the "
+                    "finished image. Wire bbox_detector from "
+                    "UltralyticsDetectorProvider; needs the impact pack",
+    "UltralyticsDetectorProvider": "FACES: loads a YOLO detector for "
+                                   "FaceDetailer — use model_name "
+                                   "'bbox/face_yolov8m.pt'; needs the "
+                                   "impact pack",
     "DWPreprocessor": "MOTION: turns video frames into OpenPose skeletons to "
                       "drive a render. Set bbox_detector to the "
                       ".torchscript.pt file — the .onnx default has no CUDA "

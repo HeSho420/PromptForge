@@ -1,0 +1,104 @@
+{
+ "template": "facedetail",
+ "version": 1,
+ "task": "facedetail",
+ "description": "Automatic face refinement (Impact Pack FaceDetailer): detects every face with YOLOv8m, re-renders each at guide resolution with low denoise, and blends it back. Fixes the classic mushy face in full-body and group shots without touching the rest of the image.",
+ "required_models": [
+  "face-yolov8m"
+ ],
+ "parameters": {
+  "image": {
+   "node": "1",
+   "input": "image"
+  },
+  "checkpoint": {
+   "node": "2",
+   "input": "ckpt_name"
+  },
+  "prompt": {
+   "node": "3",
+   "input": "text"
+  },
+  "seed": {
+   "node": "6",
+   "input": "seed"
+  }
+ },
+ "graph": {
+  "1": {
+   "class_type": "LoadImage",
+   "inputs": {
+    "image": ""
+   }
+  },
+  "2": {
+   "class_type": "CheckpointLoaderSimple",
+   "inputs": {
+    "ckpt_name": ""
+   }
+  },
+  "3": {
+   "class_type": "CLIPTextEncode",
+   "inputs": {
+    "clip": ["2", 1],
+    "text": "detailed natural face, sharp eyes, realistic skin texture"
+   }
+  },
+  "4": {
+   "class_type": "CLIPTextEncode",
+   "inputs": {
+    "clip": ["2", 1],
+    "text": "deformed, blurry, extra eyes, cross-eyed, asymmetric face, text, watermark"
+   }
+  },
+  "5": {
+   "class_type": "UltralyticsDetectorProvider",
+   "inputs": {
+    "model_name": "bbox/face_yolov8m.pt"
+   }
+  },
+  "6": {
+   "class_type": "FaceDetailer",
+   "inputs": {
+    "image": ["1", 0],
+    "model": ["2", 0],
+    "clip": ["2", 1],
+    "vae": ["2", 2],
+    "guide_size": 512,
+    "guide_size_for": true,
+    "max_size": 1024,
+    "seed": 42,
+    "steps": 16,
+    "cfg": 6.5,
+    "sampler_name": "dpmpp_2m",
+    "scheduler": "karras",
+    "positive": ["3", 0],
+    "negative": ["4", 0],
+    "denoise": 0.45,
+    "feather": 8,
+    "noise_mask": true,
+    "force_inpaint": true,
+    "bbox_threshold": 0.5,
+    "bbox_dilation": 10,
+    "bbox_crop_factor": 3.0,
+    "sam_detection_hint": "center-1",
+    "sam_dilation": 0,
+    "sam_threshold": 0.93,
+    "sam_bbox_expansion": 0,
+    "sam_mask_hint_threshold": 0.7,
+    "sam_mask_hint_use_negative": "False",
+    "drop_size": 10,
+    "bbox_detector": ["5", 0],
+    "wildcard": "",
+    "cycle": 1
+   }
+  },
+  "7": {
+   "class_type": "SaveImage",
+   "inputs": {
+    "filename_prefix": "promptforge_facedetail",
+    "images": ["6", 0]
+   }
+  }
+ }
+}

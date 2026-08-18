@@ -1230,6 +1230,8 @@ promptforge:
   insightface: insightface
   sams: segmentation
   ultralytics: ultralytics
+  ultralytics_bbox: ultralytics/bbox
+  ultralytics_segm: ultralytics/segm
   rmbg: rmbg
 "@ | Out-File -Encoding utf8 $extra
     $p = Start-ComfyUI $comfyDir

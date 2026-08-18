@@ -44,7 +44,8 @@ from .base import (
 ALLOWED_TASKS = {"inpaint", "generate", "img2img", "upscale", "outpaint",
                  "video", "video_inpaint", "video_outpaint", "angles",
                  "identity", "relight", "compose", "motion_transfer",
-                 "background", "reconstruct", "pose", "scene3d", "kontext"}
+                 "background", "reconstruct", "pose", "scene3d", "kontext",
+                 "facedetail"}
 
 # Node classes permitted in generated/validated workflows. Extend deliberately.
 ALLOWED_NODE_TYPES = {
@@ -109,6 +110,9 @@ ALLOWED_NODE_TYPES = {
     # BiRefNet returned 19.4% coverage against a 19.4% ground truth, where
     # SAM — a PART segmenter — returned 8.7% (the person's shirt).
     "BiRefNetRMBG",
+    # Automatic face refinement (impact pack): detect every face, re-render
+    # each at guide resolution, blend back — the mushy-face fix.
+    "FaceDetailer", "UltralyticsDetectorProvider",
     # Face-region matte (rmbg pack), for replacing a face rather than a whole
     # head — hair and ears are deliberately left out of the selection.
     "FaceSegment",
