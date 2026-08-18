@@ -111,6 +111,13 @@ class Settings:
     workflow_max_repairs: int = field(
         default_factory=lambda: int(os.environ.get("PROMPTFORGE_WORKFLOW_REPAIRS", "2"))
     )
+    # Shared LAN pairing secret. OFF ("") by default — set the SAME value
+    # on every machine you own to require it for the peer endpoints that
+    # CHANGE a machine or read its logs (model push, pack install, remote
+    # logs). Discovery and the render/LLM proxies stay open either way,
+    # so setting it on one machine first never locks the fleet out.
+    peer_secret: str = field(
+        default_factory=lambda: os.environ.get("PROMPTFORGE_PEER_SECRET", ""))
     # Automatic face-refinement pass (FaceDetailer) on finished renders —
     # the mushy-face-in-full-body-shots fix. The judged result must not be
     # worse than the original or the original ships.

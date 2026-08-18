@@ -1196,7 +1196,8 @@ class Services:
             queue_provider=self._queue_public_snapshot,
             version_provider=self._version_info,
             auto_update=self.settings.peer_auto_update,
-            llm_url=self.settings.llm_url)
+            llm_url=self.settings.llm_url,
+            secret=self.settings.peer_secret)
         # A delegating peer whose graph needs a node we lack can ask us to
         # install the curated pack (our auto-install setting decides).
         self.peers.pack_installer = self._peer_pack_install

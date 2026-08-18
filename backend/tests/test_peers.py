@@ -2272,6 +2272,72 @@ class DelegatedRendersKeepTheLocalPlannerWarm(unittest.TestCase):
             unload.assert_called_once()
 
 
+class PairingSecret(unittest.TestCase):
+    """Opt-in shared secret for the peer endpoints that CHANGE a machine
+    or read its logs. Discovery and the render/LLM proxies stay open, so
+    setting it on one machine first never locks the fleet out."""
+
+    def _svc(self, secret, port_off):
+        import tempfile as _tmp
+
+        tmp = _tmp.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        svc = PeerService(
+            FakeRegistry(Path(tmp.name) / "m"), share=True, render=True,
+            comfy_url="http://127.0.0.1:9",
+            http_port=BASE_HTTP + port_off, udp_port=BASE_UDP + port_off,
+            name=f"sec{port_off}", loopback_only=True, secret=secret)
+        svc.pack_installer = lambda slug: {"queued": True}
+        svc.on_pull = lambda entries: {"queued": []}
+        svc.start()
+        self.addCleanup(svc.stop)
+        return svc
+
+    def _post(self, svc, path, headers=None):
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{svc.http_port}{path}", data=b"{}",
+            headers={"Content-Type": "application/json", **(headers or {})},
+            method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                return resp.status
+        except urllib.error.HTTPError as exc:
+            return exc.code
+
+    def test_no_secret_means_everything_works_as_before(self):
+        svc = self._svc("", 80)
+        self.assertEqual(self._post(svc, "/pf-peer/install-pack"), 200)
+        self.assertEqual(self._post(svc, "/pf-peer/pull"), 200)
+
+    def test_sensitive_endpoints_refuse_without_the_secret(self):
+        svc = self._svc("household-key", 81)
+        self.assertEqual(self._post(svc, "/pf-peer/install-pack"), 401)
+        self.assertEqual(self._post(svc, "/pf-peer/pull"), 401)
+        with self.assertRaises(urllib.error.HTTPError) as ctx:
+            urllib.request.urlopen(
+                f"http://127.0.0.1:{svc.http_port}/pf-peer/log/launch.log",
+                timeout=10)
+        self.assertEqual(ctx.exception.code, 401)
+        # Discovery stays OPEN — a half-configured fleet keeps finding
+        # itself.
+        with urllib.request.urlopen(
+                f"http://127.0.0.1:{svc.http_port}/pf-peer/info",
+                timeout=10) as resp:
+            self.assertEqual(resp.status, 200)
+
+    def test_the_matching_secret_opens_the_door(self):
+        svc = self._svc("household-key", 82)
+        self.assertEqual(self._post(svc, "/pf-peer/install-pack",
+                                    {"X-PF-Secret": "household-key"}), 200)
+        self.assertEqual(self._post(svc, "/pf-peer/install-pack",
+                                    {"X-PF-Secret": "wrong"}), 401)
+
+    def test_outgoing_sensitive_requests_attach_the_secret(self):
+        for fn in ("post_pull", "fetch_log", "request_pack_install"):
+            src = inspect.getsource(getattr(PeerService, fn))
+            self.assertIn("_secret_headers", src, fn)
+
+
 class DraftIntent(unittest.TestCase):
     """'a quick draft of X' reaches the 4-step speed template
     deterministically; content words never trigger it."""

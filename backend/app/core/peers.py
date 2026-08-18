@@ -171,9 +171,15 @@ class PeerService:
                  queue_provider: Callable[[], dict] | None = None,
                  version_provider: Callable[[], dict | None] | None = None,
                  auto_update: bool = True,
-                 llm_url: str = "http://127.0.0.1:11434"):
+                 llm_url: str = "http://127.0.0.1:11434",
+                 secret: str = ""):
         self.registry = registry
         self.comfy_url = comfy_url.rstrip("/")
+        # Shared pairing secret ("" = off). Enforced ONLY on endpoints
+        # that change this machine or read its logs; discovery and the
+        # render/LLM proxies stay open so a half-configured fleet keeps
+        # working. Outgoing sensitive requests attach it when set.
+        self.secret = secret
         # This machine's OWN Ollama, proxied at /pf-peer/ollama/* so a
         # delegating peer can run a job's planning and quality checks on
         # THIS machine too — the whole job, not just the pixels.
@@ -489,7 +495,19 @@ class PeerService:
         "doctor-report.txt", "launch.log",
     })
 
+    def _authorized(self, req: _PeerHandler) -> bool:
+        """Pairing check for SENSITIVE endpoints (state-changing or
+        log-reading). No secret configured = open, exactly as before."""
+        if not self.secret:
+            return True
+        return req.headers.get("X-PF-Secret", "") == self.secret
+
     def _serve_log(self, req: _PeerHandler, name: str) -> None:
+        if not self._authorized(req):
+            req._json(401, {"error": "pairing secret required — set the "
+                                     "same PROMPTFORGE_PEER_SECRET on "
+                                     "both machines"})
+            return
         if not self.share:
             req._json(403, {"error": "sharing is off"})
             return
@@ -555,6 +573,11 @@ class PeerService:
             if raw is None:
                 req._json(400, {"error": "bad Content-Length"})
                 return
+            if not self._authorized(req):
+                req._json(401, {"error": "pairing secret required — set "
+                                         "the same PROMPTFORGE_PEER_SECRET "
+                                         "on both machines"})
+                return
             if not self.render:
                 req._json(403, {"error": "render sharing is off"})
                 return
@@ -581,6 +604,11 @@ class PeerService:
             raw = req.read_body(8 * 1024 * 1024)
             if raw is None:
                 req._json(400, {"error": "bad Content-Length"})
+                return
+            if not self._authorized(req):
+                req._json(401, {"error": "pairing secret required — set "
+                                         "the same PROMPTFORGE_PEER_SECRET "
+                                         "on both machines"})
                 return
             if not self.share:
                 req._json(403, {"error": "model sharing is off"})
@@ -808,7 +836,8 @@ class PeerService:
                 body = json.dumps({"pack": slug}).encode()
                 inner = urllib.request.Request(
                     peer_base.rstrip("/") + "/pf-peer/install-pack",
-                    data=body, headers={"Content-Type": "application/json"},
+                    data=body, headers={"Content-Type": "application/json",
+                                        **self._secret_headers()},
                     method="POST")
                 with urllib.request.urlopen(inner, timeout=8) as resp:
                     resp.read()
@@ -1328,6 +1357,10 @@ class PeerService:
                 "meta": meta})
         return entries
 
+    def _secret_headers(self) -> dict[str, str]:
+        """The pairing header for OUTGOING sensitive requests, when set."""
+        return {"X-PF-Secret": self.secret} if self.secret else {}
+
     def fetch_log(self, peer: Peer, name: str) -> str:
         """One whitelisted operational log from a peer — remote diagnosis:
         the machine that CAN render helps debug the one that cannot. The
@@ -1335,9 +1368,10 @@ class PeerService:
         is CAPPED: a real peer serves at most 32 KiB, and 'the peer is
         not trusted' is this module's doctrine — an impostor streaming an
         endless body must not fill this machine's RAM."""
-        with urllib.request.urlopen(
-                f"{peer.base}/pf-peer/log/{quote(name, safe='')}",
-                timeout=HTTP_TIMEOUT_S) as resp:
+        req = urllib.request.Request(
+            f"{peer.base}/pf-peer/log/{quote(name, safe='')}",
+            headers=self._secret_headers())
+        with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT_S) as resp:
             return resp.read(64 * 1024).decode("utf-8", "replace")
 
     def post_pull(self, peer: Peer, manifest: list[dict]) -> dict[str, Any]:
@@ -1346,6 +1380,7 @@ class PeerService:
         body = json.dumps({"models": manifest}).encode()
         req = urllib.request.Request(
             peer.base + "/pf-peer/pull", data=body,
-            headers={"Content-Type": "application/json"}, method="POST")
+            headers={"Content-Type": "application/json",
+                     **self._secret_headers()}, method="POST")
         with urllib.request.urlopen(req, timeout=30) as resp:
             return json.loads(resp.read().decode())
