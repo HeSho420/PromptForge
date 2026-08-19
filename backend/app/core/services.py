@@ -401,6 +401,24 @@ DEFAULT_MODELS = [
               "file": "controlnet_union_sdxl_promax.safetensors",
               "folder": "controlnet", "size_bytes": 2513342408},
     ),
+    ModelInfo(
+        name="controlnet-sd15-depth",
+        purpose="ControlNet v1.1 depth for SD15 — pins a generated "
+                "environment to the photograph's MEASURED perspective. The "
+                "guidance canvas comes from the scene probe (subject depth "
+                "+ the ground's disparity ramp to the measured horizon); "
+                "words alone held the horizon on about half the draws, so "
+                "conditioning is the adherence lever.",
+        license="OpenRAIL-M (lllyasviel; fp16 repack by comfyanonymous); "
+                "~700 MB",
+        url=("https://huggingface.co/comfyanonymous/"
+             "ControlNet-v1-1_fp16_safetensors/resolve/main/"
+             "control_v11f1p_sd15_depth_fp16.safetensors"),
+        vram_gb=1.0,
+        meta={"repo": "comfyanonymous/ControlNet-v1-1_fp16_safetensors",
+              "file": "control_v11f1p_sd15_depth_fp16.safetensors",
+              "folder": "controlnet"},
+    ),
     # ---- Motion transfer speed LoRA (WAN 2.1 1.3B) -------------------------
     ModelInfo(
         name="causvid-wan13b-lora",
@@ -675,6 +693,10 @@ MODEL_USAGE |= {
                      "(sampler lcm, cfg 1-2) — never on SDXL",
     "controlnet-union-sdxl": "structure lock (canny/pose/depth/tile) for "
                              "SDXL ONLY — needs a control image input",
+    "controlnet-sd15-depth": "GEOMETRY: depth guidance for SD15 background "
+                             "renders — never picked by prompt routing; "
+                             "the environment pipeline attaches it itself "
+                             "when a measured perspective guide exists",
     "iclight-sd15-fc": "THE relighting engine — changes a photo's LIGHT "
                        "instead of repainting it (needs the ic-light node "
                        "pack active AND sd15-base; inpainting checkpoints "
@@ -2443,6 +2465,7 @@ class Services:
         last_negative = ""
         env_card: scene_geometry.SceneCard | None = None
         env_spec: dict[str, Any] | None = None
+        env_guide: Image.Image | None = None
         env_misses: list[str] = []
         result_adapter = self.inpainting.name
         result_is_mock = not real
@@ -2911,11 +2934,14 @@ class Services:
                     # on the original wall instead of putting her in a forest.
                     env_pos, env_neg = scene_geometry.spatial_prompt(
                         env_spec, env_card, enh["positive"], enh["negative"])
+                    env_guide = (self._env_guidance(job, asset_id, current,
+                                                    env_card)
+                                 if env_card is not None else None)
                     before_bg = current
                     current = self._render_background_step(
                         job, current, env_pos, env_neg,
                         subject_hint=f"{scene or ''} {step['instruction']}",
-                        compiled=True)
+                        compiled=True, guidance=env_guide)
                     # A correctly matted subject still reads as pasted while
                     # its light disagrees with the scene it is now standing
                     # in. This is the step that sells it.
@@ -3432,7 +3458,7 @@ class Services:
                                     last_negative)
                             candidate = self._render_background_step(
                                 job, final_input, retry_pos, retry_neg,
-                                compiled=True)
+                                compiled=True, guidance=env_guide)
                             if env_card is not None:
                                 env_misses = self._environment_misses(
                                     job, candidate, env_card, env_spec)
@@ -5076,8 +5102,47 @@ class Services:
                                                "scene_probe")
             except Exception:  # noqa: BLE001 — debug output only
                 pass
+            # The raw measurements outlive the card: the perspective guide
+            # for depth-conditioned generation is built from them later.
+            aux_cache: dict[str, Any] = getattr(self, "_scene_aux", {})
+            self._scene_aux = aux_cache
+            aux_cache[key] = {**probe, "matte": matte}
+            while len(aux_cache) > 6:
+                aux_cache.pop(next(iter(aux_cache)))
         cache[key] = card
+        while len(cache) > 12:
+            cache.pop(next(iter(cache)))
         return card
+
+    def _env_guidance(self, job: Job, asset_id: str, image: Image.Image,
+                      card: scene_geometry.SceneCard) -> Image.Image | None:
+        """The measured-perspective guide for the depth-conditioned
+        background render, or None when the horizon was not confidently
+        measured (no fabricated geometry) or the probe images are gone."""
+        import hashlib
+        aux = getattr(self, "_scene_aux", {}).get(
+            hashlib.md5(image.tobytes()).hexdigest())
+        if not aux:
+            return None
+        try:
+            guide = scene_geometry.guidance_depth(
+                card, aux["depth"], aux["normal"], aux["valid"],
+                aux.get("matte"), image.size)
+        except Exception:  # noqa: BLE001 — guidance is an upgrade, never a gate
+            return None
+        if guide is None:
+            return None
+        job.log("info", "[stage] plan — built a perspective guide from the "
+                        "measured geometry (subject depth + the ground's "
+                        "ramp to the measured horizon)")
+        try:
+            p = self.store.new_version_path(asset_id)
+            guide.save(p, format="PNG")
+            self.store.add_aux_version(asset_id, str(p),
+                                       "perspective guide", "scene_probe")
+        except Exception:  # noqa: BLE001 — debug output only
+            pass
+        return guide
 
     _SURFACE_SCHEMA = {
         "type": "object",
@@ -5201,14 +5266,22 @@ class Services:
     def _render_background_step(self, job: Job, image: Image.Image,
                                 positive: str, negative: str,
                                 subject_hint: str = "",
-                                compiled: bool = False) -> Image.Image:
+                                compiled: bool = False,
+                                guidance: Image.Image | None = None
+                                ) -> Image.Image:
         """Replace what is BEHIND the subject, and nothing else.
 
         An exact BiRefNet subject matte is INVERTED, so the repainted region is
         the background by construction rather than by whatever SAM thought
         "background" meant. The original subject pixels are then composited
         back through a shrunk, feathered copy of the same matte — so the
-        subject's interior is literally the input pixels and cannot drift."""
+        subject's interior is literally the input pixels and cannot drift.
+
+        `guidance` (the measured-perspective depth guide) upgrades the graph
+        to the depth-conditioned variant so the new scene inherits the
+        photograph's camera instead of inventing its own — words alone held
+        the measured horizon on about half the draws. Missing model or
+        template → the plain graph, honestly logged."""
         self._require_comfy(job)
         if not self._pack_active("rmbg"):
             raise PermanentError(
@@ -5218,6 +5291,26 @@ class Services:
                 "person here it returned 8.7% of the frame (a shirt), so it "
                 "would repaint the subject and leave the backdrop.")
         template = self.workflows.load("background")
+        guided = False
+        if guidance is not None:
+            ok, why = self._template_runnable("background_guided")
+            if not ok and self.settings.auto_install \
+                    and "not downloaded" in why:
+                job.log("info", "[stage] models — fetching the depth "
+                                "ControlNet (pins the new scene to the "
+                                "measured perspective); this happens once")
+                try:
+                    self._ensure_model("controlnet-sd15-depth", job)
+                    ok, why = self._template_runnable("background_guided")
+                except Exception as exc:  # noqa: BLE001 — optional upgrade
+                    ok, why = False, str(exc)
+            if ok:
+                template = self.workflows.load_named("background_guided")
+                guided = True
+            else:
+                job.log("info", f"Perspective conditioning unavailable "
+                                f"({why}); rendering with the prompt's "
+                                "camera language only")
         matte = self._matte_model(subject_hint or positive)
         job.log("info", f"Matting the subject with {matte}, then repainting "
                         "only the inverted region")
@@ -5247,6 +5340,11 @@ class Services:
             "prompt": positive, "negative": negative,
             "seed": int.from_bytes(os.urandom(4), "big") & 0x7FFFFFFF,
         }
+        if guided and guidance is not None:
+            params["control_image"] = self.comfy.upload_image(
+                guidance, "bg_guide")
+            job.log("info", "Conditioning the new scene on the measured "
+                            "perspective guide")
         ckpt = self._best_inpaint_checkpoint()
         if ckpt:
             params["checkpoint"] = ckpt

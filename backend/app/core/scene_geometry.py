@@ -38,7 +38,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
-from PIL import Image
+from PIL import Image, ImageFilter
 
 from .llm import LLMClient, complete_with_schema
 
@@ -290,6 +290,54 @@ def ground_geometry(normal_png: Image.Image, depth_png: Image.Image,
         out["horizon_y_frac"] = fit[0] / h
         out["horizon_r2"] = fit[1]
     return out
+
+
+def guidance_depth(card: SceneCard, depth_png: Image.Image,
+                   normal_png: Image.Image, valid_png: Image.Image,
+                   matte: Image.Image | None,
+                   size: tuple[int, int]) -> Image.Image | None:
+    """The perspective guide for depth-conditioned environment generation.
+
+    Built from measurement, not imagination: the subject keeps its
+    measured disparity (it is composited back anyway, so the scene must
+    agree with it), the visible ground keeps its measured disparity (the
+    plane the feet stand on), the rest of the frame below the measured
+    horizon gets that plane's ramp extended (disparity is linear in the
+    row for a plane), and everything above the horizon is left at zero —
+    far, free for whatever the new environment wants to put there. The
+    probe's depth render was measured disparity-encoded with near=bright,
+    which is exactly the ControlNet depth convention.
+
+    None whenever the horizon is not confidently measured — guidance
+    built on a guessed horizon would be fabricated geometry (the
+    failure-handling doctrine forbids exactly that)."""
+    import numpy as np
+    if card.horizon_y_frac is None \
+            or (card.horizon_r2 or 0) < _HORIZON_MIN_R2:
+        return None
+    z = np.asarray(depth_png.convert("L"), dtype=np.float32) / 255.0
+    h, w = z.shape
+    y_h = card.horizon_y_frac * h
+    rows = np.arange(h, dtype=np.float32)
+    ramp_rows = np.clip((rows - y_h) / max(1.0, h - y_h), 0.0, 1.0)
+    # The ground gets the FITTED plane (the ramp), not its measured pixels:
+    # the fit explains the plane at r²≈1, and the residue is tile grout and
+    # texture — measured live, keeping raw ground disparity made the
+    # ControlNet repaint the original plaza's tile grid as striped
+    # pavement in the new deck. Only the subject keeps measured values.
+    canvas = np.repeat(ramp_rows[:, None], w, axis=1)
+    base = Image.fromarray((canvas * 255).astype(np.uint8), "L")
+    base = base.filter(ImageFilter.GaussianBlur(3))
+    out = np.asarray(base, dtype=np.float32) / 255.0
+    if matte is not None:
+        subj = np.asarray(
+            matte.convert("L").resize((w, h), Image.NEAREST)) > 127
+        # the subject's silhouette stays crisp: a blurred depth edge reads
+        # as a halo around the person in the conditioned render
+        out[subj] = z[subj]
+    guide = Image.fromarray((np.clip(out, 0, 1) * 255).astype(np.uint8),
+                            "L").convert("RGB")
+    return guide.resize(size, Image.BILINEAR)
 
 
 def posture_veto(posture: str | None,

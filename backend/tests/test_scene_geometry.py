@@ -121,6 +121,46 @@ class GroundGeometryTests(unittest.TestCase):
         self.assertLess(g["ground_frac"], 0.02)
 
 
+class GuidanceDepthTests(unittest.TestCase):
+    """The perspective guide: measured subject + measured ground + the
+    plane's ramp to the measured horizon; far/free above it. No confident
+    horizon = no guide (fabricated geometry is forbidden)."""
+
+    def _bits(self):
+        normal, _d, valid = _synthetic_probe()        # ground rows 140+
+        h, w = 240, 320
+        ys = np.arange(h, dtype=np.float64)
+        disp = np.clip(ys + 40, 0, None)
+        disp = disp / disp.max()
+        depth = Image.fromarray(
+            np.repeat((disp * 255).astype(np.uint8)[:, None], w, axis=1),
+            "L").convert("RGB")
+        matte = Image.new("L", (w, h), 0)
+        matte.paste(255, (150, 40, 170, 140))         # subject above ground
+        return normal, depth, valid, matte
+
+    def test_guide_composes_ramp_ground_and_subject(self):
+        normal, depth, valid, matte = self._bits()
+        card = SceneCard(horizon_y_frac=90 / 240, horizon_r2=0.99)
+        g = scene_geometry.guidance_depth(card, depth, normal, valid,
+                                          matte, (640, 480))
+        self.assertEqual(g.size, (640, 480))
+        a = np.asarray(g.convert("L"), dtype=np.float32)
+        self.assertLess(a[100, 40], 12)      # above the horizon: far, free
+        self.assertGreater(a[430, 320], 140)  # near ground: measured, bright
+        # the subject keeps its measured depth against a darker ramp
+        self.assertGreater(a[200, 320], 80)
+        self.assertLess(a[200, 40], 40)
+
+    def test_no_confident_horizon_means_no_guide(self):
+        normal, depth, valid, matte = self._bits()
+        self.assertIsNone(scene_geometry.guidance_depth(
+            SceneCard(), depth, normal, valid, matte, (64, 64)))
+        weak = SceneCard(horizon_y_frac=0.4, horizon_r2=0.5)
+        self.assertIsNone(scene_geometry.guidance_depth(
+            weak, depth, normal, valid, matte, (64, 64)))
+
+
 class PostureVetoTests(unittest.TestCase):
     def test_matte_aspect_vetoes_impossible_answers(self):
         tall = (0, 0, 100, 260)
