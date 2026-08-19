@@ -2000,6 +2000,38 @@ def junction_flaws(image: Image.Image,
     return min(flaws) if flaws else None
 
 
+# Subject relocation: "put/place/move ME/HER/HIM ... in/at/on <place>".
+# The person token must be the WHOLE object ("put her in" relocates; "put
+# her hand on her hip" does not), object insertion never matches ("put a
+# dog in the background" has no person object), and a garment right after
+# the preposition keeps clothing edits out ("put her in a red dress").
+_RELOCATE = re.compile(
+    r"\b(?:put|place|drop|set|transport|move)\s+"
+    r"(?:me|us|him|her|them|the\s+(?:subject|person|man|woman|girl|boy|"
+    r"guy|lady|model|couple))\s+"
+    r"(?:in|into|inside|at|on|onto)\b"
+    r"(?!\s+(?:the\s+)?(?:background|foreground))"
+    r"|\bmove\s+(?:me|us|him|her|them)\s+to\b",
+    re.IGNORECASE)
+_GARMENT = re.compile(
+    r"\b(?:dress|suit|shirt|t-?shirt|top|jeans|pants|trousers|skirt|"
+    r"jacket|coat|bikini|swimsuit|outfit|clothes|clothing|costume|"
+    r"uniform|sweater|hoodie|gown|lingerie|heels|shoes|boots|hat|scarf|"
+    r"pose|position)\b", re.IGNORECASE)
+
+
+def environment_intent(text: str) -> bool:
+    """Does the request relocate the subject into a new place? Routing
+    signal for the environment pipeline (measured card, spatial prompt,
+    geometry validation) — 'put her in a nightclub' was planned as a
+    style change and failed honestly while hunting the picture for a
+    nightclub to mask."""
+    m = _RELOCATE.search(text or "")
+    if not m:
+        return False
+    return not _GARMENT.search((text or "")[m.end():m.end() + 44])
+
+
 # Which margins an outpaint request names. The template's default is a
 # left+right extension; when the words pick an axis or a side the pad must
 # follow them — "extend the picture upward" rendered left+right grows the

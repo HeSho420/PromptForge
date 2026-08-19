@@ -403,6 +403,35 @@ class ContactSurfaceProbeTests(unittest.TestCase):
         self.assertIsNone(s._contact_surface_miss(img, card, None))
 
 
+class EnvironmentIntentTests(unittest.TestCase):
+    """Relocation phrasing must reach the environment pipeline. Live:
+    'put her in a nightclub' was planned as a style change, coerced to
+    inpaint, and failed hunting the picture for a nightclub to mask."""
+
+    def test_relocations_match(self):
+        from app.core.quality import environment_intent
+        for yes in ("put her in a nightclub",
+                    "put me on a beach at sunset",
+                    "place him inside a medieval castle",
+                    "put the subject in Tokyo",
+                    "set them in a futuristic laboratory",
+                    "move her to a rooftop",
+                    "put me in front of a Ferrari"):
+            self.assertTrue(environment_intent(yes), yes)
+
+    def test_object_insertion_clothing_and_pose_do_not(self):
+        from app.core.quality import environment_intent
+        for no in ("put a dog in the background",
+                    "put her in a red dress",
+                    "put him in a business suit",
+                    "put her hand on her hip",
+                    "place a vase on the table",
+                    "put them in a different pose",
+                    "put me in the foreground",
+                    "change her shoes"):
+            self.assertFalse(environment_intent(no), no)
+
+
 class EnvironmentChecklistTests(unittest.TestCase):
     def test_background_steps_verify_the_place_not_the_far_field(self):
         # "What is the new background?" was answered — correctly — with
@@ -416,6 +445,17 @@ class EnvironmentChecklistTests(unittest.TestCase):
         src = inspect.getsource(Services._handle_image_edit)
         self.assertIn("Where does this photo appear", src)
         self.assertIn('step["_checklist"] = [{', src)
+
+    def test_relight_after_background_is_pruned(self):
+        # The environment step lights its own scene non-destructively; a
+        # trailing CHANGE_LIGHTING step re-ran the FULL IC-Light redraw —
+        # measured live: 92% of face pixels moved, identity gone.
+        import inspect
+
+        from app.core.services import Services
+        src = inspect.getsource(Services._handle_image_edit)
+        self.assertIn("dropped the separate relight", src)
+        self.assertIn('s["task"] != "relight"', src)
 
 
 class ProbeFileRoutingTests(unittest.TestCase):

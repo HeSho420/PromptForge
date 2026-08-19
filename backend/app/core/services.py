@@ -2283,6 +2283,39 @@ class Services:
                     s["operation"] = "OUTPAINT"
                     job.log("info", "[llm] plan: format/aspect change is a "
                                     "canvas extension — routed to outpaint")
+                # "Put her in a nightclub" relocates the SUBJECT into a new
+                # place — an environment edit, not a style or region edit.
+                # Seen live: it was planned as CHANGE_STYLE, coerced to
+                # inpaint, and failed honestly while hunting the picture
+                # for a nightclub to mask. Deterministic, like the other
+                # coercions here.
+                elif (s["task"] in ("img2img", "custom", "inpaint",
+                                    "kontext")
+                        and quality.environment_intent(s["instruction"])):
+                    s["task"] = "background"
+                    s["operation"] = "REPLACE_BACKGROUND"
+                    job.log("info", "[llm] plan: relocating the subject "
+                                    "into a new place is an environment "
+                                    "edit — routed to the scene-measured "
+                                    "background pipeline")
+            # The environment step already lights its own scene: IC-Light
+            # reads the generated plate and only the low-frequency
+            # illumination lands on the ORIGINAL subject pixels. A trailing
+            # CHANGE_LIGHTING step then re-ran the FULL IC-Light redraw on
+            # top — measured live: 92% of face pixels moved and the
+            # objective check called the identity gone. Any relight step
+            # after a background step is redundant and destructive.
+            bg_at = next((i for i, s in enumerate(steps)
+                          if s["task"] == "background"), None)
+            if bg_at is not None and any(
+                    s["task"] == "relight" for s in steps[bg_at + 1:]):
+                steps = [s for i, s in enumerate(steps)
+                         if i <= bg_at or s["task"] != "relight"]
+                job.log("info", "[llm] plan: the environment step already "
+                                "matches the subject's light to the new "
+                                "scene — dropped the separate relight "
+                                "step (a full IC-Light redraw after it "
+                                "was measured moving 92% of face pixels)")
         if not steps:
             # No planner: one deterministic step. Capability intents (animate,
             # background) reach their own engine even with no LLM at all; an
