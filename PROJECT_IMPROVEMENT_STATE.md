@@ -389,6 +389,41 @@ never-mask-the-face rule). Do not "extend" it to image_edit.
   candidate fix; (b) the Claude-Browser pane reports document.hidden
   even fronted, so the UI's deliberate hidden-tab poll pause needed a
   visibility override to observe — env quirk, not an app bug.
+- **ENV MANDATE (d4de2f8, 2026-08-19)** Environment-aware background
+  edits — new user brief: scene reconstruction, not background swap.
+  NEW scene_geometry.py + scene_probe template (MoGe normals/depth/
+  valid): SceneCard = contacts (matte bottom clusters), cut-at-bottom,
+  posture (vl + aspect veto), ground plane, camera pitch (up-normal
+  tilt), horizon (disparity-row fit, r²-gated; depth PNG proved
+  DISPARITY-encoded live r²=0.9998; 8-bit-saturated rows dropped).
+  environment_spec (warm-batch text LLM, conservative-without-facts
+  rule pinned by test) + spatial_prompt compiler (ground contract,
+  camera words, horizon band, lighting, solid-ground anti-flood
+  negatives; retries RECOMPILE — first impl dropped it and every retry
+  flooded). Validation = same measurements on the result + contact
+  checks in two layers (up-normal window; region-scoped schema vl
+  SUPPORT probe — normals can't tell water from deck: both up-facing,
+  measured live; probe judges support-class only after it rejected
+  "dry tiles" vs planned "wet tiles" twice). Misses cap
+  scene_consistency 70 + feed avoid-clauses (candidates too). LIVE
+  runs: card deterministic across runs (standing, 2 contacts, pitch
+  8°, horizon 38% r²=1.00, ground 55%); validator caught real breaks
+  (8°→21°, horizon 38%→1%/17%/22%/11%) and PASSED the good draws;
+  final result: subject ON the deck with matching cast shadow. Also
+  fixed: extra_model_paths.yaml never mapped geometry_estimation
+  (scene3d silently broken since the ComfyUI upgrade); launch.ps1
+  writes it now. Zero new models (MoGe was registered; 631MB MIT,
+  auto-fetched once). 1006 tests (commit msg says 1004 — erratum, 2
+  probe-pin tests added after drafting). REMAINING (Phase B queue):
+  camera-pitch ADHERENCE needs conditioning, not words — depth/
+  perspective guidance via controlnet-union-sdxl (registered, not
+  fetched); horizon misses correctly detected but only ~half the
+  draws comply; contact_ground_frac never fired in anger (vl probe
+  covers water); DWPose keypoints (SavePoseKpsAsJsonFile exists) for
+  sitting/lying contracts; occlusion (objects in front) undone;
+  scene-extension mode still = outpaint route; retry budget shares
+  the unreliable vl-verify circuit breaker (a static geometry miss
+  burned the round budget). Env aux versions saved for debugging.
 Candidates, roughly ranked (artifact focus first per 2026-08-18 mandate):
 - **Cycle 23 (0079083)** Outpaint glyph guard SHIPPED and live-proven.
   Detection calibrated on 16 real margins (per-row density of >40 grey
