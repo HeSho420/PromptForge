@@ -2927,6 +2927,23 @@ class Services:
                         job.log("info", "[stage] plan — environment: "
                                         f"{env_spec['environment']}; the "
                                         f"subject {env_spec['relationship']}")
+                        # The generic checklist asked "what is the new
+                        # background?" and the examiner answered — correctly
+                        # — "trees and mountains": the far field IS the
+                        # background of a pool scene, so the honest answer
+                        # could never name the requirement and every run
+                        # burned a retry on it (reproduced offline, twice
+                        # per run). An environment step's requirement is
+                        # the PLACE; the check derives from the plan and
+                        # asks where the photo was taken ("Resort
+                        # poolside" verified True against "swimming pool").
+                        step["_checklist"] = [{
+                            "need": env_spec["environment"],
+                            "probe": "Where does this photo appear to be "
+                                     "taken? Describe the place in a few "
+                                     "words.",
+                            "expect": env_spec["environment"],
+                        }]
                     # Deliberately NOT with_scene(): the scene summary
                     # describes the backdrop being REPLACED. Seen live —
                     # "scene: person standing in front of mirror" appended to

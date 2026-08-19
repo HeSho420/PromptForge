@@ -403,6 +403,21 @@ class ContactSurfaceProbeTests(unittest.TestCase):
         self.assertIsNone(s._contact_surface_miss(img, card, None))
 
 
+class EnvironmentChecklistTests(unittest.TestCase):
+    def test_background_steps_verify_the_place_not_the_far_field(self):
+        # "What is the new background?" was answered — correctly — with
+        # "trees and mountains" on a pool-dominated scene (the far field
+        # IS the background), so every run burned a retry on a
+        # requirement no honest answer could name. Background steps must
+        # derive their check from the plan and ask about the PLACE.
+        import inspect
+
+        from app.core.services import Services
+        src = inspect.getsource(Services._handle_image_edit)
+        self.assertIn("Where does this photo appear", src)
+        self.assertIn('step["_checklist"] = [{', src)
+
+
 class ProbeFileRoutingTests(unittest.TestCase):
     def test_files_route_by_prefix(self):
         import io as _io
