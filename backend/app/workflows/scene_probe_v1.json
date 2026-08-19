@@ -1,0 +1,107 @@
+{
+  "template": "scene_probe",
+  "version": 1,
+  "task": "scene_probe",
+  "description": "Geometry probe for environment-aware editing: MoGe reads one photograph and exports three measurement images - camera-space normals (ground plane orientation and camera pitch fall straight out of them), depth (ground/horizon fitting, contact continuity), and the validity mask (sky and unresolvable pixels). Analysis happens in Python (scene_geometry.py); this graph only measures. resolution_level 7: plane fitting needs far less detail than meshing, and the probe runs before EVERY environment edit.",
+  "required_models": [
+    "moge-v2"
+  ],
+  "parameters": {
+    "image": {
+      "node": "2",
+      "input": "image"
+    }
+  },
+  "graph": {
+    "1": {
+      "class_type": "LoadMoGeModel",
+      "inputs": {
+        "model_name": "moge_2_vitl_normal_fp16.safetensors"
+      }
+    },
+    "2": {
+      "class_type": "LoadImage",
+      "inputs": {
+        "image": ""
+      }
+    },
+    "3": {
+      "class_type": "MoGeInference",
+      "inputs": {
+        "moge_model": [
+          "1",
+          0
+        ],
+        "image": [
+          "2",
+          0
+        ],
+        "resolution_level": 7,
+        "fov_x_degrees": 0.0,
+        "batch_size": 1,
+        "force_projection": true,
+        "apply_mask": false
+      }
+    },
+    "4": {
+      "class_type": "MoGeRender",
+      "inputs": {
+        "moge_geometry": [
+          "3",
+          0
+        ],
+        "output": "depth"
+      }
+    },
+    "5": {
+      "class_type": "MoGeRender",
+      "inputs": {
+        "moge_geometry": [
+          "3",
+          0
+        ],
+        "output": "normal_opengl"
+      }
+    },
+    "6": {
+      "class_type": "MoGeRender",
+      "inputs": {
+        "moge_geometry": [
+          "3",
+          0
+        ],
+        "output": "mask"
+      }
+    },
+    "7": {
+      "class_type": "SaveImage",
+      "inputs": {
+        "filename_prefix": "pfprobe_depth",
+        "images": [
+          "4",
+          0
+        ]
+      }
+    },
+    "8": {
+      "class_type": "SaveImage",
+      "inputs": {
+        "filename_prefix": "pfprobe_normal",
+        "images": [
+          "5",
+          0
+        ]
+      }
+    },
+    "9": {
+      "class_type": "SaveImage",
+      "inputs": {
+        "filename_prefix": "pfprobe_valid",
+        "images": [
+          "6",
+          0
+        ]
+      }
+    }
+  }
+}

@@ -1233,6 +1233,7 @@ promptforge:
   ultralytics_bbox: ultralytics/bbox
   ultralytics_segm: ultralytics/segm
   rmbg: rmbg
+  geometry_estimation: geometry_estimation
 "@ | Out-File -Encoding utf8 $extra
     $p = Start-ComfyUI $comfyDir
     if ($p) {

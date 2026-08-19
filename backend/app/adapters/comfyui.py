@@ -45,7 +45,7 @@ ALLOWED_TASKS = {"inpaint", "generate", "img2img", "upscale", "outpaint",
                  "video", "video_inpaint", "video_outpaint", "angles",
                  "identity", "relight", "compose", "motion_transfer",
                  "background", "reconstruct", "pose", "scene3d", "kontext",
-                 "facedetail"}
+                 "facedetail", "scene_probe"}
 
 # Node classes permitted in generated/validated workflows. Extend deliberately.
 ALLOWED_NODE_TYPES = {

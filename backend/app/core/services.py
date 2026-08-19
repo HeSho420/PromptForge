@@ -66,7 +66,7 @@ from ..adapters.mock import (
 )
 from ..adapters.sam import SamSegmentationAdapter
 from ..config import PROJECT_ROOT, Settings
-from . import eta, motion, node_packs, quality
+from . import eta, motion, node_packs, quality, scene_geometry
 from . import scene_graph as scene_module
 from . import video as video_io
 from .critic import (
@@ -2396,6 +2396,16 @@ class Services:
             # AGAIN). Verify falls back if the plan mutated.
             steps[-1]["_checklist"] = quality.request_checklist(
                 self.llm, steps[-1].get("instruction") or prompt)
+            for s in steps:
+                if s["task"] == "background":
+                    # Environment planning is TEXT work: do it while the
+                    # planner is warm (the same eviction economics as _enh
+                    # and _checklist above). No subject facts are measured
+                    # yet, so none are claimed — the spec plans the PLACE;
+                    # the measured geometry joins at render time.
+                    s["_env_spec"] = scene_geometry.environment_spec(
+                        self.llm, s.get("instruction") or prompt,
+                        None, None)
 
         # Image Understanding: one rich scene graph is built per image and
         # reused by every step — planning context, placement, targeted
@@ -2431,6 +2441,9 @@ class Services:
         last_outpaint: dict[str, Any] | None = None  # prompts/model for retries
         last_positive = prompt
         last_negative = ""
+        env_card: scene_geometry.SceneCard | None = None
+        env_spec: dict[str, Any] | None = None
+        env_misses: list[str] = []
         result_adapter = self.inpainting.name
         result_is_mock = not real
         rounds = 0
@@ -2868,22 +2881,51 @@ class Services:
                     result_is_mock = False
                 elif step["task"] == "background":
                     job.log("info", f"[stage] render — step {i + 1}/{n}: "
-                                    "replacing the background only")
+                                    "rebuilding the environment around the "
+                                    "subject")
+                    # Environment awareness, in order: MEASURE the photo's
+                    # physics (contact points, ground plane, camera pitch,
+                    # horizon — MoGe + the exact matte), PLAN the place the
+                    # words ask for, then COMPILE both into the prompt so
+                    # the new scene is generated around the subject with
+                    # the same camera, not painted behind a cutout. Every
+                    # stage fails open to the old behaviour, honestly
+                    # logged.
+                    env_card = (self._scene_card(job, asset_id, current)
+                                if real else None)
+                    env_spec = step.get("_env_spec")
+                    if env_spec is None and real:
+                        env_spec = scene_geometry.environment_spec(
+                            self.llm, step["instruction"],
+                            env_card.posture if env_card else None,
+                            env_card.cut_at_bottom if env_card else None,
+                            scene or "")
+                    if env_spec:
+                        job.log("info", "[stage] plan — environment: "
+                                        f"{env_spec['environment']}; the "
+                                        f"subject {env_spec['relationship']}")
                     # Deliberately NOT with_scene(): the scene summary
                     # describes the backdrop being REPLACED. Seen live —
                     # "scene: person standing in front of mirror" appended to
                     # a forest request made SD paint a framed forest picture
                     # on the original wall instead of putting her in a forest.
+                    env_pos, env_neg = scene_geometry.spatial_prompt(
+                        env_spec, env_card, enh["positive"], enh["negative"])
                     before_bg = current
                     current = self._render_background_step(
-                        job, current, enh["positive"], enh["negative"],
-                        subject_hint=f"{scene or ''} {step['instruction']}")
+                        job, current, env_pos, env_neg,
+                        subject_hint=f"{scene or ''} {step['instruction']}",
+                        compiled=True)
                     # A correctly matted subject still reads as pasted while
                     # its light disagrees with the scene it is now standing
                     # in. This is the step that sells it.
                     current = self._match_lighting(
-                        job, current, before_bg, enh["positive"])
-                    wf_name = "background template (inverted BiRefNet matte)"
+                        job, current, before_bg, env_pos)
+                    if real and env_card is not None:
+                        env_misses = self._environment_misses(
+                            job, current, env_card, env_spec)
+                    wf_name = ("background template (scene-measured "
+                               "environment, inverted BiRefNet matte)")
                     model_name = "sd15-inpaint"
                     last_mask = None
                     result_adapter = "comfyui-background"
@@ -3079,11 +3121,16 @@ class Services:
                     if issues:
                         job.log("info", "Issues found: "
                                         + "; ".join(issues[:5]))
+                if env_misses:
+                    # Measured geometry disagreements are issues too: they
+                    # feed the same avoid-clause the inspector's findings do.
+                    issues = [*issues, *env_misses]
                 job.log("info", "[stage] score — grading realism, accuracy "
                                 "and consistency")
                 scores = quality.scorecard(self.critic, current, prompt)
                 scores = self._ground_scores(job, scores, current,
                                              last_outpaint)
+                scores = self._env_scores(job, scores, env_misses)
                 self._log_scores(job, scores)
                 # Did the edit DO what was asked? The checklist names the
                 # parts that are missing, and those names decide what the
@@ -3372,9 +3419,23 @@ class Services:
                             # background plate first (it is ready earlier).
                             # A retry could therefore "win" with the scene
                             # minus the subject.
+                            # Recompile the spatial prompt around the
+                            # emphasized retry wording: the first retry
+                            # implementation fell back to the plain
+                            # scene-appended prompt, which dropped the
+                            # ground contract and the solid-ground
+                            # negatives — measured live, every retry
+                            # flooded the foreground again.
+                            retry_pos, retry_neg = \
+                                scene_geometry.spatial_prompt(
+                                    env_spec, env_card, emphasized,
+                                    last_negative)
                             candidate = self._render_background_step(
-                                job, final_input, with_scene(emphasized),
-                                last_negative)
+                                job, final_input, retry_pos, retry_neg,
+                                compiled=True)
+                            if env_card is not None:
+                                env_misses = self._environment_misses(
+                                    job, candidate, env_card, env_spec)
                         elif last_step["task"] == "kontext":
                             # Kontext follows an INSTRUCTION, and the retry
                             # path's scene-appended prompt is a DESCRIPTION.
@@ -3433,10 +3494,15 @@ class Services:
                     cand_issues = (quality.inspect_seams(self.critic, candidate,
                                                          last_mask)
                                    if last_mask is not None else [])
+                    if env_misses:
+                        # A kept candidate's measured geometry misses must
+                        # reach the NEXT round's avoid-clause too.
+                        cand_issues = [*cand_issues, *env_misses]
                     scores2 = quality.scorecard(self.critic, candidate,
                                                 prompt)
                     scores2 = self._ground_scores(job, scores2, candidate,
                                                   last_outpaint)
+                    scores2 = self._env_scores(job, scores2, env_misses)
                     o2 = quality.overall(scores2)
                     ob = quality.overall(best_scores)
                     if o2 is None:
@@ -4883,9 +4949,259 @@ class Services:
                      if not re.match(r"sd-v1-5-inpainting", c, re.IGNORECASE)]
         return (photoreal or paint)[0]
 
+    _POSTURE_QUESTION = (
+        "What is the main subject's body posture in this photo? Reply ONLY "
+        'JSON: {"posture": "<one of: standing, sitting, lying, crouching, '
+        'kneeling, leaning, unknown>"}')
+    _POSTURE_SCHEMA = {
+        "type": "object",
+        "properties": {"posture": {"type": "string",
+                                   "enum": list(scene_geometry.POSTURES)}},
+        "required": ["posture"],
+    }
+
+    def _probe_geometry(self, job: Job, image: Image.Image
+                        ) -> dict[str, Image.Image] | None:
+        """One MoGe pass over an image → its depth / normal / validity
+        renders, or None when the probe graph fails."""
+        template = self.workflows.load_named("scene_probe")
+        graph = build_workflow(template, {
+            "image": self.comfy.upload_image(image, "probe_src")})
+        self._free_vram(job)
+        files = self.comfy.wait_for_output_all(self.comfy.submit(graph))
+        shots = scene_geometry.parse_probe_files(files)
+        return shots if {"depth", "normal", "valid"} <= set(shots) else None
+
+    def _scene_card(self, job: Job, asset_id: str, image: Image.Image
+                    ) -> scene_geometry.SceneCard | None:
+        """Measure the photograph's physics before an environment edit:
+        contact points off the exact matte, ground plane / camera pitch /
+        horizon off MoGe's camera-space renders, posture from the vision
+        model with a deterministic veto, lighting from the scene graph.
+        Fails open — no geometry model or no matte means None, and the
+        edit runs exactly as before, with the gap logged honestly."""
+        import hashlib
+        cache: dict[str, Any] = getattr(self, "_scene_cards", {})
+        self._scene_cards = cache
+        key = hashlib.md5(image.tobytes()).hexdigest()
+        if key in cache:
+            return cache[key]
+        try:
+            # BEFORE the capability gates: pack detection asks the live
+            # ComfyUI, so a momentarily-down renderer read as "the rmbg
+            # pack is off" and silently skipped the whole measurement.
+            self._require_comfy(job)
+        except Exception:  # noqa: BLE001 — the render step will retry it
+            job.log("info", "[stage] analyze — the renderer is not up yet; "
+                            "skipping the geometry measurement")
+            return None
+        ok, why = self._template_runnable("scene_probe")
+        if not ok and self.settings.auto_install and "not downloaded" in why:
+            job.log("info", "[stage] models — fetching the geometry model "
+                            "(MoGe); this happens once")
+            try:
+                self._ensure_model("moge-v2", job)
+                ok, why = self._template_runnable("scene_probe")
+            except Exception as exc:  # noqa: BLE001 — analysis is optional
+                ok, why = False, str(exc)
+        if not ok or not self._pack_active("rmbg"):
+            job.log("info", "[stage] analyze — scene geometry unavailable "
+                            f"({why if not ok else 'the rmbg pack is off'});"
+                            " the environment will be generated without a "
+                            "measured camera/ground contract")
+            cache[key] = None
+            return None
+        job.log("info", "[stage] analyze — measuring the subject's ground "
+                        "contact, the camera and the horizon")
+        try:
+            self._require_comfy(job)
+            matte = self._region_mask(image, "BiRefNetRMBG", {
+                "model": self._matte_model("person subject"),
+                "sensitivity": 1.0, "mask_blur": 0, "mask_offset": 0,
+                "invert_output": False, "refine_foreground": True,
+                "background": "Alpha", "background_color": "#222222"})
+            probe = self._probe_geometry(job, image)
+            subj = (scene_geometry.subject_geometry(matte)
+                    if matte is not None else {})
+            ground = (scene_geometry.ground_geometry(
+                probe["normal"], probe["depth"], probe["valid"], matte)
+                if probe else {})
+            graph = self._scene_cache.get(asset_id) or {}
+            card = scene_geometry.SceneCard(
+                **subj, **ground,
+                lighting=str(graph.get("lighting", "")),
+                perspective_note=str(graph.get("perspective", "")),
+                setting=str(graph.get("setting", "")))
+        except Exception as exc:  # noqa: BLE001 — analysis must not kill
+            job.log("info", f"[stage] analyze — scene measurement failed "
+                            f"({exc}); proceeding without it")
+            cache[key] = None
+            return None
+        ask = getattr(self.critic, "ask", None)
+        if ask is not None and card.subject_box is not None:
+            try:
+                data = json.loads(ask(image, self._POSTURE_QUESTION,
+                                      schema=self._POSTURE_SCHEMA))
+                card.posture = scene_geometry.posture_veto(
+                    data.get("posture"), card.subject_box)
+                card.posture_source = "vision" if card.posture else "none"
+            except Exception:  # noqa: BLE001 — posture is optional
+                pass
+        bits = []
+        if card.posture:
+            bits.append(card.posture)
+        if card.cut_at_bottom:
+            bits.append("feet outside the frame")
+        elif card.contact_points:
+            bits.append(f"{len(card.contact_points)} ground contact "
+                        f"point(s)")
+        if card.camera_pitch_deg is not None:
+            bits.append(f"camera pitch {card.camera_pitch_deg:.0f}°")
+        if card.horizon_y_frac is not None:
+            bits.append(f"horizon at {card.horizon_y_frac:.0%} of frame "
+                        f"height (fit r²={card.horizon_r2:.2f})")
+        if card.ground_frac is not None:
+            bits.append(f"ground covers {card.ground_frac:.0%}")
+        job.log("info", "[stage] analyze — measured: "
+                        + ("; ".join(bits) if bits else "nothing reliable"))
+        if probe:
+            # Debug transparency: the measurement images become inspectable
+            # aux versions, exactly like auto-masks already do.
+            try:
+                for label, im in (("scene depth", probe["depth"]),
+                                  ("scene normals", probe["normal"])):
+                    p = self.store.new_version_path(asset_id)
+                    im.save(p, format="PNG")
+                    self.store.add_aux_version(asset_id, str(p), label,
+                                               "scene_probe")
+            except Exception:  # noqa: BLE001 — debug output only
+                pass
+        cache[key] = card
+        return card
+
+    _SURFACE_SCHEMA = {
+        "type": "object",
+        "properties": {"on_expected": {"type": "boolean"},
+                       "seen": {"type": "string"}},
+        "required": ["on_expected", "seen"],
+    }
+
+    def _contact_surface_miss(self, result: Image.Image,
+                              card: scene_geometry.SceneCard,
+                              spec: dict[str, Any] | None) -> str | None:
+        """Is the planned surface actually under the subject's feet?
+
+        Normals cannot answer this: pool water is an up-facing plane and
+        measures exactly like a floor — the first geometry-validated
+        render passed pitch, horizon AND the up-normal contact window
+        while the subject stood ankle-deep in the pool. So geometry says
+        WHERE to look (the measured contact band) and the vision model
+        says WHAT is there, region-scoped and schema-forced (the same
+        doctrine that fixed the seam inspector: small view, concrete
+        question)."""
+        ask = getattr(self.critic, "ask", None)
+        gs = str((spec or {}).get("ground_surface") or "")
+        if (ask is None or not gs or "none" in gs.lower()
+                or not card.contact_points or card.cut_at_bottom):
+            return None
+        xs = [c[0] for c in card.contact_points]
+        ys = [c[1] for c in card.contact_points]
+        w, h = result.size
+        view = result.crop((max(0, min(xs) - int(w * 0.14)),
+                            max(0, min(ys) - int(h * 0.10)),
+                            min(w, max(xs) + int(w * 0.14)),
+                            min(h, max(ys) + int(h * 0.14))))
+        # SUPPORT-class only: the first phrasing compared adjectives and
+        # rejected "dry tiles" against a planned "wet tiles" — twice, live.
+        # The physical contract is that the feet stand on something solid,
+        # not that the paint matches the plan word-for-word.
+        q = ("In this edited photo the subject should be standing on a "
+             f"solid surface ({gs}). Look ONLY at what is directly under "
+             "and around the feet in this crop. Set on_expected to false "
+             "ONLY if the feet are in water, floating in mid-air, or on "
+             "something that could not physically support a standing "
+             "person — differences of colour, wetness or material detail "
+             "do NOT count. Reply ONLY JSON: "
+             '{"on_expected": <true/false>, "seen": "<what the feet are '
+             'actually standing on or in>"}')
+        try:
+            data = json.loads(ask(view, q, schema=self._SURFACE_SCHEMA))
+        except Exception:  # noqa: BLE001 — advisory probe
+            return None
+        if data.get("on_expected") is False:
+            seen = str(data.get("seen", "something else"))[:60]
+            return (f"the subject's feet are on/in {seen} instead of "
+                    f"solid ground ({gs})")
+        return None
+
+    def _environment_misses(self, job: Job, result: Image.Image,
+                            card: scene_geometry.SceneCard,
+                            spec: dict[str, Any] | None = None
+                            ) -> list[str]:
+        """The SAME geometry measurements, run on the rendered result and
+        compared against the card, plus the contact-surface probe.
+        Misses feed the retry ladder's avoid-clause and cap the
+        consistency score. Each part fails safe independently."""
+        after: dict[str, Any] = {}
+        try:
+            probe = self._probe_geometry(job, result)
+            if probe:
+                matte = self._region_mask(result, "BiRefNetRMBG", {
+                    "model": self._matte_model("person subject"),
+                    "sensitivity": 1.0, "mask_blur": 0, "mask_offset": 0,
+                    "invert_output": False, "refine_foreground": True,
+                    "background": "Alpha", "background_color": "#222222"})
+                after = scene_geometry.ground_geometry(
+                    probe["normal"], probe["depth"], probe["valid"], matte)
+                cgf = scene_geometry.contact_ground_frac(
+                    probe["normal"], card.contact_points, result.size)
+                if cgf is not None:
+                    after["contact_ground_frac"] = cgf
+        except Exception:  # noqa: BLE001 — validation must not kill a render
+            after = {}
+        misses = scene_geometry.environment_misses(card, after)
+        try:
+            surface = self._contact_surface_miss(result, card, spec)
+            if surface:
+                misses.append(surface)
+        except Exception:  # noqa: BLE001 — validation must not kill a render
+            pass
+        comparable = ((card.contact_points and not card.cut_at_bottom)
+                      or card.camera_pitch_deg is not None
+                      or card.horizon_y_frac is not None)
+        if misses:
+            job.log("info", "[stage] validate — the measured geometry "
+                            "disagrees: " + "; ".join(misses))
+        elif comparable:
+            job.log("info", "[stage] validate — the new scene keeps the "
+                            "photograph's camera and ground geometry")
+        else:
+            job.log("info", "[stage] validate — nothing measurable to "
+                            "compare on this photograph")
+        return misses
+
+    def _env_scores(self, job: Job, scores: dict[str, int] | None,
+                    misses: list[str]) -> dict[str, int] | None:
+        """Measured environment-geometry misses overrule the whole-frame
+        consistency score, the same doctrine as _ground_scores: the
+        scorecard cannot see a pasted-backdrop perspective break, the
+        measurement can. Lower-only."""
+        cap = 70
+        if not scores or not misses:
+            return scores
+        if scores.get("scene_consistency", 0) > cap:
+            job.log("info", "[stage] score — the measured scene geometry "
+                            "overrules the consistency score "
+                            f"(scene_consistency "
+                            f"{scores['scene_consistency']} → {cap})")
+            scores = dict(scores)
+            scores["scene_consistency"] = cap
+        return scores
+
     def _render_background_step(self, job: Job, image: Image.Image,
                                 positive: str, negative: str,
-                                subject_hint: str = "") -> Image.Image:
+                                subject_hint: str = "",
+                                compiled: bool = False) -> Image.Image:
         """Replace what is BEHIND the subject, and nothing else.
 
         An exact BiRefNet subject matte is INVERTED, so the repainted region is
@@ -4905,21 +5221,26 @@ class Services:
         matte = self._matte_model(subject_hint or positive)
         job.log("info", f"Matting the subject with {matte}, then repainting "
                         "only the inverted region")
-        # Ask for an ENVIRONMENT, not a backdrop. Without this the model
-        # composes the new scene as a flat picture behind the subject —
-        # measured live: a framed forest poster on the original wall.
-        positive = (f"{positive}, the surrounding environment, a real place "
-                    "extending behind and around the subject, continuous "
-                    "scene, natural depth of field, photograph")
-        # The repainted region is everything AROUND the subject, and left
-        # unguarded the model populates it — a second, headless figure was
-        # painted into a snowy mountain scene (D9). The pose route has used
-        # this negative for exactly this reason; the background route now
-        # does too.
-        negative = ", ".join(t for t in (
-            (negative or "").strip(" ,"),
-            "person, people, human figure, limbs, extra person, "
-            "duplicate subject, crowd, text, watermark") if t)
+        if not compiled:
+            # Ask for an ENVIRONMENT, not a backdrop. Without this the model
+            # composes the new scene as a flat picture behind the subject —
+            # measured live: a framed forest poster on the original wall.
+            # (`compiled` prompts arrive from scene_geometry.spatial_prompt,
+            # which already carries this clause plus the measured camera,
+            # horizon and ground-contact language.)
+            positive = (f"{positive}, the surrounding environment, a real "
+                        "place extending behind and around the subject, "
+                        "continuous scene, natural depth of field, "
+                        "photograph")
+            # The repainted region is everything AROUND the subject, and left
+            # unguarded the model populates it — a second, headless figure was
+            # painted into a snowy mountain scene (D9). The pose route has
+            # used this negative for exactly this reason; the background
+            # route now does too.
+            negative = ", ".join(t for t in (
+                (negative or "").strip(" ,"),
+                "person, people, human figure, limbs, extra person, "
+                "duplicate subject, crowd, text, watermark") if t)
         params: dict[str, Any] = {
             "image": self.comfy.upload_image(image, "bg_src"),
             "rmbg_model": matte,
