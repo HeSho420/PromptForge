@@ -369,6 +369,26 @@ never-mask-the-face rule). Do not "extend" it to image_edit.
   + unit tests). Harmonize guard 4th consecutive live fire (L16/R28);
   deglyph guard hit its keep-first branch live this run ("re-render no
   cleaner" — first live sighting). 976 tests.
+- **Cycle 30 (a445145)** Draft mode surfaced in the UI + --bf16-vae
+  closed by measurement. The backend's complete draft pipeline
+  (generate_draft DMD2 template, LLM-free fast path, ladder skip,
+  recipe.draft) had ZERO frontend presence. Now: "Quick draft"
+  checkbox on the generate task (button relabels "Draft it"),
+  routes pass draft:true → _workflow_inner ORs it with the words-based
+  draft_intent (same deterministic path); wanted-but-not-ready drafts
+  log honestly instead of silent full-quality. Result shows a dashed
+  DRAFT badge + recipe line "DRAFT (4-step preview, judging skipped)".
+  LIVE through the real UI: toggle → payload flag (prompt had NO draft
+  words) → "Draft requested — skipping workflow triage" → 29s LLM-free
+  render → recipe.draft true → badge + recipe line render. 978 tests,
+  frontend built. --bf16-vae: NO-OP — comfyui-revive.log shows "VAE
+  ... dtype: torch.bfloat16" already auto-selected by v0.28 on Ada;
+  fp32 direction rejected (VRAM risk, no measured banding defect).
+  Two quirks noted: (a) ProvenanceBadge shows "cloud API ·
+  generate_draft" on template renders that touched no API — mislabel,
+  candidate fix; (b) the Claude-Browser pane reports document.hidden
+  even fronted, so the UI's deliberate hidden-tab poll pause needed a
+  visibility override to observe — env quirk, not an app bug.
 Candidates, roughly ranked (artifact focus first per 2026-08-18 mandate):
 - **Cycle 23 (0079083)** Outpaint glyph guard SHIPPED and live-proven.
   Detection calibrated on 16 real margins (per-row density of >40 grey
