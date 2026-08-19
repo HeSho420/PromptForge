@@ -446,6 +446,30 @@ never-mask-the-face rule). Do not "extend" it to image_edit.
   region-scoped treatment); DWPose keypoints for sitting/lying;
   subject softness flag traces to prompted depth-of-field (whole-frame
   sharpness compare) — explain or scope it.
+- **ENV B2 (e4b2316 + 9f342cc)** Verify + routing rounds, all live-
+  measured. (1) The checklist trap: "what is the new background?" was
+  answered — correctly — "trees and mountains" on a pool-dominated
+  scene (the far field IS the background); no honest answer could name
+  the requirement, every run burned a ~2min retry (reproduced offline
+  twice/run, tie-break incl.). Background steps now derive the check
+  from the SPEC and ask WHERE the photo was taken ("Resort poolside"
+  → True vs "swimming pool"). Live: verify passes, best-of-1. (2)
+  quality.environment_intent: "put her in a nightclub" was planned
+  CHANGE_STYLE → inpaint → honest mask failure; relocation phrasing
+  (person object + place preposition, garment/pose guard) now coerces
+  to the background pipeline (deterministic, beside the add/format
+  coercions). (3) Trailing CHANGE_LIGHTING after a background step
+  PRUNED: the standalone relight template re-ran full IC-Light on the
+  already-lit scene — objective check measured 92% of face pixels
+  moved; env's own _match_lighting is illumination-only by design.
+  Nightclub rerun: single step, validate ✓, place-check ✓, identity
+  90, real interior with the floor under her feet. 1012 tests.
+  KNOWN LIMIT (documented, principled): extreme relight (daylight →
+  dim club) shifts the subject only partway — the low-frequency
+  transfer trades light completeness for identity; the full-redraw
+  alternative is measured identity-destroying. Future: IC-Light fbc
+  with detail-transfer strength tuning, or brightness/temperature
+  histogram match on the subject as a post step.
 Candidates, roughly ranked (artifact focus first per 2026-08-18 mandate):
 - **Cycle 23 (0079083)** Outpaint glyph guard SHIPPED and live-proven.
   Detection calibrated on 16 real margins (per-row density of >40 grey
