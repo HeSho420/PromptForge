@@ -424,6 +424,28 @@ never-mask-the-face rule). Do not "extend" it to image_edit.
   scene-extension mode still = outpaint route; retry budget shares
   the unreliable vl-verify circuit breaker (a static geometry miss
   burned the round budget). Env aux versions saved for debugging.
+- **ENV Phase B1 (1cf96a8)** Depth-guided environment renders. Words
+  held the measured horizon on 0/3 first draws; conditioning is the
+  lever. guidance_depth: subject keeps measured disparity, below the
+  measured horizon the ground plane's FITTED ramp (NOT raw pixels —
+  raw ground disparity made the ControlNet repaint the plaza's tile
+  grid as striped pavement, measured live, fixed), far/free above; no
+  confident horizon → no guide. background_guided template = proven
+  background graph + ControlNet v1.1 depth (strength 0.55, released
+  last 20% of steps). NEW MODEL controlnet-sd15-depth (OpenRAIL-M,
+  ~700MB fp16, auto-fetched with hub-verified checksum, MODEL_USAGE
+  line: never prompt-routed, pipeline-attached). LIVE A/B same
+  request/asset: guided geometry pass 4/4 draws vs 2/5 unguided;
+  first-draw 3/3 vs 0/3; delivered image keeps the plaza's exact
+  camera, horizon at measured 38%, subject on solid deck (sampler
+  built a tiled platform to satisfy position+contract — eccentric but
+  physically coherent, shadow+reflection present). 1008 tests.
+  NEXT: vl-verify flakiness burns retries ("swimming pool background
+  matched 0%" on images DOMINATED by pools — geometry+scores were
+  fine; reproduce the adherence probe offline, likely needs the
+  region-scoped treatment); DWPose keypoints for sitting/lying;
+  subject softness flag traces to prompted depth-of-field (whole-frame
+  sharpness compare) — explain or scope it.
 Candidates, roughly ranked (artifact focus first per 2026-08-18 mandate):
 - **Cycle 23 (0079083)** Outpaint glyph guard SHIPPED and live-proven.
   Detection calibrated on 16 real margins (per-row density of >40 grey
