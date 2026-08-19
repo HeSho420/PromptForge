@@ -35,6 +35,7 @@ function RecipeCard({ recipe }: { recipe: GenerationRecipe }) {
         <div>
           <span className="dim">workflow&nbsp;&nbsp;</span>
           {recipe.workflow} · {recipe.nodes} nodes
+          {recipe.draft ? " · DRAFT (4-step preview, judging skipped)" : ""}
           {recipe.repairs > 0 ? ` · ${recipe.repairs} repair(s)` : ""}
           {recipe.strategy_rounds > 0
             ? ` · ${recipe.strategy_rounds} strategy round(s)`
@@ -141,6 +142,7 @@ const RUNNING_STATES = ["pending", "running", "retrying"];
 export function Forge({ onBusy }: PanelProps = {}) {
   const [task, setTask] = useState<string>("generate");
   const [prompt, setPrompt] = useState("");
+  const [draft, setDraft] = useState(false);
   const [source, setSource] = useState<Asset | null>(null);
   const [uploading, setUploading] = useState(false);
   const [videoLength, setVideoLength] = useState(49);
@@ -212,7 +214,8 @@ export function Forge({ onBusy }: PanelProps = {}) {
         // Only image-transform tasks send the source: a stale upload must
         // never silently condition a pure text-to-image request.
         const created = await api.runWorkflow(
-          task, prompt, needsImage ? source?.id : undefined);
+          task, prompt, needsImage ? source?.id : undefined,
+          task === "generate" ? draft : undefined);
         const batch = (created as Job & { batch_count?: number }).batch_count;
         if (batch && batch > 1) setBatchCount(batch);
         trackJob(created);
@@ -239,6 +242,10 @@ export function Forge({ onBusy }: PanelProps = {}) {
       : undefined;
   const realism =
     job?.state === "completed" ? (job.result?.realism as number | null) : null;
+  const resultRecipe =
+    job?.state === "completed"
+      ? (job.result?.recipe as GenerationRecipe | undefined)
+      : undefined;
 
   return (
     <>
@@ -328,10 +335,32 @@ export function Forge({ onBusy }: PanelProps = {}) {
               </>
             ) : isVideo ? (
               "Animate it"
+            ) : draft && task === "generate" ? (
+              "Draft it"
             ) : (
               "Forge it"
             )}
           </button>
+          {task === "generate" && (
+            <label
+              className="dim"
+              style={{
+                fontSize: 12.5,
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 6,
+                cursor: "pointer",
+              }}
+              title="4-step speed render (~6× faster), your words verbatim, no quality judging — for iterating on the wording. Turn it off and re-run for the final image."
+            >
+              <input
+                type="checkbox"
+                checked={draft}
+                onChange={(e) => setDraft(e.target.checked)}
+              />
+              Quick draft
+            </label>
+          )}
           {!isVideo && (
             <button
               type="button"
@@ -395,6 +424,14 @@ export function Forge({ onBusy }: PanelProps = {}) {
           <div className="row" style={{ justifyContent: "space-between" }}>
             <h2 style={{ margin: 0 }}>Result</h2>
             <span className="row" style={{ gap: 8 }}>
+              {resultRecipe?.draft && (
+                <span
+                  className="badge draft"
+                  title="4-step draft render — quality judging was skipped. Re-run without Quick draft for the final."
+                >
+                  draft
+                </span>
+              )}
               {typeof realism === "number" && (
                 <span
                   className={`badge ${realism >= 6 ? "completed" : "pending"}`}

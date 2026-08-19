@@ -283,9 +283,11 @@ export const api = {
   approveWorkflow: (id: string, liveTest = true) =>
     request<{ saved: string; verified: string; path: string }>(
       "/api/workflows/approve", json({ id, live_test: liveTest })),
-  runWorkflow: (task: string, prompt: string, assetId?: string) =>
+  runWorkflow: (task: string, prompt: string, assetId?: string,
+                draft?: boolean) =>
     request<Job>("/api/workflows/run",
-      jsonJob({ task, prompt, asset_id: assetId })),
+      jsonJob({ task, prompt, asset_id: assetId,
+                draft: draft || undefined })),
   createVideo: (assetId: string, prompt: string, length?: number) =>
     request<Job>("/api/video", jsonJob({ asset_id: assetId, prompt, length })),
 

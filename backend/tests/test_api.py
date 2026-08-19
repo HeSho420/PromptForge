@@ -183,6 +183,19 @@ class ApiIntegrationTests(unittest.TestCase):
         for j in batch:
             self.assertEqual(j["payload"]["prompt"], "a fox")  # count removed
 
+    def test_quick_draft_toggle_rides_the_payload(self):
+        """The Studio's Quick draft toggle sends draft:true — it lands in
+        the generate payload; an unflagged request carries nothing."""
+        self.client.post("/api/queue/pause")
+        with_flag = self.client.post("/api/workflows/run", json={
+            "task": "generate", "prompt": "a red barn",
+            "draft": True}).get_json()["id"]
+        without = self.client.post("/api/workflows/run", json={
+            "task": "generate", "prompt": "a red barn"}).get_json()["id"]
+        jobs = {j["id"]: j for j in self.client.get("/api/jobs").get_json()}
+        self.assertTrue(jobs[with_flag]["payload"].get("draft"))
+        self.assertNotIn("draft", jobs[without]["payload"])
+
     def test_edit_without_mask_uses_auto_segmentation(self):
         asset_id = self._upload()
         resp = self.client.post("/api/edits",

@@ -2372,6 +2372,14 @@ class DraftIntent(unittest.TestCase):
         self.assertLess(src.index("draft_intent"),
                         src.index("self._triage(job, task, prompt)"))
 
+    def test_the_quick_draft_toggle_reaches_the_same_path(self):
+        # The Studio toggle rides the payload into the SAME deterministic
+        # draft path as the words — and a wanted-but-not-ready draft says
+        # so out loud instead of silently rendering full quality.
+        src = inspect.getsource(Services._workflow_inner)
+        self.assertIn('job.payload.get("draft")', src)
+        self.assertIn("rendering full quality instead", src)
+
     def test_drafts_skip_the_quality_ladder_and_the_polish(self):
         """Measured live: the ladder cost 62 s on top of a ~5 s draft
         render. A draft skips critique/checklist/adherence/retries AND

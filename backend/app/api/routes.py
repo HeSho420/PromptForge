@@ -735,6 +735,10 @@ def create_app(services: Services | None = None) -> Flask:
         count, cleaned = (quality.count_request(prompt)
                           if task == "generate" else (1, prompt))
         payload = {"task": task, "prompt": cleaned}
+        # The Studio's "Quick draft" toggle — same meaning as asking for a
+        # draft in words, without making the user phrase it.
+        if task == "generate" and bool(body.get("draft")):
+            payload["draft"] = True
         if body.get("asset_id"):
             if services.store.get_asset(body["asset_id"]) is None:
                 return _error(404, "not_found", "Asset not found.")

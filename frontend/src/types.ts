@@ -161,6 +161,7 @@ export interface GenerationRecipe {
   repairs: number;
   strategy_rounds: number;
   realism: number | null;
+  draft?: boolean;
   checkpoint?: string;
   sampler?: string;
   scheduler?: string;

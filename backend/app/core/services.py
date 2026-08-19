@@ -8067,13 +8067,20 @@ class Services:
         # render takes ~5 s.
         triage: dict[str, Any] | None = None
         draft_ready = False
-        if task == "generate" and quality.draft_intent(prompt):
+        # Draft intent arrives two ways: the words of the prompt, or the
+        # Studio's "Quick draft" toggle riding the payload — same meaning.
+        if task == "generate" and (job.payload.get("draft")
+                                   or quality.draft_intent(prompt)):
             try:
                 needed = (self.workflows.load_named("generate_draft")
                           .get("required_models") or [])
                 draft_ready = all(self.registry.is_ready(m) for m in needed)
             except Exception:  # noqa: BLE001 — the normal path always works
                 draft_ready = False
+            if not draft_ready:
+                job.log("info", "A draft was asked for, but the speed "
+                                "template isn't ready on this machine — "
+                                "rendering full quality instead")
         if draft_ready:
             triage = {"workflow": "generate_draft"}
             job.log("info", "Draft requested — skipping workflow triage, "
