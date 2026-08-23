@@ -432,6 +432,38 @@ class EnvironmentIntentTests(unittest.TestCase):
             self.assertFalse(environment_intent(no), no)
 
 
+class TextRenderIntentTests(unittest.TestCase):
+    """Readable in-image text routes to the text-rendering engine.
+    Live: SD lettering came out 'CDOSED / LOSSE' while the triage reason
+    itself said readable text was required."""
+
+    def test_text_phrasings_match(self):
+        from app.core.quality import text_render_intent
+        for yes in ("a sign that says CLOSED",
+                    'a poster with the text "SALE TODAY"',
+                    "a neon sign reading OPEN ALL NIGHT",
+                    "a t-shirt with the word CHAMPION",
+                    "OPEN written across the door",
+                    "a mug labelled WORLD'S BEST DAD"):
+            self.assertTrue(text_render_intent(yes), yes)
+
+    def test_wordless_prompts_do_not(self):
+        from app.core.quality import text_render_intent
+        for no in ("a man reading a book in a cafe",
+                   "a lighthouse at dusk, heavy fog",
+                   "a woman walking her dog",
+                   "graffiti-covered alley at night"):
+            self.assertFalse(text_render_intent(no), no)
+
+    def test_generate_route_pins_the_coercion(self):
+        import inspect
+
+        from app.core.services import Services
+        src = inspect.getsource(Services._workflow_inner)
+        self.assertIn("text_render_intent", src)
+        self.assertIn('"generate_zimage"', src)
+
+
 class StyleJudgingTests(unittest.TestCase):
     """A deliberate medium change is judged AS that medium. Measured: a
     delivered watercolor scored realism 20 against the photograph frame

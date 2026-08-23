@@ -958,6 +958,26 @@ def default_edit_step(prompt: str) -> dict[str, Any]:
     return {**base, "task": "inpaint", "operation": op}
 
 
+# Readable text in the picture is a MODEL capability, not a style. SD
+# lettering came out "CDOSED / LOSSE" on a request whose own triage reason
+# said readable text was required — the 7B router cited the rule and still
+# picked the wrong engine. Deterministic, like every routing that matters.
+_TEXT_RENDER = re.compile(
+    r"\b(?:that\s+)?says?\b|\bsaying\b"
+    r"|\b(?:sign|label|poster|banner|billboard|plaque|board|text|neon)"
+    r"\b[^.]{0,24}\bread(?:s|ing)?\b"
+    r"|\bwith\s+the\s+(?:text|words?|letters?)\b"
+    r"|\bwritten\s+(?:on|across)\b|\blabell?ed\b"
+    r"|\bspell(?:s|ed|ing)\b"
+    r"|[\"“'‘][^\"”'’]{2,40}[\"”'’]",
+    re.IGNORECASE)
+
+
+def text_render_intent(prompt: str) -> bool:
+    """Must the generated picture contain specific READABLE text?"""
+    return bool(_TEXT_RENDER.search(prompt or ""))
+
+
 # Draft INTENT, not draft-the-word: a qualifier + a draft noun ("quick
 # draft", "rough sketch", "just a preview") or an explicit draft mode.
 # Content phrases never match — "fast car", "draft horse", "draft beer"

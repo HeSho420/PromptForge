@@ -8688,6 +8688,27 @@ class Services:
                             "the 4-step speed template renders this")
         else:
             triage = self._triage(job, task, prompt)
+            # Readable text is a MODEL capability (SD lettering came out
+            # "CDOSED / LOSSE" live). On machines where the text engine
+            # fits, route to it deterministically; on this one the Qwen3-4B
+            # encoder's 24 GB RAM floor gates it out of the menu entirely —
+            # then the honest move is to SAY the lettering may fail, not to
+            # silently render gibberish as if it were fine.
+            if task == "generate" and quality.text_render_intent(prompt) \
+                    and (triage or {}).get("workflow") != "generate_zimage":
+                ok, why = self._template_runnable("generate_zimage")
+                if ok:
+                    triage = {**(triage or {}),
+                              "workflow": "generate_zimage"}
+                    job.log("info", "[llm] plan: the picture must contain "
+                                    "readable text — routed to the "
+                                    "text-rendering engine")
+                else:
+                    job.log("info", "[llm] plan: the picture needs "
+                                    "readable text, but the text engine "
+                                    f"cannot run here ({why}) — lettering "
+                                    "may come out wrong on the general "
+                                    "model")
 
         # Default prompt optimization: quality boosters are APPENDED — the
         # user's words always survive verbatim (only safety.py filters).
