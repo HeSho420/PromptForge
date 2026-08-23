@@ -470,6 +470,25 @@ never-mask-the-face rule). Do not "extend" it to image_edit.
   alternative is measured identity-destroying. Future: IC-Light fbc
   with detail-transfer strength tuning, or brightness/temperature
   histogram match on the subject as a post step.
+- **PARITY 1 (b90b13b) — ChatGPT-editor parity mandate begins (2026-08-
+  20): "remove the background" delivers TRANSPARENCY.** The class was
+  excluded from the repaint route by design and handled by NOTHING (fell
+  to generic inpaint). cutout_intent (direct-object background removal,
+  transparent/no-background, cut me/her out, sticker, isolate; "remove
+  the man in the background" stays inpaint) + default_edit_step entry
+  (before background) + plan coercion (after env coercion so "remove bg
+  and put her in a bar" keeps env routing). New cutout step: BiRefNet
+  matte → alpha channel over ORIGINAL pixels → RGBA PNG version;
+  early-return like angles (no judging — matte IS the quality);
+  coverage gate 2-98% honest errors; matte model from scene subject
+  knowledge (instruction alone picked lite over the exact portrait
+  matte live). Mock E2E (route/adapter/RGBA on disk) + live sticker-
+  grade figure checkerboard-verified. 1016 tests. Parity queue next:
+  style transfer identity/structure (live test running — CHANGE_STYLE
+  routes to img2img 0.6 denoise; Kontext excluded from style ops,
+  suspect), text editing in images (CHANGE_TEXT/Kontext live check),
+  multi-image compose live check, colorize B&W, iterative edit-the-
+  result UX, product/white-background shots.
 Candidates, roughly ranked (artifact focus first per 2026-08-18 mandate):
 - **Cycle 23 (0079083)** Outpaint glyph guard SHIPPED and live-proven.
   Detection calibrated on 16 real margins (per-row density of >40 grey
