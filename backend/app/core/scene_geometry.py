@@ -134,7 +134,16 @@ def subject_geometry(matte: Image.Image) -> dict[str, Any]:
         return {}
     box = (int(cols[0]), int(rows[0]), int(cols[-1]) + 1, int(rows[-1]) + 1)
     bottom = int(rows[-1])
-    cut = bottom >= h - 1 - _BOTTOM_CUT_PX
+    # The cut test scales with resolution: the matting engine feathers a
+    # cropped subject's edge a few rows short of the frame, and a fixed
+    # 3px missed it by ONE pixel live — fem.png's matte stopped at row
+    # 1439 of 1444, so 53% of the frame width (thighs at the crop edge)
+    # became four phantom "contact points", and every environment render
+    # failed "nothing walkable under the subject's feet" against feet
+    # that are outside the photograph. Contacts this close to the edge
+    # are unusable anyway: there are no rows below them to validate
+    # ground against.
+    cut = bottom >= h - 1 - max(_BOTTOM_CUT_PX, h // 100)
     contacts: list[tuple[int, int]] = []
     if not cut:
         # per-column lowest matte row; the columns within tolerance of the

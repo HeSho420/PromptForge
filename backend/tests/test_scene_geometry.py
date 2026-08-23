@@ -46,6 +46,20 @@ class SubjectGeometryTests(unittest.TestCase):
         self.assertEqual(info["contact_points"], [])
         self.assertIsNone(info["contact_y_frac"])
 
+    def test_a_feathered_crop_edge_is_still_a_crop(self):
+        # Measured live: BiRefNet's soft edge stopped fem.png's matte at
+        # row 1439 of 1444 — a 4px gap against the old fixed 3px test —
+        # so 53% of the frame width became four phantom "contact points"
+        # and EVERY environment render failed "nothing walkable under
+        # the subject's feet" for a subject cropped at mid-thigh. The
+        # tolerance scales with the frame now.
+        m = Image.new("L", (300, 500), 0)
+        import PIL.ImageDraw as D
+        D.Draw(m).rectangle((100, 60, 200, 495), fill=255)  # 4px short
+        info = scene_geometry.subject_geometry(m)
+        self.assertTrue(info["cut_at_bottom"])
+        self.assertEqual(info["contact_points"], [])
+
     def test_empty_matte_measures_nothing(self):
         self.assertEqual(
             scene_geometry.subject_geometry(Image.new("L", (64, 64), 0)), {})
