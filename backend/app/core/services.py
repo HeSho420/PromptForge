@@ -5547,21 +5547,34 @@ class Services:
                 "would repaint the subject and leave the backdrop.")
         template = self.workflows.load("background")
         guided = False
+        guided_xl = False
         if guidance is not None:
-            ok, why = self._template_runnable("background_guided")
-            if not ok and self.settings.auto_install \
-                    and "not downloaded" in why:
-                job.log("info", "[stage] models — fetching the depth "
-                                "ControlNet (pins the new scene to the "
-                                "measured perspective); this happens once")
-                try:
-                    self._ensure_model("controlnet-sd15-depth", job)
-                    ok, why = self._template_runnable("background_guided")
-                except Exception as exc:  # noqa: BLE001 — optional upgrade
-                    ok, why = False, str(exc)
-            if ok:
-                template = self.workflows.load_named("background_guided")
-                guided = True
+            # XL first: the SD15 variant painted environments at ~1.8 MP
+            # far off-distribution — every guided run was flagged
+            # 0.17–0.33x input sharpness. juggernautXL is the measured
+            # outpaint-class winner at this size; the SD15 pair stays as
+            # the fallback.
+            for tpl, model in (("background_guided_xl",
+                                "controlnet-union-sdxl"),
+                               ("background_guided",
+                                "controlnet-sd15-depth")):
+                ok, why = self._template_runnable(tpl)
+                if not ok and self.settings.auto_install \
+                        and "not downloaded" in why:
+                    job.log("info", "[stage] models — fetching the depth "
+                                    "ControlNet (pins the new scene to "
+                                    "the measured perspective); this "
+                                    "happens once")
+                    try:
+                        self._ensure_model(model, job)
+                        ok, why = self._template_runnable(tpl)
+                    except Exception as exc:  # noqa: BLE001 — optional
+                        ok, why = False, str(exc)
+                if ok:
+                    template = self.workflows.load_named(tpl)
+                    guided = True
+                    guided_xl = tpl.endswith("_xl")
+                    break
             else:
                 job.log("info", f"Perspective conditioning unavailable "
                                 f"({why}); rendering with the prompt's "
@@ -5600,7 +5613,17 @@ class Services:
                 guidance, "bg_guide")
             job.log("info", "Conditioning the new scene on the measured "
                             "perspective guide")
-        ckpt = self._best_inpaint_checkpoint()
+        # An environment is a scene continuation — outpaint-class work.
+        # The SD15 inpaint pick painted every environment soft (flagged
+        # 0.17–0.33x sharpness); the SDXL outpaint winner renders these
+        # sizes on-distribution. The SD15-guided template is the one
+        # place that must keep an SD15 checkpoint (its ControlNet is
+        # SD15-only).
+        if guided and not guided_xl:
+            ckpt = self._best_inpaint_checkpoint()
+        else:
+            ckpt = (self._best_outpaint_checkpoint()
+                    or self._best_inpaint_checkpoint())
         if ckpt:
             params["checkpoint"] = ckpt
             job.log("info", f"Repainting the scene with {ckpt}")
