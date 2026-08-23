@@ -6,3 +6,7 @@ anthropic>=0.90  # API LLM fallback only; the app runs without credentials
 # (this machine had neither ffmpeg nor any decoder). Needed to turn an
 # uploaded driving video into frames, and frames back into a clip.
 imageio-ffmpeg>=0.5
+# iPhones hand over HEIC by default; registers a PIL opener so the ingest
+# normalizer (storage._normalize_image) can decode it - converted to PNG once
+# at the door, so browsers, ComfyUI and thumbnails never meet the container.
+pillow-heif>=1.0

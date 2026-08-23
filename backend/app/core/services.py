@@ -35,6 +35,7 @@ from PIL import (
     ImageDraw,
     ImageFilter,
     ImageMath,
+    ImageOps,
     ImageStat,
     UnidentifiedImageError,
 )
@@ -2152,7 +2153,11 @@ class Services:
             raise PermanentError("Prompt-based video editing is on the roadmap; "
                                  "this build edits images.")
         try:
-            return Image.open(asset.path).convert("RGB")
+            # exif_transpose: assets uploaded before ingest normalization
+            # existed may still carry an orientation tag — idempotent for
+            # everything newer (the tag is baked out at the door now).
+            return ImageOps.exif_transpose(
+                Image.open(asset.path)).convert("RGB")
         except (FileNotFoundError, UnidentifiedImageError) as exc:
             raise PermanentError(f"Asset file is missing or unreadable: {exc}") from exc
 
@@ -2427,9 +2432,18 @@ class Services:
         # else, and the region you drew would be silently discarded.
         first_inpaint = next((i for i, s in enumerate(steps)
                               if s["task"] == "inpaint"), None)
+        # Whole-image restyles belong to Kontext too: the img2img route ran
+        # an INPAINTING checkpoint as a whole-frame restyler and was
+        # measured catastrophic on "turn this photo into a watercolor
+        # painting" — first draw scored 10 across the board, the kept retry
+        # still MISSED the watercolor per verify while moving 65% of face
+        # pixels. A style instruction is exactly the sentence-about-the-
+        # whole-picture edit Kontext exists for.
         eligible = [i for i, s in enumerate(steps)
-                    if s["task"] == "inpaint"
-                    and s.get("operation") in quality.KONTEXT_OPERATIONS
+                    if ((s["task"] == "inpaint"
+                         and s.get("operation") in quality.KONTEXT_OPERATIONS)
+                        or (s["task"] == "img2img"
+                            and s.get("operation") == "CHANGE_STYLE"))
                     and not (user_mask_b64 and i == first_inpaint)]
         if real and eligible:
             ok, why = self.kontext_ready()
@@ -3238,9 +3252,20 @@ class Services:
                     # Measured geometry disagreements are issues too: they
                     # feed the same avoid-clause the inspector's findings do.
                     issues = [*issues, *env_misses]
+                # A deliberate medium change is judged AS that medium: the
+                # photograph frame scored a delivered watercolor realism 20
+                # while verify passed, and burned every retry on a success.
+                style_edit = (last_step.get("operation") == "CHANGE_STYLE"
+                              or quality.style_departure(
+                                  last_step.get("instruction") or prompt))
+                if style_edit:
+                    job.log("info", "[stage] score — judging as a "
+                                    "deliberate style piece, not a "
+                                    "photograph")
                 job.log("info", "[stage] score — grading realism, accuracy "
                                 "and consistency")
-                scores = quality.scorecard(self.critic, current, prompt)
+                scores = quality.scorecard(self.critic, current, prompt,
+                                           style=style_edit)
                 scores = self._ground_scores(job, scores, current,
                                              last_outpaint)
                 scores = self._env_scores(job, scores, env_misses)
@@ -3612,7 +3637,7 @@ class Services:
                         # reach the NEXT round's avoid-clause too.
                         cand_issues = [*cand_issues, *env_misses]
                     scores2 = quality.scorecard(self.critic, candidate,
-                                                prompt)
+                                                prompt, style=style_edit)
                     scores2 = self._ground_scores(job, scores2, candidate,
                                                   last_outpaint)
                     scores2 = self._env_scores(job, scores2, env_misses)
@@ -3689,7 +3714,8 @@ class Services:
                     final_input, current,
                     last_mask if last_step["task"] == "inpaint" else None)
                 obj_flags = quality.objective_flags(objective,
-                                                    last_step["task"])
+                                                    last_step["task"],
+                                                    style=style_edit)
                 if vacated is not None and vacated < 0.05:
                     obj_flags.append("the repose vacated only "
                                      f"{vacated * 100:.1f}% of the frame — "
@@ -3702,7 +3728,12 @@ class Services:
                     drift = self._face_drift(job, image, current)
                     if drift is not None:
                         objective["face_drift"] = round(drift, 4)
-                        if drift > 0.5:
+                        # In a deliberate restyle the face pixels MUST move
+                        # (they are painted); the pixel metric cannot tell
+                        # "stylized, same face" from "different face", so
+                        # the style scorecard's identity category judges it
+                        # instead. Recorded either way.
+                        if drift > 0.5 and not style_edit:
                             obj_flags.append(
                                 "the subject's face was substantially "
                                 f"redrawn ({drift * 100:.0f}% of face "

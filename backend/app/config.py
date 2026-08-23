@@ -215,7 +215,10 @@ class Settings:
             d.mkdir(parents=True, exist_ok=True)
 
 
-ALLOWED_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
+# HEIC/HEIF (the phone default) and TIFF are accepted and converted to PNG
+# at ingest (storage._normalize_image) — browsers cannot display either.
+ALLOWED_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp",
+                      ".heic", ".heif", ".tif", ".tiff"}
 ALLOWED_VIDEO_EXTS = {".mp4", ".mov", ".webm", ".mkv"}
 # 3D results. GLB only: it is a single self-contained binary file (geometry +
 # any textures + materials in one), which keeps a mesh a normal asset rather

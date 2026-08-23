@@ -385,7 +385,14 @@ _BACKGROUND_INTENT = re.compile(
     r"(the\s+|its\s+|my\s+|his\s+|her\s+|their\s+)?(background|backdrop)\b|"
     r"\b(new|different|another|other)\s+(background|backdrop)\b|"
     r"\b(background|backdrop)\s+(to|into|should\s+be|becomes)\b|"
-    r"\bwith\s+a\s+.{0,40}?\b(background|backdrop)\b",
+    r"\bwith\s+a\s+.{0,40}?\b(background|backdrop)\b|"
+    # the product-shot phrasing: "(put this) on a white background",
+    # "white studio backdrop" — a background REPLACEMENT, not an object
+    # to paint into the scene (measured: it routed to inpaint ADD_OBJECT)
+    r"\bon\s+an?\s+(?:plain\s+|clean\s+|pure\s+|solid\s+)?\w+\s+"
+    r"(background|backdrop)\b|"
+    r"\b(?:white|black|grey|gray|plain|solid|studio|colou?red|neutral)\s+"
+    r"(?:studio\s+)?(background|backdrop)\b",
     re.IGNORECASE)
 # Requests that MENTION the background but must not be routed to it: adjusting
 # it (blur/darken), stripping it (a cutout, not a repaint), or explicitly
@@ -1756,17 +1763,41 @@ SOFT_RATIO_MIN = 0.45
 MASK_LEAK_MAX = 0.5
 
 
-def objective_flags(report: dict[str, Any], task: str = "inpaint") -> list[str]:
+# An INTENTIONAL departure from photography: the request names a medium or
+# art style. Judging such a result as "an authentic, unedited photograph"
+# is structurally wrong — measured live, a delivered watercolor scored
+# realism 20 with verify PASSING every round, and the ladder burned its
+# whole budget re-rendering a success.
+_STYLE_MEDIA = re.compile(
+    r"\b(?:watercolou?r|oil\s+painting|painting|painted|sketch|drawing|"
+    r"charcoal|pencil|ink\s+(?:drawing|wash)|anime|manga|cartoon|comic|"
+    r"pixel\s*art|illustration|cel[-\s]?shaded|low[-\s]?poly|claymation|"
+    r"stop[-\s]?motion|papercraft|origami|stained\s+glass|mosaic|"
+    r"impressionis\w+|cubis\w+|pop\s+art|vaporwave|ukiyo-?e|"
+    r"art\s+nouveau|line\s*art|vector\s*art|3d\s+render|lego|"
+    r"caricature|graffiti|woodcut|linocut|pastel\s+drawing)\b",
+    re.IGNORECASE)
+
+
+def style_departure(text: str) -> bool:
+    """Does the request ask for a non-photographic medium or art style?"""
+    return bool(_STYLE_MEDIA.search(text or ""))
+
+
+def objective_flags(report: dict[str, Any], task: str = "inpaint",
+                    style: bool = False) -> list[str]:
     """Out-of-range objective measurements, as human sentences. Empty means
     the arithmetic found nothing wrong — it says nothing about whether the
-    edit matched the request."""
+    edit matched the request. `style`: the request asked for a painting /
+    drawing / other non-photographic medium, so softness IS the point and
+    only the grain ceiling still applies."""
     flags: list[str] = []
     ratio = report.get("sharpness_ratio")
     if task != "upscale" and isinstance(ratio, int | float):
         if ratio > GRAIN_RATIO_MAX:
             flags.append(f"heavy grain or noise covers the render "
                          f"(sharpness {ratio:.1f}x the input)")
-        elif ratio < SOFT_RATIO_MIN:
+        elif ratio < SOFT_RATIO_MIN and not style:
             flags.append(f"the render came back much softer than the "
                          f"photograph (sharpness {ratio:.2f}x the input)")
     leak = report.get("outside_mask_fraction")
@@ -2628,16 +2659,35 @@ _SCORE_QUESTION = (
     "grading of the rest), artifact_free (no seams or AI artifacts), "
     "visual_quality. Reply ONLY JSON with those six integer keys.")
 
+# The style frame: a DELIBERATE painting/drawing must be judged as one.
+# Measured live — a delivered watercolor scored realism 20 against the
+# photograph frame while verify passed every round, and the ladder spent
+# its whole budget re-rendering a success.
+_SCORE_QUESTION_STYLE = (
+    "This image was DELIBERATELY transformed into a non-photographic "
+    "medium. The request was: \"{prompt}\". Judge it as a finished piece "
+    "in that medium. Score each category 0-100 (100 = flawless): realism "
+    "(how convincingly the medium is rendered — brushwork, linework, "
+    "shading true to the style; NOT photographic realism), "
+    "prompt_accuracy (does it match the request), identity_preservation "
+    "(the subject is still recognizably the same person/scene), "
+    "scene_consistency (the whole frame shares one coherent style), "
+    "artifact_free (no glitches, seams or AI artifacts), visual_quality. "
+    "Reply ONLY JSON with those six integer keys.")
+
 
 def scorecard(critic: Any, image: Image.Image,
-              prompt: str) -> dict[str, int] | None:
+              prompt: str, style: bool = False) -> dict[str, int] | None:
     """Six-category 0-100 quality scores; None when unavailable. Falls back
     to the simple critique score (scaled) when the vision model can't do
-    structured scoring."""
+    structured scoring. `style`: judge as a deliberate art-medium piece,
+    not as a photograph."""
     ask = getattr(critic, "ask", None)
     if ask is not None:
         try:
-            data = _parse_json(ask(image, _SCORE_QUESTION.format(prompt=prompt)))
+            question = (_SCORE_QUESTION_STYLE if style
+                        else _SCORE_QUESTION)
+            data = _parse_json(ask(image, question.format(prompt=prompt)))
             if data:
                 scores: dict[str, int] = {}
                 for key in SCORE_KEYS:

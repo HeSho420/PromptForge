@@ -196,6 +196,44 @@ class ApiIntegrationTests(unittest.TestCase):
         self.assertTrue(jobs[with_flag]["payload"].get("draft"))
         self.assertNotIn("draft", jobs[without]["payload"])
 
+    def test_phone_formats_are_normalized_at_the_door(self):
+        """HEIC (the phone default) and TIFF are accepted, decoded once at
+        ingest and stored as browser-displayable PNG; an EXIF-rotated JPEG
+        is stored upright with the tag baked out. Real encoders, no mocks."""
+        from PIL import Image as PILImage
+
+        def post(data: bytes, name: str):
+            r = self.client.post("/api/assets", data={
+                "file": (io.BytesIO(data), name)})
+            self.assertEqual(r.status_code, 201, name)
+            aid = r.get_json()["id"]
+            f = self.client.get(f"/api/assets/{aid}/file")
+            return PILImage.open(io.BytesIO(f.data))
+
+        tiff = io.BytesIO()
+        PILImage.new("RGB", (40, 30), (10, 200, 30)).save(tiff,
+                                                          format="TIFF")
+        got = post(tiff.getvalue(), "scan.tiff")
+        self.assertEqual(got.format, "PNG")
+        self.assertEqual(got.size, (40, 30))
+
+        heic = io.BytesIO()
+        PILImage.new("RGB", (32, 24), (200, 10, 30)).save(heic,
+                                                          format="HEIF")
+        got = post(heic.getvalue(), "IMG_0001.heic")
+        self.assertEqual(got.format, "PNG")
+        self.assertEqual(got.size, (32, 24))
+
+        rot = io.BytesIO()
+        exif = PILImage.Exif()
+        exif[0x0112] = 6                       # 90° CW-needed orientation
+        PILImage.new("RGB", (40, 30), (5, 5, 5)).save(rot, format="JPEG",
+                                                      exif=exif)
+        got = post(rot.getvalue(), "portrait.jpg")
+        self.assertEqual(got.format, "PNG")    # re-encoded upright
+        self.assertEqual(got.size, (30, 40))   # pixels actually rotated
+        self.assertEqual(int(got.getexif().get(0x0112) or 1), 1)
+
     def test_remove_background_delivers_a_transparent_png(self):
         """'Remove the background' is a cutout DELIVERABLE (alpha PNG),
         never a repaint — the version stored on disk carries real

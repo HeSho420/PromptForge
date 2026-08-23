@@ -432,6 +432,58 @@ class EnvironmentIntentTests(unittest.TestCase):
             self.assertFalse(environment_intent(no), no)
 
 
+class StyleJudgingTests(unittest.TestCase):
+    """A deliberate medium change is judged AS that medium. Measured: a
+    delivered watercolor scored realism 20 against the photograph frame
+    while verify passed every round — three renders of a success."""
+
+    def test_style_departure_table(self):
+        from app.core.quality import style_departure
+        for yes in ("turn this photo into a watercolor painting",
+                    "make it an anime scene",
+                    "convert this to a pencil sketch",
+                    "pixel art version please",
+                    "in the style of ukiyo-e",
+                    "make a caricature of him"):
+            self.assertTrue(style_departure(yes), yes)
+        for no in ("change the background to a beach",
+                   "make the lighting softer",
+                   "remove the car",
+                   "make it look professional",
+                   "put her in a nightclub"):
+            self.assertFalse(style_departure(no), no)
+
+    def test_scorecard_uses_the_art_frame_for_styles(self):
+        from app.core import quality
+        rec: list[str] = []
+
+        class C:
+            def ask(self, image, q, schema=None):
+                rec.append(q)
+                return ('{"realism": 90, "prompt_accuracy": 90, '
+                        '"identity_preservation": 90, '
+                        '"scene_consistency": 90, "artifact_free": 90, '
+                        '"visual_quality": 90}')
+
+        img = Image.new("RGB", (8, 8))
+        quality.scorecard(C(), img, "watercolor of x", style=True)
+        quality.scorecard(C(), img, "remove the hat", style=False)
+        self.assertIn("DELIBERATELY transformed", rec[0])
+        self.assertIn("NOT photographic realism", rec[0])
+        self.assertIn("authentic, unedited", rec[1])
+
+    def test_soft_flag_skipped_for_style_edits_grain_kept(self):
+        from app.core.quality import objective_flags
+        rep = {"sharpness_ratio": 0.2}
+        self.assertTrue(any("softer" in f
+                            for f in objective_flags(rep, "img2img")))
+        self.assertEqual(
+            [f for f in objective_flags(rep, "img2img", style=True)
+             if "softer" in f], [])
+        self.assertTrue(any("grain" in f for f in objective_flags(
+            {"sharpness_ratio": 9.0}, "img2img", style=True)))
+
+
 class CutoutIntentTests(unittest.TestCase):
     """'Remove the background' delivers TRANSPARENCY (ChatGPT-editor
     parity): the request class was previously excluded from the repaint
@@ -464,6 +516,20 @@ class CutoutIntentTests(unittest.TestCase):
                    "erase the tattoo"):
             self.assertFalse(cutout_intent(no), no)
 
+    def test_product_shots_route_to_the_background_engine(self):
+        # "on a white background" read as ADD_OBJECT before this arm —
+        # a product shot is a background replacement
+        from app.core.quality import default_edit_step
+        for t in ("put this on a white background",
+                  "put the product on a plain white background",
+                  "white studio background"):
+            self.assertEqual(default_edit_step(t)["task"], "background", t)
+        self.assertEqual(default_edit_step("blur the background")["task"],
+                         "inpaint")
+        self.assertEqual(
+            default_edit_step("keep the background the same")["task"],
+            "inpaint")
+
     def test_default_step_routes_cutout_before_background(self):
         from app.core.quality import default_edit_step
         step = default_edit_step("remove the background")
@@ -488,6 +554,17 @@ class EnvironmentChecklistTests(unittest.TestCase):
         src = inspect.getsource(Services._handle_image_edit)
         self.assertIn("Where does this photo appear", src)
         self.assertIn('step["_checklist"] = [{', src)
+
+    def test_style_steps_are_kontext_eligible(self):
+        # img2img restyled with an INPAINTING checkpoint and was measured
+        # catastrophic (10s across the board, watercolor missing, 65% of
+        # face pixels moved) — whole-image style instructions go to
+        # Kontext when its weights are installed.
+        import inspect
+
+        from app.core.services import Services
+        src = inspect.getsource(Services._handle_image_edit)
+        self.assertIn('s.get("operation") == "CHANGE_STYLE"', src)
 
     def test_relight_after_background_is_pruned(self):
         # The environment step lights its own scene non-destructively; a

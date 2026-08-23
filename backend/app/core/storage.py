@@ -4,6 +4,7 @@ never overwritten, which gives before/after for free.
 """
 from __future__ import annotations
 
+import io
 import json
 import re
 import shutil
@@ -13,12 +14,68 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from PIL import Image, ImageOps
+
 from ..config import ALLOWED_IMAGE_EXTS, ALLOWED_MODEL_EXTS, ALLOWED_VIDEO_EXTS, Settings
 from .db import Database
+
+try:
+    # Phones hand over HEIC by default; this registers a PIL opener so
+    # Image.open reads .heic/.heif everywhere. Optional on purpose — a
+    # build without the wheel still runs, it just declines HEIC honestly.
+    from pillow_heif import register_heif_opener
+    register_heif_opener()
+    HEIF_SUPPORTED = True
+except Exception:  # noqa: BLE001 — optional decoder
+    HEIF_SUPPORTED = False
 
 
 class UnsupportedFormatError(ValueError):
     pass
+
+
+# What a browser can display as-is. Everything else that PIL can decode is
+# converted to PNG at the door, once — downstream (the UI's <img>, ComfyUI
+# uploads, thumbnails) then never meets an exotic container.
+_BROWSER_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
+
+
+def _normalize_image(data: bytes, filename: str) -> tuple[bytes, str]:
+    """Uploaded images become upright, browser-displayable files.
+
+    Two everyday phone-photo realities, handled once at ingest: HEIC (and
+    TIFF) containers that browsers and ComfyUI cannot show, and EXIF
+    orientation tags that make the pixels sideways until SOMETHING rotates
+    them — previously nothing did, so a portrait phone JPEG was edited
+    lying on its side. Files a browser already shows pass through
+    byte-identical unless they needed rotating; everything re-encoded is
+    saved as PNG (lossless from the decoded pixels)."""
+    ext = Path(filename).suffix.lower()
+    try:
+        img = Image.open(io.BytesIO(data))
+        img.load()
+    except Exception as exc:
+        if ext in _BROWSER_EXTS:
+            # Undecodable here, but the browser may still show it and the
+            # pipeline will complain honestly when it actually reads it.
+            return data, filename
+        hint = (" (HEIC support needs the pillow-heif package)"
+                if ext in {".heic", ".heif"} and not HEIF_SUPPORTED else "")
+        raise UnsupportedFormatError(
+            f"Could not decode '{ext}' image{hint}: {exc}") from exc
+    orientation = 1
+    try:
+        orientation = int(img.getexif().get(0x0112) or 1)
+    except Exception:  # noqa: BLE001 — EXIF is best-effort
+        pass
+    if ext in _BROWSER_EXTS and orientation == 1:
+        return data, filename
+    if orientation != 1:
+        img = ImageOps.exif_transpose(img)
+    out = io.BytesIO()
+    img.convert("RGBA" if "A" in img.getbands() else "RGB").save(
+        out, format="PNG")
+    return out.getvalue(), Path(_safe_name(filename)).stem + ".png"
 
 
 def _now() -> str:
@@ -111,6 +168,8 @@ class AssetStore:
         if len(data) > max_bytes:
             raise UnsupportedFormatError(
                 f"File is larger than the {cap} MB upload limit.")
+        if kind == "image":
+            data, filename = _normalize_image(data, filename)
 
         asset_id = uuid.uuid4().hex[:12]
         folder = self._settings.assets_dir / asset_id
