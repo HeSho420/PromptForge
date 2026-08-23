@@ -637,6 +637,20 @@ never-mask-the-face rule). Do not "extend" it to image_edit.
   note: demotion → checklist unclear → guessing-gate None → scorecard
   fallback → nothing missing → QUALITY 5 delivery containment stops
   the ladder — five rounds of this window composing.
+2026-08-24 — QUALITY 8 (a feathered crop edge is still a crop): the
+  cut-at-bottom test's fixed 3px band missed fem.png's BiRefNet matte
+  by ONE pixel (soft edge stopped at row 1439/1444) — 53% of the frame
+  width became four phantom "contact points", the validator failed
+  "nothing walkable under the subject's feet" 6/6 club runs against
+  feet OUTSIDE the photograph, capping scene_consistency 80→70 every
+  time. Tolerance now scales with the frame (max(3px, h/100));
+  near-edge contacts are unusable anyway (no rows below to validate
+  against). A/B same club job: "feet outside the frame" measured,
+  validate says "nothing measurable to compare", scene_consistency
+  uncapped 80, overall 86→88, rounds 0. 1053 tests. Still on the
+  queue: the sharpness objective flags dim scenes as soft
+  (0.12–0.32x on club renders — informational only, but noisy);
+  Kontext quant headroom; restore/sketch/identity live validation.
 Candidates, roughly ranked (artifact focus first per 2026-08-18 mandate):
 - **Cycle 23 (0079083)** Outpaint glyph guard SHIPPED and live-proven.
   Detection calibrated on 16 real margins (per-row density of >40 grey
