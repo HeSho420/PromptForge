@@ -3092,9 +3092,15 @@ class Services:
                         compiled=True, guidance=env_guide)
                     # A correctly matted subject still reads as pasted while
                     # its light disagrees with the scene it is now standing
-                    # in. This is the step that sells it.
+                    # in. This is the step that sells it. The matte hint is
+                    # about the SUBJECT (not the compiled environment
+                    # prompt), and the planned lighting_wish conditions the
+                    # relight so a dim scene is not fought by "natural
+                    # light" boilerplate.
                     current = self._match_lighting(
-                        job, current, before_bg, env_pos)
+                        job, current, before_bg,
+                        f"{scene or ''} {step['instruction']}",
+                        lighting=(env_spec or {}).get("lighting_wish"))
                     if real and env_card is not None:
                         env_misses = self._environment_misses(
                             job, current, env_card, env_spec)
@@ -3668,6 +3674,19 @@ class Services:
                             candidate = self._render_background_step(
                                 job, final_input, retry_pos, retry_neg,
                                 compiled=True, guidance=env_guide)
+                            # A retry is a full re-render of the SAME step,
+                            # so it needs the same lighting match. Without
+                            # it, a kept retry silently replaced the matched
+                            # first attempt with the raw composite —
+                            # measured: the delivered subject's luma shifted
+                            # -0.1 while her new scene dimmed by 54 levels,
+                            # because "Round 1 kept" chose the unmatched
+                            # image on a +3 visual_quality tiebreak.
+                            candidate = self._match_lighting(
+                                job, candidate, final_input,
+                                f"{scene or ''} {last_step['instruction']}",
+                                lighting=(env_spec or {}).get(
+                                    "lighting_wish"))
                             if env_card is not None:
                                 env_misses = self._environment_misses(
                                     job, candidate, env_card, env_spec)
@@ -5761,7 +5780,8 @@ class Services:
                 f"{commit_exhausted_hint(str(exc)) or exc}") from exc
 
     def _match_lighting(self, job: Job, composed: Image.Image,
-                        original: Image.Image, scene: str) -> Image.Image:
+                        original: Image.Image, scene: str,
+                        lighting: str | None = None) -> Image.Image:
         """Relight the subject so it belongs in its new background.
 
         A perfectly matted subject dropped into a new scene still reads as
@@ -5799,13 +5819,18 @@ class Services:
             # back as ambient light — measured: it pushed a person standing
             # in snow warmer, not cooler.
             plate = getattr(self, "_last_bg_plate", None) or composed
+            # The conditioning is LIGHTING ONLY (scene_geometry.lighting_
+            # prompt): this pass used to receive the whole compiled
+            # environment prompt plus "natural light on the subject", and
+            # for a dim scene those words fight the very illumination the
+            # background plate carries — the measured daylight-subject-in-
+            # a-dim-club "partway" shift. `scene` stays what it always
+            # was for the matte choice: a hint about WHO is being matted.
             graph = build_workflow(template, {
                 "image": self.comfy.upload_image(composed, "relight_fg"),
                 "background": self.comfy.upload_image(plate, "relight_bg"),
                 "rmbg_model": self._matte_model(scene),
-                "prompt": f"{scene}, natural light on the subject matching "
-                          "the scene, consistent shadows and colour "
-                          "temperature, photograph",
+                "prompt": scene_geometry.lighting_prompt(lighting),
                 "seed": int.from_bytes(os.urandom(4), "big") & 0x7FFFFFFF,
             })
             graph = self._apply_hardware_limits(graph, job)

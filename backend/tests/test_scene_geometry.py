@@ -781,5 +781,38 @@ class ProbeFileRoutingTests(unittest.TestCase):
         self.assertEqual(set(shots), {"depth", "normal", "valid"})
 
 
+class LightingPromptTests(unittest.TestCase):
+    """IC-Light conditioning is LIGHTING ONLY — the compiled environment
+    prompt used to ride along with a hard-coded "natural light on the
+    subject", which fights every dim scene (the daylight-in-a-club
+    partway shift)."""
+
+    def test_the_planned_lighting_leads(self):
+        p = scene_geometry.lighting_prompt(
+            "dim moody nightclub lighting with colored neon accents")
+        self.assertTrue(p.startswith("dim moody nightclub lighting"))
+        self.assertNotIn("natural light", p)
+        self.assertIn("colour temperature", p)
+
+    def test_no_plan_means_natural_light(self):
+        self.assertTrue(scene_geometry.lighting_prompt(None)
+                        .startswith("natural light on the subject"))
+        self.assertTrue(scene_geometry.lighting_prompt("  ")
+                        .startswith("natural light on the subject"))
+
+    def test_services_thread_the_wish_not_the_env_prompt(self):
+        import inspect
+
+        from app.core import services as services_module
+        src = inspect.getsource(services_module)
+        self.assertGreaterEqual(
+            src.count("lighting=(env_spec or {}).get("), 2,
+            "the first render AND the ladder retry must both match the "
+            "lighting — a kept retry without the match delivered a "
+            "daylight subject in a dim scene (subject luma -0.1 while "
+            "the scene dimmed 54 levels)")
+        self.assertIn("scene_geometry.lighting_prompt(lighting)", src)
+
+
 if __name__ == "__main__":
     unittest.main()

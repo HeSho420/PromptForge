@@ -445,6 +445,22 @@ def environment_spec(llm: LLMClient | None, instruction: str,
     return data
 
 
+def lighting_prompt(lighting: str | None) -> str:
+    """The IC-Light conditioning for a background swap: LIGHTING ONLY.
+
+    The lighting match used to be conditioned on the full compiled
+    environment prompt plus a hard-coded "natural light on the subject" —
+    for a dim scene (a nightclub) that phrase actively fights the very
+    illumination the pass exists to transfer, and the IC-Light template's
+    own doc warns that non-lighting words make it re-synthesise content
+    instead of relighting. The plan already knows what light the scene
+    has (the spec's lighting_wish); lead with that, and say nothing else
+    about the scene."""
+    light = (lighting or "").strip().rstrip(".") or "natural light"
+    return (f"{light} on the subject, matching the scene, consistent "
+            "shadows and colour temperature, photograph")
+
+
 def spatial_prompt(spec: dict[str, Any] | None, card: SceneCard | None,
                    base_positive: str, base_negative: str
                    ) -> tuple[str, str]:
