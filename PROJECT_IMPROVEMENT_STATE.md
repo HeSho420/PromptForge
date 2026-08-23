@@ -513,6 +513,21 @@ never-mask-the-face rule). Do not "extend" it to image_edit.
   live; identity-across-generations templates untested this session;
   verify vl still flaky on some classes (settlers cover format/colour/
   colorize/count; the static-verdict breaker catches the rest).
+- **QUALITY 1 (289ed34, 2026-08-20)** Environments 3× sharper. Root
+  cause of the perpetual 0.17–0.33x softness flags: the background
+  engine painted ~1.8 MP scenes with SD15 far off-distribution. An
+  environment IS scene continuation = outpaint-class work; juggernautXL
+  is the measured winner. NEW background_guided_xl (juggernaut +
+  controlnet-union-sdxl depth, pose_v2's proven wiring, CN after
+  InpaintModelConditioning); guided ladder XL-first → SD15 fallback;
+  unguided prefers the outpaint-class checkpoint. MEASURED, identical
+  request: generated-scene gradient energy 157.9 → 462.7 (0.12x →
+  0.36x source; remainder = intended DoF), geometry validated on the
+  FIRST draw (union in auto mode accepted the depth canvas), correct
+  cast shadow agreeing with the loungers', NO softness flag for the
+  first time, single attempt — best environment render of the project.
+  Remaining softness class = degraded SOURCE subjects (the draft-gen
+  test asset), not the pipeline. 1033 tests.
 Candidates, roughly ranked (artifact focus first per 2026-08-18 mandate):
 - **Cycle 23 (0079083)** Outpaint glyph guard SHIPPED and live-proven.
   Detection calibrated on 16 real margins (per-row density of >40 grey
@@ -577,3 +592,4 @@ Candidates, roughly ranked (artifact focus first per 2026-08-18 mandate):
    first (old peers must not be locked out mid-fleet-update).
 4. Backlog: appearance-question site (services ~8659) could take a loose
    schema; GroundingDINO mask telemetry into Behind-the-Scenes.
+
