@@ -456,7 +456,15 @@ def lighting_prompt(lighting: str | None) -> str:
     instead of relighting. The plan already knows what light the scene
     has (the spec's lighting_wish); lead with that, and say nothing else
     about the scene."""
-    light = (lighting or "").strip().rstrip(".") or "natural light"
+    light = (lighting or "").strip().rstrip(".")
+    # The spec planner sometimes answers with a DIRECTIVE ("keep") rather
+    # than a description — seen live on the nightclub spec. A directive
+    # is not lighting language; fall back rather than lead the
+    # conditioning with it.
+    if light.lower() in ("keep", "same", "unchanged", "as is", "as-is",
+                         "no change", "none", "current", "original"):
+        light = ""
+    light = light or "natural light"
     return (f"{light} on the subject, matching the scene, consistent "
             "shadows and colour temperature, photograph")
 

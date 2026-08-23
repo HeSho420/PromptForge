@@ -3175,9 +3175,26 @@ def verify_adherence(critic: Any, image: Image.Image, prompt: str,
             # say whether the two wordings mean the same thing.
             agrees = answer_means_the_same(llm, answer, check["expect"])
             if agrees is not None:
-                return agrees
+                verdict = agrees
             # No text model, or it would not commit: keep the lexical
             # verdict rather than letting every miss become "unclear".
+        if verdict is False:
+            # An answer naming a planned PART of the requirement is
+            # consistent evidence, not disproof. Measured 3/3 on the
+            # nightclub environment: the render showed the club's own bar
+            # and the examiner honestly said "a bar or a lounge" — the
+            # synonym judge (correctly) refused to equate that with
+            # "nightclub", and the miss bought a wasted re-render every
+            # run. The environment plan already names its parts; seeing
+            # one of them settles nothing either way. ONE shared
+            # meaningful token is the bar ("a few words" probes answer
+            # short — "a bar" hits 1 of 4 tokens of "bar counter with
+            # bottles and glasses", which full answer_verdict calls
+            # inconclusive rather than consistent).
+            for term in check.get("consistent") or []:
+                hits, _total = _matched_tokens(answer, str(term))
+                if hits:
+                    return None
         return verdict
 
     met: list[str] = []

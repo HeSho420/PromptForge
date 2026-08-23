@@ -3068,12 +3068,20 @@ class Services:
                         # the PLACE; the check derives from the plan and
                         # asks where the photo was taken ("Resort
                         # poolside" verified True against "swimming pool").
+                        # `consistent`: the plan's own elements. An examiner
+                        # who answers with one of them ("a bar" inside the
+                        # planned nightclub) is describing a delivered PART
+                        # of the place — that settles nothing either way,
+                        # and must not buy a re-render (measured: 3/3 env
+                        # runs burned a retry on exactly this).
                         step["_checklist"] = [{
                             "need": env_spec["environment"],
                             "probe": "Where does this photo appear to be "
                                      "taken? Describe the place in a few "
                                      "words.",
                             "expect": env_spec["environment"],
+                            "consistent": list(
+                                env_spec.get("elements") or []),
                         }]
                     # Deliberately NOT with_scene(): the scene summary
                     # describes the backdrop being REPLACED. Seen live —

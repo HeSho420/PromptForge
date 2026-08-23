@@ -741,6 +741,58 @@ class EnvironmentChecklistTests(unittest.TestCase):
         src = inspect.getsource(Services._handle_image_edit)
         self.assertIn("Where does this photo appear", src)
         self.assertIn('step["_checklist"] = [{', src)
+        # The plan's elements travel as consistent-evidence terms.
+        self.assertIn('"consistent": list(', src)
+
+    def test_a_planned_element_answer_is_unclear_not_missing(self):
+        # Measured 3/3 on the nightclub environment: the render showed the
+        # club's own bar, the examiner honestly said "a bar or a lounge",
+        # the synonym judge (correctly) refused to equate that with
+        # "nightclub", and every run burned a re-render on a place that
+        # was consistent with its own plan.
+        from app.core import quality
+
+        class C:
+            def ask(self, image, q, schema=None):
+                # Short, as the "few words" schema probe answers live —
+                # one shared token with an element, not most of one.
+                return '{"answer": "a bar or a lounge"}'
+
+        class RefusingSynonymLLM:
+            def complete(self, system, prompt, max_tokens=4096):
+                class R:
+                    text = '{"satisfies": false}'
+                return R()
+
+        checklist = [{"need": "nightclub",
+                      "probe": "Where does this photo appear to be taken?",
+                      "expect": "nightclub",
+                      "consistent": [
+                          "glowing red and blue lights",
+                          "crowd of people in casual attire",
+                          "bar counter with bottles and glasses",
+                          "large speakers mounted on the wall"]}]
+        img = Image.new("RGB", (64, 64))
+        report = quality.verify_adherence(C(), img, "x", checklist,
+                                          llm=RefusingSynonymLLM())
+        # The one item lands unclear, so the examiner "answered too little
+        # to be trusted" and adherence falls back to the scorecard —
+        # crucially NOT a "missing" that buys a re-render.
+        self.assertIsNone(report)
+
+    def test_an_unrelated_answer_still_misses(self):
+        from app.core import quality
+
+        class C:
+            def ask(self, image, q, schema=None):
+                return '{"answer": "a sunny beach with the ocean"}'
+
+        checklist = [{"need": "nightclub", "probe": "Where?",
+                      "expect": "nightclub",
+                      "consistent": ["bar", "dance floor", "neon lights"]}]
+        img = Image.new("RGB", (64, 64))
+        report = quality.verify_adherence(C(), img, "x", checklist)
+        self.assertEqual(report["missing"], ["nightclub"])
 
     def test_style_steps_are_kontext_eligible(self):
         # img2img restyled with an INPAINTING checkpoint and was measured
@@ -798,6 +850,15 @@ class LightingPromptTests(unittest.TestCase):
         self.assertTrue(scene_geometry.lighting_prompt(None)
                         .startswith("natural light on the subject"))
         self.assertTrue(scene_geometry.lighting_prompt("  ")
+                        .startswith("natural light on the subject"))
+
+    def test_a_directive_is_not_lighting_language(self):
+        # The spec planner answered lighting_wish "keep" on the live
+        # nightclub spec — a directive, which would have led the
+        # conditioning with "keep on the subject, ...".
+        self.assertTrue(scene_geometry.lighting_prompt("keep")
+                        .startswith("natural light on the subject"))
+        self.assertTrue(scene_geometry.lighting_prompt("Unchanged.")
                         .startswith("natural light on the subject"))
 
     def test_services_thread_the_wish_not_the_env_prompt(self):
