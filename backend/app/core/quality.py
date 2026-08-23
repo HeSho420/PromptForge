@@ -2193,6 +2193,77 @@ _WANT_PORTRAIT = re.compile(r"\b(tall|taller|portrait|vertical)\b",
 _WANT_SQUARE = re.compile(r"\bsquare\b", re.IGNORECASE)
 
 
+def placement_correction(box: dict[str, int],
+                         existing: Image.Image | None,
+                         frame: tuple[int, int]
+                         ) -> tuple[dict[str, int], list[str]]:
+    """Deterministic sanity for a compose placement: a person joining a
+    photo stands BESIDE whoever is already in it, at a comparable size,
+    on the same standing line. Measured live: the scene-picked spot put
+    the newcomer ON the existing subject's torso at 26% of her height —
+    a sticker, not a person. The existing subject's exact matte fixes all
+    three properties without a model. Returns (box, human notes)."""
+    import numpy as np
+    notes: list[str] = []
+    w, h = frame
+    if existing is None:
+        return box, notes
+    m = np.asarray(existing.convert("L").resize(frame)) > 127
+    if not m.any() or m.mean() < 0.02:
+        return box, notes
+    rows = np.nonzero(m.any(axis=1))[0]
+    cols = np.nonzero(m.any(axis=0))[0]
+    ref_h = int(rows[-1]) - int(rows[0])
+    ref_bottom = int(rows[-1])
+    box = dict(box)
+    aspect = box["w"] / max(1, box["h"])
+    if box["h"] < ref_h * 0.7 and ref_h > h * 0.2:
+        box["h"] = int(ref_h * 0.95)
+        # a person-height box needs person proportions — the sticker-sized
+        # scene box arrived squat, and person-height × squat is a wall
+        ref_aspect = (int(cols[-1]) - int(cols[0])) / max(1, ref_h)
+        box["w"] = max(8, int(box["h"] * min(aspect, ref_aspect * 1.3)))
+        notes.append("scaled to match the person already in the photo")
+    if abs((box["y"] + box["h"]) - ref_bottom) > h * 0.06:
+        box["y"] = max(0, ref_bottom - box["h"])
+        notes.append("feet aligned with the existing subject's "
+                     "standing line")
+
+    def overlap(x: int) -> float:
+        x0, x1 = max(0, x), min(w, x + box["w"])
+        y0, y1 = max(0, box["y"]), min(h, box["y"] + box["h"])
+        if x1 <= x0 or y1 <= y0:
+            return 1.0
+        return float(m[y0:y1, x0:x1].mean())
+
+    if overlap(box["x"]) > 0.18:
+        step = max(8, w // 100)
+        cand = min(range(0, max(1, w - box["w"]), step), key=overlap)
+        if overlap(cand) < overlap(box["x"]) - 0.05:
+            box["x"] = int(cand)
+            notes.append("moved beside the person instead of on top "
+                         "of them")
+    box["x"] = max(0, min(box["x"], max(0, w - box["w"])))
+    box["y"] = max(0, min(box["y"], max(0, h - box["h"])))
+    return box, notes
+
+
+# Provenance clauses name OTHER photos ("the woman from the second photo")
+# — the checklist examiner sees exactly one image, so such a requirement
+# can never be verified and, measured live, burned a retry with "missing:
+# a woman from the second photo" on a compose that had placed her.
+_PROVENANCE = re.compile(
+    r"\bfrom\s+the\s+(?:second|other|first|reference|attached|uploaded)\s+"
+    r"(?:photo|image|picture)\b|\bfrom\s+photo\s+\d\b",
+    re.IGNORECASE)
+
+
+def strip_provenance(text: str) -> str:
+    """Remove which-photo clauses before building a checklist — the
+    examiner can only ever see the result."""
+    return re.sub(r"\s{2,}", " ", _PROVENANCE.sub("", text or "")).strip()
+
+
 # Colorization has an arithmetic truth: a near-grayscale input that comes
 # back colourful WAS colorized. Measured live: chroma 0.0 → 67.8 with
 # natural skin/sea/foliage, while the verifier reported "missing: natural
@@ -2825,6 +2896,7 @@ def request_checklist(llm: LLMClient, prompt: str) -> list[dict[str, str]]:
 
     Empty list on any failure — callers then fall back to the single
     prompt_accuracy score, so adherence checking degrades instead of breaking."""
+    prompt = strip_provenance(prompt)
     try:
         reply = llm.complete(_CHECKLIST_SYSTEM, f"Request: {prompt}",
                              max_tokens=400)

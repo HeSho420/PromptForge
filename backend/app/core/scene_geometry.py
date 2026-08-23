@@ -340,6 +340,20 @@ def guidance_depth(card: SceneCard, depth_png: Image.Image,
     return guide.resize(size, Image.BILINEAR)
 
 
+def matte_group_count(matte: Image.Image) -> int:
+    """How many separated figures a subject matte holds (column-gap
+    split, the _mask_view_boxes trick). People standing apart count
+    individually; an embracing pair reads as one — callers treat this as
+    a lower bound."""
+    import numpy as np
+    a = np.asarray(matte.convert("L")) > 127
+    idx = np.nonzero(a.any(axis=0))[0]
+    if not len(idx):
+        return 0
+    gap = max(16, a.shape[1] // 12)
+    return 1 + int((np.diff(idx) > gap).sum())
+
+
 def posture_veto(posture: str | None,
                  box: tuple[int, int, int, int] | None) -> str | None:
     """Deterministic sanity check on a vision-model posture answer: the

@@ -2921,10 +2921,40 @@ class Services:
                                              "placement mask")
                     job.log("info", f"[stage] render — step {i + 1}/{n}: "
                                     "combining the two photos")
+                    existing_matte: Image.Image | None = None
+                    if real:
+                        try:
+                            existing_matte = self._region_mask(
+                                current, "BiRefNetRMBG", {
+                                    "model": self._matte_model(
+                                        "person subject"),
+                                    "sensitivity": 1.0, "mask_blur": 0,
+                                    "mask_offset": 0,
+                                    "invert_output": False,
+                                    "refine_foreground": True,
+                                    "background": "Alpha",
+                                    "background_color": "#222222"})
+                        except Exception:  # noqa: BLE001 — optional
+                            existing_matte = None
                     current = self._render_compose_step(
                         job, current, references[0], place,
                         with_scene(enh["positive"]), enh["negative"],
-                        step.get("denoise"), drawn=drawn)
+                        step.get("denoise"), drawn=drawn,
+                        existing_matte=existing_matte)
+                    if existing_matte is not None:
+                        # The verifiable compose contract is the COUNT:
+                        # "a woman standing in this garden" was reported
+                        # missing on a frame holding two of her kind —
+                        # while "how many people?" is a question the
+                        # examiner answers reliably.
+                        before_n = scene_geometry.matte_group_count(
+                            existing_matte)
+                        step["_checklist"] = [{
+                            "need": "one more person in the photo",
+                            "probe": "How many people are visible in "
+                                     "this photo? Answer with just a "
+                                     "number.",
+                            "expect": str(before_n + 1)}]
                     wf_name = "compose template (BiRefNet matte)"
                     model_name = self._best_compose_checkpoint() or "?"
                     last_mask = place
@@ -4596,7 +4626,9 @@ class Services:
                              subject: Image.Image, mask: Image.Image | None,
                              positive: str, negative: str,
                              denoise: float | None = None,
-                             drawn: bool = False) -> Image.Image:
+                             drawn: bool = False,
+                             existing_matte: Image.Image | None = None
+                             ) -> Image.Image:
         """Bring the subject of a SECOND photo into this one.
 
         The subject is matted out of its own background, scaled into the
@@ -4606,6 +4638,25 @@ class Services:
         self._require_comfy(job)
         template = self.workflows.load("compose")
         box = quality.placement_box(mask, target.size, subject.size)
+        if not drawn:
+            # Geometry sanity from the destination's exact matte: beside
+            # the existing person, their size, their standing line. A
+            # drawn region is the user's decision and is never moved.
+            try:
+                existing = existing_matte
+                if existing is None:
+                    existing = self._region_mask(target, "BiRefNetRMBG", {
+                        "model": self._matte_model("person subject"),
+                        "sensitivity": 1.0, "mask_blur": 0,
+                        "mask_offset": 0, "invert_output": False,
+                        "refine_foreground": True, "background": "Alpha",
+                        "background_color": "#222222"})
+                box, notes = quality.placement_correction(
+                    box, existing, target.size)
+                for note in notes:
+                    job.log("info", f"[stage] place — {note}")
+            except Exception:  # noqa: BLE001 — correction is an upgrade
+                pass
         job.log("info", f"Placing the subject {box['w']}×{box['h']} px at "
                         f"{box['x']},{box['y']} of a "
                         f"{target.width}×{target.height} photo"

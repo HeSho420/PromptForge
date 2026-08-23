@@ -432,6 +432,68 @@ class EnvironmentIntentTests(unittest.TestCase):
             self.assertFalse(environment_intent(no), no)
 
 
+class PlacementCorrectionTests(unittest.TestCase):
+    """A person joining a photo stands BESIDE whoever is already there,
+    at a comparable size, on the same line. Live: the scene-picked spot
+    pasted the newcomer on the existing subject's torso at 26% scale."""
+
+    def _existing(self, w=1000, h=1000):
+        m = Image.new("L", (w, h), 0)
+        m.paste(255, (400, 100, 600, 900))    # a centred standing figure
+        return m
+
+    def test_sticker_box_becomes_a_neighbour(self):
+        from app.core.quality import placement_correction
+        box = {"x": 450, "y": 400, "w": 120, "h": 180}   # on the torso
+        fixed, notes = placement_correction(box, self._existing(),
+                                            (1000, 1000))
+        self.assertGreaterEqual(fixed["h"], int(800 * 0.9))   # ~her height
+        self.assertAlmostEqual(fixed["y"] + fixed["h"], 900, delta=5)
+        # moved off the torso: overlap with her matte is now small
+        self.assertTrue(fixed["x"] + fixed["w"] <= 420
+                        or fixed["x"] >= 580,
+                        f"still overlapping at x={fixed['x']}")
+        self.assertEqual(len(notes), 3)
+
+    def test_good_boxes_and_missing_matte_pass_through(self):
+        from app.core.quality import placement_correction
+        good = {"x": 40, "y": 130, "w": 200, "h": 770}
+        fixed, notes = placement_correction(dict(good), self._existing(),
+                                            (1000, 1000))
+        self.assertEqual((fixed["x"], fixed["h"]), (40, 770))
+        self.assertEqual(notes, [])
+        same, notes2 = placement_correction(dict(good), None, (1000, 1000))
+        self.assertEqual(notes2, [])
+
+    def test_matte_group_count(self):
+        from app.core.scene_geometry import matte_group_count
+        one = Image.new("L", (400, 400), 0)
+        one.paste(255, (150, 50, 250, 380))
+        self.assertEqual(matte_group_count(one), 1)
+        two = Image.new("L", (400, 400), 0)
+        two.paste(255, (40, 50, 140, 380))
+        two.paste(255, (260, 50, 360, 380))
+        self.assertEqual(matte_group_count(two), 2)
+        self.assertEqual(matte_group_count(Image.new("L", (64, 64), 0)), 0)
+
+    def test_compose_checklist_is_a_count_question(self):
+        import inspect
+
+        from app.core.services import Services
+        src = inspect.getsource(Services._handle_image_edit)
+        self.assertIn("How many people are visible", src)
+        self.assertIn("matte_group_count", src)
+
+    def test_checklists_never_ask_about_other_photos(self):
+        from app.core.quality import strip_provenance
+        self.assertEqual(
+            strip_provenance("add the woman from the second photo "
+                             "standing in this garden"),
+            "add the woman standing in this garden")
+        self.assertEqual(strip_provenance("remove the hat"),
+                         "remove the hat")
+
+
 class ColorizeSettlerTests(unittest.TestCase):
     """Colorization has an arithmetic truth. Live: chroma 0.0 → 67.8 with
     natural colours while the verifier reported 'missing: natural
