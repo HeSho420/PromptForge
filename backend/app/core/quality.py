@@ -2193,6 +2193,41 @@ _WANT_PORTRAIT = re.compile(r"\b(tall|taller|portrait|vertical)\b",
 _WANT_SQUARE = re.compile(r"\bsquare\b", re.IGNORECASE)
 
 
+# Colorization has an arithmetic truth: a near-grayscale input that comes
+# back colourful WAS colorized. Measured live: chroma 0.0 → 67.8 with
+# natural skin/sea/foliage, while the verifier reported "missing: natural
+# realistic colors" across two full renders.
+_COLORIZE_INTENT = re.compile(
+    r"\bcoloriz\w+\b|\badd\s+colou?rs?\s+to\b"
+    r"|\bbring\s+(?:back\s+)?(?:the\s+)?colou?rs?\b"
+    r"|\bmake\s+(?:it|this|the\s+photo)\s+colou?r(?:ed|ful)?\b",
+    re.IGNORECASE)
+
+
+def mean_chroma(image: Image.Image) -> float:
+    """Mean per-pixel colourfulness (max−min channel spread), 0..255."""
+    import numpy as np
+    a = np.asarray(image.convert("RGB"), dtype=np.float32)
+    return float((a.max(axis=2) - a.min(axis=2)).mean())
+
+
+def colorize_delivered(request: str, before: Image.Image,
+                       after: Image.Image) -> bool | None:
+    """Did a colorize request actually deliver colour? Only settleable
+    when the request asks for colorization AND the input was
+    near-grayscale; anything else returns None and the judge stands."""
+    if not _COLORIZE_INTENT.search(request or ""):
+        return None
+    if mean_chroma(before) >= 6.0:
+        return None
+    c = mean_chroma(after)
+    if c >= 25.0:
+        return True
+    if c < 8.0:
+        return False
+    return None
+
+
 def format_delivered(request: str, before_size: tuple[int, int],
                      after_size: tuple[int, int]) -> bool | None:
     """Whether a format/canvas request was delivered, from the numbers alone.

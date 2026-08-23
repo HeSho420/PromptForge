@@ -432,6 +432,42 @@ class EnvironmentIntentTests(unittest.TestCase):
             self.assertFalse(environment_intent(no), no)
 
 
+class ColorizeSettlerTests(unittest.TestCase):
+    """Colorization has an arithmetic truth. Live: chroma 0.0 → 67.8 with
+    natural colours while the verifier reported 'missing: natural
+    realistic colors' across two renders."""
+
+    def _img(self, color):
+        return Image.new("RGB", (32, 32), color)
+
+    def test_grayscale_to_colour_is_delivered(self):
+        from app.core.quality import colorize_delivered
+        bw = self._img((120, 120, 120))
+        colour = self._img((180, 90, 40))
+        self.assertTrue(colorize_delivered("colorize this photo",
+                                           bw, colour))
+        self.assertFalse(colorize_delivered("colorize this photo",
+                                            bw, self._img((90, 90, 90))))
+
+    def test_not_settleable_cases_stay_none(self):
+        from app.core.quality import colorize_delivered
+        colour = self._img((180, 90, 40))
+        # request is not a colorization
+        self.assertIsNone(colorize_delivered("remove the hat",
+                                             self._img((120,) * 3), colour))
+        # the input already had colour
+        self.assertIsNone(colorize_delivered("colorize this photo",
+                                             colour, colour))
+
+    def test_wiring_pin(self):
+        import inspect
+
+        from app.core.services import Services
+        src = inspect.getsource(Services._handle_image_edit)
+        self.assertIn("colorize_delivered", src)
+        self.assertIn("chroma settles it", src)
+
+
 class TextRenderIntentTests(unittest.TestCase):
     """Readable in-image text routes to the text-rendering engine.
     Live: SD lettering came out 'CDOSED / LOSSE' while the triage reason

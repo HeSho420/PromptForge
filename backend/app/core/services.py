@@ -3319,6 +3319,28 @@ class Services:
                     job.log("info", "[stage] verify — the measured aspect "
                                     "ratio says the format request was NOT "
                                     "delivered")
+                # Colorization is settled by chroma the same way: a
+                # 0-chroma input that came back colourful WAS colorized
+                # (measured 0.0 → 67.8 while the verifier said "missing"
+                # across two renders).
+                col_done = quality.colorize_delivered(
+                    last_step.get("instruction") or prompt, image, current)
+                if col_done is True:
+                    settled = [m for m in best_missing
+                               if re.search(r"colou?r", m, re.IGNORECASE)]
+                    if settled:
+                        best_missing = [m for m in best_missing
+                                        if m not in settled]
+                        job.log("info", "[stage] verify — the measured "
+                                        "chroma settles it: the photo IS "
+                                        "colorized (overruling the "
+                                        "verifier)")
+                elif col_done is False and not any(
+                        re.search(r"colou?r", m, re.IGNORECASE)
+                        for m in best_missing):
+                    best_missing.append("actual colour in the photo")
+                    job.log("info", "[stage] verify — the measured chroma "
+                                    "says the photo was NOT colorized")
                 # Colour requirements are settled the same way: the mask and
                 # the pixels are both in hand, and a hue count is exact where
                 # the vision judge scored the same image 20 and 70 on two
