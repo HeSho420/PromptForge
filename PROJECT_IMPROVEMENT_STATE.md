@@ -540,6 +540,22 @@ never-mask-the-face rule). Do not "extend" it to image_edit.
   checkpoint pick (large masks → XL, mirror of the env lesson, MEASURE
   first), Kontext q4 vs higher quant on 8 GB, IC-Light fbc strength
   for extreme relights.
+- **QUALITY 3 (85474ab, 2026-08-20)** Region-verify rescue KEPT;
+  large-mask XL swap MEASURED AND REVERTED. Kept: changed-region
+  verify rescue (three classes of false "missing" in one day — a
+  colorization, a second woman, a stone statue — each burned a ~4min
+  re-render twice; still-missing items get one region-scoped look,
+  overrule missing→met only; it honestly refused a truly absent
+  statue); juggernaut-xl-inpaint vram 8.0→7.0 (escalation refused it
+  on the card that runs it daily). Reverted: large-mask XL checkpoint
+  swap — on a drawn mask overlapping the subject, juggernautXL
+  full-denoise REDREW the person (different face, accuracy 20, no
+  statue) where SD15 kept her at 0.60x sharpness. Sharper wrong
+  content < softer right content. NEXT design for that class: protect
+  the subject matte INSIDE drawn masks (trimap, as the background
+  route does) before any checkpoint change; note the maskless Kontext
+  route already delivered an excellent statue on the same request.
+  Numeric floor to beat: masked repaint at 0.60x untouched sharpness.
 Candidates, roughly ranked (artifact focus first per 2026-08-18 mandate):
 - **Cycle 23 (0079083)** Outpaint glyph guard SHIPPED and live-proven.
   Detection calibrated on 16 real margins (per-row density of >40 grey
