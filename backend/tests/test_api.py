@@ -196,6 +196,26 @@ class ApiIntegrationTests(unittest.TestCase):
         self.assertTrue(jobs[with_flag]["payload"].get("draft"))
         self.assertNotIn("draft", jobs[without]["payload"])
 
+    def test_remove_background_delivers_a_transparent_png(self):
+        """'Remove the background' is a cutout DELIVERABLE (alpha PNG),
+        never a repaint — the version stored on disk carries real
+        transparency."""
+        import io as _io
+
+        from PIL import Image as PILImage
+        asset_id = self._upload()
+        resp = self.client.post("/api/edits", json={
+            "asset_id": asset_id, "prompt": "remove the background"})
+        job = self._wait_job(resp.get_json()["id"])
+        self.assertEqual(job["state"], "completed")
+        self.assertEqual(job["result"]["route"], "cutout")
+        self.assertEqual(job["result"]["adapter"], "birefnet-cutout")
+        f = self.client.get(
+            f"/api/versions/{job['result']['version_id']}/file")
+        self.assertEqual(f.status_code, 200)
+        img = PILImage.open(_io.BytesIO(f.data))
+        self.assertEqual(img.mode, "RGBA")
+
     def test_edit_without_mask_uses_auto_segmentation(self):
         asset_id = self._upload()
         resp = self.client.post("/api/edits",

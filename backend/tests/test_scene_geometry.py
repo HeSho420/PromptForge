@@ -432,6 +432,49 @@ class EnvironmentIntentTests(unittest.TestCase):
             self.assertFalse(environment_intent(no), no)
 
 
+class CutoutIntentTests(unittest.TestCase):
+    """'Remove the background' delivers TRANSPARENCY (ChatGPT-editor
+    parity): the request class was previously excluded from the repaint
+    route and then handled by nothing at all."""
+
+    def test_removal_phrasings_match(self):
+        from app.core.quality import cutout_intent
+        for yes in ("remove the background",
+                    "delete the background",
+                    "erase the backdrop",
+                    "background removal please",
+                    "make the background transparent",
+                    "transparent background",
+                    "i want this without a background",
+                    "cut her out",
+                    "cut out the person",
+                    "turn this into a sticker",
+                    "isolate the subject"):
+            self.assertTrue(cutout_intent(yes), yes)
+
+    def test_object_removal_and_repaints_do_not(self):
+        from app.core.quality import cutout_intent
+        for no in ("remove the man in the background",
+                   "remove the hat",
+                   "blur the background",
+                   "change the background to a pool",
+                   "make the background darker",
+                   "put a sticker on the wall",
+                   "cut the image in half",
+                   "erase the tattoo"):
+            self.assertFalse(cutout_intent(no), no)
+
+    def test_default_step_routes_cutout_before_background(self):
+        from app.core.quality import default_edit_step
+        step = default_edit_step("remove the background")
+        self.assertEqual(step["task"], "cutout")
+        self.assertEqual(step["operation"], "CUTOUT")
+        # replacement phrasing still reaches the repaint route
+        self.assertEqual(
+            default_edit_step("change the background to a beach")["task"],
+            "background")
+
+
 class EnvironmentChecklistTests(unittest.TestCase):
     def test_background_steps_verify_the_place_not_the_far_field(self):
         # "What is the new background?" was answered — correctly — with

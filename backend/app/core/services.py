@@ -2298,6 +2298,23 @@ class Services:
                                     "into a new place is an environment "
                                     "edit — routed to the scene-measured "
                                     "background pipeline")
+                # "Remove the background" DELIVERS transparency — a matte
+                # cutout, never a repaint. Checked after the environment
+                # coercion so "remove the background and put her in a bar"
+                # keeps its environment routing; the plain removal reaches
+                # the alpha-PNG route even when the LLM planned it as a
+                # background repaint or a generic inpaint.
+                elif (s["task"] in ("img2img", "custom", "inpaint",
+                                    "background", "kontext")
+                        and quality.cutout_intent(s["instruction"])
+                        and not quality.background_intent(
+                            s["instruction"])):
+                    s["task"] = "cutout"
+                    s["operation"] = "CUTOUT"
+                    job.log("info", "[llm] plan: removing the background "
+                                    "means delivering TRANSPARENCY — "
+                                    "routed to the matte cutout, not a "
+                                    "repaint")
             # The environment step already lights its own scene: IC-Light
             # reads the generated plate and only the low-frequency
             # illumination lands on the ORIGINAL subject pixels. A trailing
@@ -3006,6 +3023,26 @@ class Services:
                     last_mask = None
                     result_adapter = "comfyui-background"
                     result_is_mock = False
+                elif step["task"] == "cutout":
+                    job.log("info", f"[stage] render — step {i + 1}/{n}: "
+                                    "cutting the subject out onto a "
+                                    "transparent background")
+                    if n > 1:
+                        job.log("info", "A transparent cutout is a final "
+                                        "deliverable — the remaining "
+                                        "steps are skipped")
+                    cut = self._render_cutout_step(
+                        job, asset_id, current, step["instruction"], real,
+                        subject_hint=f"{scene or ''} "
+                                     f"{step['instruction']}")
+                    plan_report.append({
+                        "step": i + 1, "task": "cutout",
+                        "operation": step.get("operation", "CUTOUT"),
+                        "target": step.get("target", ""),
+                        "instruction": step["instruction"][:120],
+                        "workflow": "BiRefNet matte → alpha PNG",
+                        "model": cut.pop("_matte_model", "birefnet")})
+                    return {**cut, "plan": plan_report, "route": "cutout"}
                 elif step["task"] == "angles":
                     # MULTI_VIEW: real viewpoint synthesis produces NEW
                     # pictures of the subject, not an edit of this one — so
@@ -5312,6 +5349,70 @@ class Services:
             scores = dict(scores)
             scores["scene_consistency"] = cap
         return scores
+
+    def _render_cutout_step(self, job: Job, asset_id: str,
+                            image: Image.Image, instruction: str,
+                            real: bool,
+                            subject_hint: str = "") -> dict[str, Any]:
+        """"Remove the background" delivers TRANSPARENCY: the exact
+        BiRefNet matte becomes the alpha channel over the ORIGINAL pixels
+        — nothing is repainted, so nothing can drift — saved as a PNG
+        with alpha. The photograph judges are deliberately not consulted:
+        a cutout is deterministic, the matte IS the quality, and a
+        transparency flattened for a vision model would only mislead it."""
+        alpha: Image.Image
+        matte_model = "none (mock)"
+        if not real:
+            alpha = Image.new("L", image.size, 255)
+        else:
+            self._require_comfy(job)
+            if not self._pack_active("rmbg"):
+                raise PermanentError(
+                    "Removing the background needs the rmbg node pack "
+                    "(BiRefNet) for an exact subject matte — install it "
+                    "from the Models page.")
+            # The scene's subject knowledge picks the matte: "remove the
+            # background" alone says nothing about a person, and the lite
+            # model was chosen over the measured-exact portrait matte on
+            # the first live run for exactly that reason.
+            matte_model = self._matte_model(subject_hint or instruction
+                                            or "subject")
+            job.log("info", f"Matting the subject with {matte_model}; the "
+                            "matte becomes the PNG's alpha channel")
+            matte = self._region_mask(image, "BiRefNetRMBG", {
+                "model": matte_model, "sensitivity": 1.0, "mask_blur": 1,
+                "mask_offset": 0, "invert_output": False,
+                "refine_foreground": True, "background": "Alpha",
+                "background_color": "#222222"})
+            if matte is None:
+                raise PermanentError(
+                    "The subject matte came back empty — nothing stands "
+                    "out to cut out here. Paint a mask over the subject "
+                    "and run again.")
+            import numpy as np
+            alpha = matte.convert("L")
+            if alpha.size != image.size:
+                alpha = alpha.resize(image.size, Image.BILINEAR)
+            cov = float(np.asarray(alpha).mean()) / 255.0
+            if not 0.02 <= cov <= 0.98:
+                raise PermanentError(
+                    f"The matte covers {cov:.0%} of the frame — that is "
+                    "not a believable subject cutout. Paint a mask over "
+                    "the subject and run again.")
+            job.log("info", f"Matte covers {cov:.0%} of the frame; the "
+                            "kept pixels are the original, untouched")
+        rgba = image.convert("RGBA")
+        rgba.putalpha(alpha)
+        out_path = self.store.new_version_path(asset_id)
+        rgba.save(out_path, format="PNG")
+        version = self.store.add_edit_version(
+            asset_id, str(out_path), instruction, "birefnet-cutout",
+            meta={"is_mock": not real, "transparent": True})
+        job.log("info", "[stage] save — transparent cutout saved as "
+                        f"version {version.id}")
+        return {"version_id": version.id, "asset_id": asset_id,
+                "adapter": "birefnet-cutout", "is_mock": not real,
+                "_matte_model": matte_model}
 
     def _render_background_step(self, job: Job, image: Image.Image,
                                 positive: str, negative: str,

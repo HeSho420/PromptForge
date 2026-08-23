@@ -884,6 +884,32 @@ def reconcile_capability_steps(prompt: str,
     return notes
 
 
+# A cutout DELIVERS transparency: the background is stripped, not
+# repainted (sticker, product shot, alpha PNG). The direct object of the
+# remove-verb must BE the background — "remove the man in the background"
+# is an object removal for inpaint, not a cutout.
+_CUTOUT_INTENT = re.compile(
+    r"\b(?:remove|delete|erase|strip)\s+"
+    r"(?:the\s+|its\s+|this\s+|my\s+|her\s+|his\s+)?"
+    r"(?:background|backdrop)\b"
+    r"|\b(?:background|backdrop)\s+remov\w+\b"
+    r"|\b(?:transparent|no|without\s+an?)\s+(?:background|backdrop)\b"
+    r"|\b(?:background|backdrop)\b[^.]{0,16}\btransparent\b"
+    r"|\bcut\s+(?:me|us|him|her|them|it)\s+out\b"
+    r"|\bcut\s+out\s+(?:me|us|him|her|them|the\s+"
+    r"(?:subject|person|man|woman|girl|boy|product|object|model))\b"
+    r"|\b(?:into|make|as|create)\b[^.]{0,20}\bsticker\b"
+    r"|\bisolate\s+(?:me|us|him|her|them|the\s+"
+    r"(?:subject|person|product|object|model))\b",
+    re.IGNORECASE)
+
+
+def cutout_intent(prompt: str) -> bool:
+    """Does the request ask for the background to be REMOVED (transparent
+    PNG) rather than replaced or edited?"""
+    return bool(_CUTOUT_INTENT.search(prompt or ""))
+
+
 def default_edit_step(prompt: str) -> dict[str, Any]:
     """The single step to run when no planner is available (the LLM failed
     or is absent). Capability INTENTS are honored deterministically here the
@@ -907,6 +933,9 @@ def default_edit_step(prompt: str) -> dict[str, Any]:
         (animate_intent, "video", "ANIMATE"),
         (scene3d_intent, "scene3d", "SCENE_3D"),
         (format_intent, "outpaint", "OUTPAINT"),
+        # cutout before background: "remove the background" must deliver
+        # transparency, never reach the repaint route
+        (cutout_intent, "cutout", "CUTOUT"),
         (background_intent, "background", "REPLACE_BACKGROUND"),
         (pose_intent, "pose", "CHANGE_POSE"),
         (view_intent, "angles", "MULTI_VIEW"),
