@@ -1713,6 +1713,62 @@ def fit_mask(mask: Image.Image, size: tuple[int, int]) -> Image.Image:
     return m if m.size == size else m.resize(size, Image.Resampling.NEAREST)
 
 
+def subject_shield(mask: Image.Image, matte: Image.Image,
+                   rim_px: int = 8) -> dict[str, object]:
+    """A drawn region minus the subject's core pixels — the whole-subject
+    analogue of the face shield, for masks that sweep ACROSS a person on
+    their way to something else.
+
+    Measured (2026-08-20): a drawn mask that overlapped the subject sent
+    her through the repaint along with the rest of the region — softened
+    to 0.60x sharpness on the SD15 inpaint, redrawn as a different person
+    on the SDXL one. Her pixels were never part of the request.
+
+    This is deliberately NOT a re-cut of the user's region: the drawn
+    region stays the instruction for what to edit. The shield only
+    refuses to hand the subject's core pixels to the sampler — the same
+    contract the background route honours by construction. Two guards
+    keep the user in charge:
+      * a mask that barely touches the subject (<10% of it on the
+        subject's core) passes through untouched;
+      * a mask CONSUMED by the subject (<30% of it left after the
+        subtraction) passes through untouched — a region that mostly IS
+        the person is a deliberate choice to edit the person, and the
+        user outranks the shield.
+    A rim of the subject (~rim_px, eroded off the protected core) stays
+    repaintable so new content blends at the silhouette instead of
+    meeting a hard cut. Returns {"mask", "applied", "note"}."""
+    grey = mask.convert("L").point(lambda v: 255 if v >= 128 else 0)
+    fitted = fit_mask(matte, grey.size).point(
+        lambda v: 255 if v >= 128 else 0)
+    out: dict[str, object] = {"mask": mask, "applied": False, "note": ""}
+    matte_frac = mask_fraction(fitted)
+    if not 0.02 <= matte_frac <= 0.90:
+        out["note"] = ("no reliable subject matte — the subject covers "
+                       f"{matte_frac:.0%} of the frame")
+        return out
+    # adjust_mask feathers its result; the core must be hard again for the
+    # overlap arithmetic below.
+    core = adjust_mask(fitted, "shrink", rim_px).point(
+        lambda v: 255 if v >= 128 else 0)
+    before = mask_fraction(grey)
+    overlap = mask_fraction(ImageChops.multiply(grey, core))
+    if before <= 0 or overlap < before * 0.10:
+        out["note"] = "the region barely touches the subject"
+        return out
+    remaining = ImageChops.subtract(grey, core)
+    left = mask_fraction(remaining)
+    if left < MASK_FLOOR or left < before * 0.30:
+        out["note"] = ("the region mostly IS the subject — a deliberate "
+                       "choice to edit them, which outranks the shield")
+        return out
+    out["mask"] = remaining
+    out["applied"] = True
+    out["note"] = (f"{overlap / before:.0%} of the drawn region lay on "
+                   "the subject and is now protected")
+    return out
+
+
 # -- Objective render checks: arithmetic on pixels, no model ----------------------
 #
 # Every score in this pipeline used to come from a language model looking at

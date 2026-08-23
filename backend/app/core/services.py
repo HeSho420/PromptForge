@@ -2716,6 +2716,25 @@ class Services:
                         job.log("info", f"Mask {step['mask_adjust']}n by "
                                         f"~{step['adjust_px']}px for a "
                                         "seamless blend")
+                    if mask_source == "user":
+                        # The one case where a drawn region is amended, and
+                        # it is narrower than it looks: the shield subtracts
+                        # a PERSON the request never mentioned, and backs
+                        # off when the region mostly IS the person — so a
+                        # deliberate subject edit still outranks it, in the
+                        # same spirit as the advisory check below. Runs
+                        # after the grow/shrink so it sees the final
+                        # geometry, before the variant choice so a
+                        # protected (smaller) region can still take the
+                        # hi-res crop&stitch path.
+                        shielded = self._shield_subject(
+                            job, current, mask, step["instruction"], real)
+                        if shielded is not mask:
+                            mask = shielded
+                            if real:
+                                self._save_step_mask(
+                                    job, asset_id, mask,
+                                    "subject-protected mask")
                     if real and self.critic is not None and not is_add:
                         # (Placement masks mark EMPTY space for new content —
                         # coverage checks only make sense for existing objects.)
@@ -5119,6 +5138,62 @@ class Services:
         if remaining < quality.MASK_FLOOR or remaining < before * 0.35:
             return None
         return shielded
+
+    def _shield_subject(self, job: Job, image: Image.Image,
+                        mask: Image.Image, instruction: str,
+                        real: bool) -> Image.Image:
+        """A DRAWN mask with the subject's core pixels protected, unless
+        the request is about them — the whole-subject analogue of
+        _shield_face, for the measured class where a drawn region swept
+        across the person on its way to something else and the repaint
+        took her with it (softened at SD15, redrawn as someone else at
+        SDXL full denoise).
+
+        This does not re-cut what the user selected — quality.subject_shield
+        backs off when the region mostly IS the subject, so a deliberate
+        person edit stands. And because BiRefNet mattes whatever is salient
+        (protecting a vase from "replace the vase" would block the very
+        edit), the shield is person-gated with one region-scoped question
+        before it overrides any pixel the user painted."""
+        if not real or not self._pack_active("rmbg"):
+            return mask
+        if quality.about_the_subject(instruction):
+            return mask
+        try:
+            matte = self._region_mask(image, "BiRefNetRMBG", {
+                "model": self._matte_model("person subject"),
+                "sensitivity": 1.0, "mask_blur": 0, "mask_offset": 0,
+                "invert_output": False, "refine_foreground": True,
+                "background": "Alpha", "background_color": "#222222"})
+        except Exception:  # noqa: BLE001 — the shield is best-effort
+            return mask
+        if matte is None:
+            return mask
+        shield = quality.subject_shield(mask, matte)
+        if not shield["applied"]:
+            if shield["note"]:
+                job.log("info", f"Subject shield stands down: "
+                                f"{shield['note']}")
+            return mask
+        if self.critic is None:
+            return mask  # nothing can confirm a person; the region stands
+        box = quality.fit_mask(matte, image.size).getbbox()
+        if not box:
+            return mask
+        try:
+            answer = self.critic.ask(
+                image.crop(box),
+                "Is the main subject shown in this image a person? "
+                "Answer yes or no.")
+        except Exception:  # noqa: BLE001 — the shield is best-effort
+            return mask
+        if "yes" not in (answer or "").lower()[:24]:
+            return mask
+        job.log("info", "Subject shield: the drawn region sweeps across "
+                        "the person and the request does not mention them "
+                        "— their pixels are protected and the edit renders "
+                        f"around them ({shield['note']})")
+        return cast(Image.Image, shield["mask"])
 
     def _multi_region_mask(self, job: Job | None, image: Image.Image,
                            instruction: str) -> Image.Image | None:

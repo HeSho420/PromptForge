@@ -395,5 +395,134 @@ class ApprovedRegionSurvivesTheCheckTests(unittest.TestCase):
                          (8, 8, 40, 40))
 
 
+class SubjectShieldTests(unittest.TestCase):
+    """A drawn mask that sweeps across a person the request never mentioned.
+
+    Measured 2026-08-20: a 0.44-fraction drawn mask overlapping the subject
+    sent her through the repaint with the rest of the region — softened to
+    0.60x sharpness on the SD15 inpaint, redrawn as a DIFFERENT PERSON at
+    SDXL full denoise. The shield hands the sampler the drawn region minus
+    the person's core, and stands down when the region mostly IS the
+    person — the user outranks it."""
+
+    MATTE = box_mask((60, 40, 140, 260))
+
+    def test_a_sweeping_mask_loses_the_subjects_core(self):
+        drawn = box_mask((0, 0, 130, 299))
+        out = quality.subject_shield(drawn, self.MATTE)
+        self.assertTrue(out["applied"])
+        shielded = out["mask"]
+        self.assertEqual(shielded.getpixel((100, 150)), 0,
+                         "the subject's core must be protected")
+        self.assertEqual(shielded.getpixel((20, 150)), 255,
+                         "the rest of the drawn region must still render")
+        self.assertEqual(shielded.getpixel((62, 150)), 255,
+                         "a rim of the subject stays repaintable so the "
+                         "new content can blend at the silhouette")
+
+    def test_a_mask_barely_touching_the_subject_is_untouched(self):
+        drawn = box_mask((0, 0, 70, 299))
+        out = quality.subject_shield(drawn, self.MATTE)
+        self.assertFalse(out["applied"])
+        self.assertIs(out["mask"], drawn)
+        self.assertIn("barely", str(out["note"]))
+
+    def test_a_mask_that_is_the_subject_outranks_the_shield(self):
+        drawn = box_mask((58, 38, 142, 262))
+        out = quality.subject_shield(drawn, self.MATTE)
+        self.assertFalse(out["applied"])
+        self.assertIn("deliberate", str(out["note"]))
+
+    def test_a_whole_frame_matte_is_no_evidence(self):
+        matte = box_mask((0, 0, 199, 299))
+        out = quality.subject_shield(box_mask((0, 0, 130, 299)), matte)
+        self.assertFalse(out["applied"])
+        self.assertIn("no reliable subject matte", str(out["note"]))
+
+
+class _ShieldJob:
+    def __init__(self):
+        self.lines = []
+
+    def log(self, level, msg):
+        self.lines.append(msg)
+
+
+class _ShieldCritic:
+    def __init__(self, answer):
+        self.answer = answer
+        self.asked = 0
+
+    def ask(self, image, question, **kwargs):
+        self.asked += 1
+        return self.answer
+
+
+class SubjectShieldGateTests(unittest.TestCase):
+    """When the shield may not touch the drawn region at all.
+
+    BiRefNet mattes whatever is salient — protecting a vase from "replace
+    the vase" would block the very edit — so the shield only stands between
+    the sampler and a confirmed PERSON, and never when the request already
+    names them."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.s = Services(Settings(
+            data_dir=Path(self.tmp.name), inpaint_backend="mock",
+            segment_backend="mock", critic_model="", first_run_setup=False,
+            comfyui_dir=""))
+        self.addCleanup(self.s.stop)
+        self.s._pack_active = lambda name: True
+        self.s._region_mask = lambda *a, **k: box_mask((60, 40, 140, 260))
+        self.img = Image.new("RGB", (200, 300), (90, 110, 130))
+        self.drawn = box_mask((0, 0, 130, 299))
+        self.job = _ShieldJob()
+
+    def _run(self, instruction, critic):
+        self.s.critic = critic
+        return self.s._shield_subject(self.job, self.img, self.drawn,
+                                      instruction, True)
+
+    def test_a_request_about_the_person_stands_unshielded(self):
+        critic = _ShieldCritic("yes")
+        out = self._run("give her a red jacket", critic)
+        self.assertIs(out, self.drawn)
+        self.assertEqual(critic.asked, 0,
+                         "no model round-trip when the words already "
+                         "settle it")
+
+    def test_a_salient_object_that_is_not_a_person_is_not_protected(self):
+        out = self._run("replace the tree with a statue",
+                        _ShieldCritic("No, it is a large vase."))
+        self.assertIs(out, self.drawn)
+
+    def test_a_confirmed_person_is_protected(self):
+        out = self._run("replace the tree with a statue",
+                        _ShieldCritic("Yes."))
+        self.assertIsNot(out, self.drawn)
+        self.assertEqual(out.getpixel((100, 150)), 0)
+        self.assertEqual(out.getpixel((20, 150)), 255)
+        self.assertTrue(any("Subject shield" in m for m in self.job.lines))
+
+    def test_mock_runs_leave_the_region_alone(self):
+        self.s.critic = _ShieldCritic("yes")
+        out = self.s._shield_subject(self.job, self.img, self.drawn,
+                                     "replace the tree with a statue", False)
+        self.assertIs(out, self.drawn)
+
+    def test_the_hook_only_amends_drawn_masks(self):
+        """The driver applies the shield inside the mask_source == "user"
+        branch and nowhere else — auto masks already have the named-part
+        and face guarantees."""
+        import inspect
+
+        from app.core import services as services_module
+        src = inspect.getsource(services_module)
+        self.assertIn('if mask_source == "user":', src)
+        self.assertIn("shielded = self._shield_subject(", src)
+
+
 if __name__ == "__main__":
     unittest.main()
