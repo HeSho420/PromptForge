@@ -3504,19 +3504,26 @@ class Services:
                 if not retryable:
                     job.log("info", "[stage] verify — an upscale has nothing "
                                     "to vary between attempts; keeping it")
-                # Stop condition. A checklist verdict is the authority: when
-                # the edit delivers every requirement, further rounds chase a
-                # quality_target of 95 that llava essentially never awards, so
-                # they would spend minutes and keep the first result anyway.
+                # Stop condition. A delivered request is the authority: when
+                # nothing is missing, further rounds chase a quality_target
+                # of 95 that the judge essentially never awards on a real
+                # photograph, so they would spend minutes and keep the first
+                # result anyway. This containment used to apply only to
+                # checklist-sourced verdicts; measured 2026-08-24 on the
+                # judged-adherence path (drawn-mask statue edit): adherence
+                # passed 95/100, overall 94, and realism 90 < target bought
+                # TWO extra rounds that both rendered accuracy-0 garbage
+                # (the seam complaint was about SOURCE pixels — her bikini —
+                # which no re-render can fix). keep-best discarded both:
+                # ~2 minutes spent to keep the first result. A retry after
+                # delivery is only bought by real trouble: overall < 85.
                 def keep_going() -> bool:
                     if job.cancel_requested:
                         return False
                     if best_missing:
                         return True
-                    if adh and adh.get("source") == "checklist":
-                        return not quality.meets_target(best_scores, target) \
-                            and (quality.overall(best_scores) or 0) < 85
-                    return not quality.meets_target(best_scores, target)
+                    return not quality.meets_target(best_scores, target) \
+                        and (quality.overall(best_scores) or 0) < 85
 
                 while (retryable and rounds < self.settings.quality_rounds
                        and keep_going()):

@@ -528,6 +528,31 @@ class EditPipelineIntegrationTests(unittest.TestCase):
         self.assertIn("Round 2 kept", logs)
         self.assertIn("weakest category", logs)
 
+    def test_a_delivered_edit_does_not_chase_the_unreachable_target(self):
+        """Measured live (2026-08-24, drawn-mask statue edit): adherence
+        passed at 95/100 with overall 94, and realism 90 < target bought
+        TWO extra rounds that both rendered accuracy-0 garbage keep-best
+        then discarded — the seam complaint was about SOURCE pixels (her
+        bikini) that no re-render can fix. Nothing missing + overall >= 85
+        stops the ladder, whatever the adherence source."""
+        self.s.llm = DeadLLM()
+        self.s.critic = ScriptedCritic([
+            '{"match": true, "why": "ok"}',                    # verify_mask
+            '{"issues": ["the bikini looks digitally placed"]}',
+            self._score_json(90),                              # delivered
+        ])
+        self.s.start()
+        job = self.s.queue.enqueue("image_edit", {
+            "asset_id": self.asset.id, "prompt": "remove the chair"})
+        done = self.s.queue.wait_for(job.id, timeout=20)
+        self.assertEqual(done.state.value, "completed")
+        self.assertEqual(done.result["rounds"], 0)
+        self.assertEqual(self.RealishInpaint.calls, 1,
+                         "a 90-across-the-board render must not be re-rolled")
+        logs = " ".join(e["msg"] for e in done.logs)
+        self.assertIn("weakest category", logs)
+        self.assertNotIn("[stage] retry", logs)
+
     def test_whole_frame_restyle_retry_escalates_denoise(self):
         """Measured live (RTX 4060 A/B): 0.6 keeps composition but can
         undershoot the look. A retry must spend MORE denoise (0.8), never
