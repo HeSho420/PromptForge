@@ -489,6 +489,30 @@ never-mask-the-face rule). Do not "extend" it to image_edit.
   suspect), text editing in images (CHANGE_TEXT/Kontext live check),
   multi-image compose live check, colorize B&W, iterative edit-the-
   result UX, product/white-background shots.
+- **PARITY 2-6 (5339679…1c68962, 2026-08-20)** ChatGPT-editor parity
+  sweep, all live-measured: STYLE (Kontext-eligible CHANGE_STYLE; art-
+  frame scorecard after realism-20-on-a-delivered-watercolor burned 3
+  renders; softness veto + face-drift deferred in style mode; live:
+  1 attempt, identity 95). FORMATS (HEIC/TIFF→PNG at ingest via
+  pillow-heif; EXIF orientation baked out — portrait phone JPEGs were
+  edited SIDEWAYS before; real-encoder tests). PRODUCT SHOTS ("on a
+  white background" was ADD_OBJECT → background engine). TEXT: render
+  intent routes to zimage where it fits; HERE the Qwen3-4B encoder's
+  24GB RAM floor gates it (menu-hidden — the router never "ignored"
+  the rule) → honest lettering warning; text EDITING via Kontext
+  CHANGE_TEXT works (live: CDOSED sign → crisp OPEN, accuracy 100,
+  1 attempt). COLORIZE (Kontext routing was right; chroma settler
+  0.0→67.8 overrules the verifier that called a perfect colorization
+  missing twice). COMPOSE (scene-picked placement pasted the reference
+  woman ON the subject's torso at 26% scale → placement_correction
+  from the destination matte: person-size, standing line, slide-off;
+  provenance stripped from checklists; count-question verify; live:
+  two friends at natural scale, shared light, identities intact).
+  1033 tests. REMAINING (honest): text GEN hardware-gated here (peer
+  64GB machine capable); restore/sketch→photo ride Kontext untested
+  live; identity-across-generations templates untested this session;
+  verify vl still flaky on some classes (settlers cover format/colour/
+  colorize/count; the static-verdict breaker catches the rest).
 Candidates, roughly ranked (artifact focus first per 2026-08-18 mandate):
 - **Cycle 23 (0079083)** Outpaint glyph guard SHIPPED and live-proven.
   Detection calibrated on 16 real margins (per-row density of >40 grey
