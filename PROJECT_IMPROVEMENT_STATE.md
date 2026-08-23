@@ -617,6 +617,26 @@ never-mask-the-face rule). Do not "extend" it to image_edit.
   mojibake'd test_scene_geometry.py (caught via git diff, restored) —
   machine landmine: never edit source via PS string ops, use the Edit
   tool.
+2026-08-24 — QUALITY 7 (consistent-evidence demotion): the env
+  place-check false-missed 3/3 runs — examiner honestly said "a bar or
+  a lounge" for the club's own bar corner; the synonym judge correctly
+  refused bar==nightclub as English; each run burned one
+  lighting-matched re-render. The checklist now carries the spec's
+  elements as `consistent` terms: ONE shared meaningful token between
+  the answer and a planned element demotes miss→unclear (schema probes
+  answer "a few words" — the live short answer hit 1/4 tokens of "bar
+  counter with bottles and glasses", which answer_verdict calls
+  inconclusive; the verbose offline answer had matched, which is how
+  the first is-True demotion shipped and immediately failed live —
+  measured, fixed, re-measured). Unrelated answers ("a sunny beach")
+  still miss. Also: spec planner answered lighting_wish "keep" live —
+  a directive; lighting_prompt now guards directives. Closing A/B:
+  rounds 1→0, single lighting-matched render delivered; gap +36.4
+  (fix-class +31.1, baseline +92.7), subject −45.7 luma, identity
+  intact, eyeball natural (warm amber bar light). 1052 tests. Chain
+  note: demotion → checklist unclear → guessing-gate None → scorecard
+  fallback → nothing missing → QUALITY 5 delivery containment stops
+  the ladder — five rounds of this window composing.
 Candidates, roughly ranked (artifact focus first per 2026-08-18 mandate):
 - **Cycle 23 (0079083)** Outpaint glyph guard SHIPPED and live-proven.
   Detection calibrated on 16 real margins (per-row density of >40 grey
