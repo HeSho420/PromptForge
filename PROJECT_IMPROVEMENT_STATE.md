@@ -556,6 +556,31 @@ never-mask-the-face rule). Do not "extend" it to image_edit.
   route does) before any checkpoint change; note the maskless Kontext
   route already delivered an excellent statue on the same request.
   Numeric floor to beat: masked repaint at 0.60x untouched sharpness.
+2026-08-24 — QUALITY 4 (the ledgered trimap design, DELIVERED): subject
+  shield for drawn masks. quality.subject_shield (pure geometry: drawn
+  region minus the BiRefNet matte core eroded ~4px for a blending rim;
+  stands down when <10% of the region touches the subject OR when <30%
+  of the region survives — a mask that mostly IS the person is a
+  deliberate person edit and the user outranks the shield) +
+  Services._shield_subject (skips when about_the_subject(request);
+  person-gated by ONE region-scoped critic question on the matte bbox
+  since BiRefNet mattes whatever is salient and protecting a vase from
+  "replace the vase" would block the very edit) + driver hook ONLY in
+  the mask_source=="user" branch, after grow/shrink, before the variant
+  choice. Measured on the exact reverted-swap scenario (fem.png, 0.443
+  drawn mask, statue request): shield took 42% of the region off her;
+  the smaller region then qualified for hi-res crop&stitch (render 38s,
+  statue at native detail — the large-mask softness class fixed itself
+  as a SIDE EFFECT, no checkpoint change); protected-core sharpness
+  ratio 0.998 vs the 0.60 floor, mean|diff| 0.48 levels, 1.7% of her
+  pixels moved >8 levels (the rim); judge: identity 98, accuracy 95,
+  realism 90, verify 95/100, statue confirmed by eyeball. 1045 tests
+  (+9: shield geometry, gating incl. vase-refusal + words-settle-it,
+  user-branch-only source pin). NEW candidate from the run: the seam
+  inspector complained about her BIKINI (source pixels at the new mask
+  boundary) and burned 2 retries that keep-best discarded (both
+  identity 100 — protection held through retries); inspection should
+  not raise issues about content the shield excluded.
 Candidates, roughly ranked (artifact focus first per 2026-08-18 mandate):
 - **Cycle 23 (0079083)** Outpaint glyph guard SHIPPED and live-proven.
   Detection calibrated on 16 real margins (per-row density of >40 grey
