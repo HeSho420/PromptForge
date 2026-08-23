@@ -581,6 +581,18 @@ never-mask-the-face rule). Do not "extend" it to image_edit.
   boundary) and burned 2 retries that keep-best discarded (both
   identity 100 — protection held through retries); inspection should
   not raise issues about content the shield excluded.
+2026-08-24 — QUALITY 5 (retry containment): the keep_going ladder's
+  "delivered + overall>=85 stops the rounds" rule applied only to
+  checklist-sourced verdicts; the judged-adherence path fell through to
+  bare meets_target and a 90-realism render chased the 95 target the
+  judge never awards on real photos. Measured twice on the drawn-mask
+  statue job: 2 extra rounds, both accuracy-0 garbage, both discarded
+  by keep-best (the depressing complaint was SOURCE pixels — her bikini
+  at the shield boundary — unfixable by re-render). Containment now
+  source-independent. A/B same job: rounds 2→0, wall 4:34→2:30,
+  identical quality (overall 94, identity 98, statue verified).
+  1046 tests (+1 integration: 90-across-the-board render, one render
+  only, no retry stage).
 Candidates, roughly ranked (artifact focus first per 2026-08-18 mandate):
 - **Cycle 23 (0079083)** Outpaint glyph guard SHIPPED and live-proven.
   Detection calibrated on 16 real margins (per-row density of >40 grey
