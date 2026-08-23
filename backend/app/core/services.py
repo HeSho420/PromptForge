@@ -348,7 +348,12 @@ DEFAULT_MODELS = [
                 "check the model page for terms; ~6.9 GB",
         url="https://civitai.com/api/download/models/456538",
         sha256="b1689257e6e1b2e61544b1a41fc114e7d798f68854b3f875cd52070bfe1fbc00",
-        vram_gb=8.0,
+        # 7.0, not 8.0: this model runs on the resident RTX 4060 (8 GB)
+        # daily — every outpaint and every guided environment render uses
+        # it, with ComfyUI offloading. The old 8.0 declaration made the
+        # escalation gate refuse it on the very card that proves it works
+        # ("declares 8 GB VRAM against 8 GB on this card"), measured live.
+        vram_gb=7.0,
         meta={"folder": "checkpoints", "source": "civitai",
               "file": "juggernautXL_inpaint.safetensors"},
     ),
@@ -2756,8 +2761,9 @@ class Services:
                                     mask = self._correct_mask(
                                         job, asset_id, current, mask, step,
                                         check.get("why") or "", mask_source)
+                    mask_frac = quality.mask_fraction(mask)
                     if (supports and variant == "modern"
-                            and quality.mask_fraction(mask) < 0.35):
+                            and mask_frac < 0.35):
                         # Regional edit: crop→upscale→inpaint→stitch renders
                         # the region at the model's native resolution — small
                         # regions rendered at full-frame scale come out
@@ -2766,6 +2772,18 @@ class Services:
                         job.log("info", "Inpaint technique: regional edit — "
                                         "hi-res crop&stitch so the region "
                                         "renders at full detail")
+                    # NOTE (measured 2026-08-20, then REVERTED same day):
+                    # switching large masks (≥0.35 frac, ≥1.1 MP) to the
+                    # SDXL inpaint checkpoint here traded softness for
+                    # something far worse — on a drawn mask overlapping
+                    # the subject, juggernautXL at full denoise REDREW
+                    # the person and never delivered the requested
+                    # content (accuracy 20, different face), where the
+                    # SD15 soft-inpaint had kept her intact at 0.60x
+                    # sharpness. A large-mask quality lift needs its own
+                    # design (subject-protecting trimap inside drawn
+                    # masks + adherence-first conditioning), not a
+                    # checkpoint swap.
                     inpaint_denoise = None
                     if (supports and not is_add and not is_remove
                             and quality.is_recolour(step["instruction"])):
@@ -3322,7 +3340,8 @@ class Services:
                 if checklist:
                     job.log("info", "[llm] the edit must deliver: "
                                     + " · ".join(c["need"] for c in checklist))
-                adh = self._adherence(job, current, prompt, checklist, scores)
+                adh = self._adherence(job, current, prompt, checklist,
+                                      scores, before=image)
                 target = self.settings.quality_target
                 best, best_scores = current, scores
                 best_missing = list((adh or {}).get("missing") or [])
@@ -3700,7 +3719,9 @@ class Services:
                                         "best attempt so far")
                         break
                     self._log_scores(job, scores2)
-                    adh2 = self._adherence(job, candidate, prompt, checklist, scores2)
+                    adh2 = self._adherence(job, candidate, prompt,
+                                           checklist, scores2,
+                                           before=final_input)
                     missing2 = settle_colour(
                         candidate, list((adh2 or {}).get("missing") or []))
                     # A retry that also came back untouched keeps the recipe
@@ -8613,7 +8634,8 @@ class Services:
 
     def _adherence(self, job: Job, image: Image.Image, prompt: str,
                    checklist: list[dict[str, str]],
-                   scores: dict[str, int] | None = None
+                   scores: dict[str, int] | None = None,
+                   before: Image.Image | None = None
                    ) -> dict[str, Any] | None:
         """Did this render actually DO what the prompt asked?
 
@@ -8636,8 +8658,13 @@ class Services:
         # The text model settles wording disagreements — it never sees the
         # image, so it cannot rubber-stamp the way the vision model does.
         report = quality.verify_adherence(self.critic, image, prompt,
-                                          checklist, llm=self.llm)
+                                          checklist, llm=self.llm,
+                                          before=before)
         if report is not None:
+            for settled in report.get("region_settled") or []:
+                job.log("info", "[stage] verify — the changed region "
+                                f"settles it: {settled} (overruling the "
+                                "whole-frame probe)")
             unclear = report.get("unclear") or []
             if report["missing"]:
                 job.log("info", f"[stage] verify — the render matches "

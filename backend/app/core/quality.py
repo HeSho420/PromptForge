@@ -3057,9 +3057,27 @@ def answer_satisfies(answer: str, expect: str) -> bool:
     return answer_verdict(answer, expect) is True
 
 
+def changed_bbox(before: Image.Image, after: Image.Image,
+                 min_frac: float = 0.02) -> tuple[int, int, int, int] | None:
+    """Bounding box of what an edit actually changed, or None when the
+    change is too small to crop meaningfully."""
+    import numpy as np
+    b = np.asarray(before.convert("L").resize(after.size), dtype=np.int16)
+    a = np.asarray(after.convert("L"), dtype=np.int16)
+    moved = np.abs(a - b) > 12
+    if moved.mean() < min_frac:
+        return None
+    rows = np.nonzero(moved.any(axis=1))[0]
+    cols = np.nonzero(moved.any(axis=0))[0]
+    return (int(cols[0]), int(rows[0]), int(cols[-1]) + 1,
+            int(rows[-1]) + 1)
+
+
 def verify_adherence(critic: Any, image: Image.Image, prompt: str,
                      checklist: list[dict[str, str]],
-                     llm: LLMClient | None = None) -> dict[str, Any] | None:
+                     llm: LLMClient | None = None,
+                     before: Image.Image | None = None
+                     ) -> dict[str, Any] | None:
     """Ask the examiner one neutral question per requirement and decide, in
     Python, whether each was met.
 
@@ -3124,13 +3142,47 @@ def verify_adherence(critic: Any, image: Image.Image, prompt: str,
     # An examiner that could not settle most of the checklist is guessing.
     if len(unclear) * 2 > len(checklist):
         return None
+    # Last chance for a "missing" verdict: look WHERE the edit happened.
+    # Whole-frame probes measured wrong on three classes in one day — a
+    # perfect colorization, a placed second woman and a huge stone statue
+    # were each reported missing twice, costing a full re-render every
+    # time. Cropping to the changed region and asking what it shows is
+    # the seam-inspector lesson applied to verification: small view,
+    # concrete question. Overrules ONLY missing → met, never the reverse.
+    region_settled: list[str] = []
+    if before is not None and missing:
+        box = changed_bbox(before, image)
+        if box is not None:
+            mw = int((box[2] - box[0]) * 0.15) + 16
+            mh = int((box[3] - box[1]) * 0.15) + 16
+            crop = image.crop((max(0, box[0] - mw), max(0, box[1] - mh),
+                               min(image.width, box[2] + mw),
+                               min(image.height, box[3] + mh)))
+            for need in list(missing):
+                try:
+                    data = _parse_json(ask_with_schema(
+                        critic, crop,
+                        "Describe the main thing shown in this image "
+                        'region, in a few words. Reply ONLY JSON: '
+                        '{"answer": "<a few words>"}',
+                        {"type": "object",
+                         "properties": {"answer": {"type": "string"}},
+                         "required": ["answer"]}))
+                except Exception:  # noqa: BLE001 — checking never blocks
+                    continue
+                answer = str((data or {}).get("answer", ""))
+                if answer_verdict(answer, need) is True:
+                    missing.remove(need)
+                    met.append(need)
+                    region_settled.append(f"{need} (the changed region "
+                                          f"shows: {answer[:60]})")
     # Score on what was actually decided. Counting an inconclusive answer as a
     # failure is what produced "0% — missing: a sunlit meadow" for an image
     # that plainly showed one, and sent the ladder off to fix nothing.
     decided = len(met) + len(missing)
     return {"accuracy": round(100 * len(met) / decided) if decided else 100,
             "missing": missing, "met": met, "unclear": unclear,
-            "source": "checklist"}
+            "region_settled": region_settled, "source": "checklist"}
 
 
 def meets_target(scores: dict[str, int] | None, target: int) -> bool:

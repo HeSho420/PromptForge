@@ -432,6 +432,63 @@ class EnvironmentIntentTests(unittest.TestCase):
             self.assertFalse(environment_intent(no), no)
 
 
+class ChangedRegionProbeTests(unittest.TestCase):
+    """A 'missing' verdict gets one last, region-scoped look: crop what
+    the edit actually changed and ask what it shows. Live in one day:
+    a colorization, a placed second woman and a huge stone statue were
+    each reported missing twice by whole-frame probes."""
+
+    def test_changed_bbox_finds_the_edit(self):
+        from app.core.quality import changed_bbox
+        before = Image.new("RGB", (200, 200), (50, 50, 50))
+        after = before.copy()
+        after.paste((200, 200, 200), (20, 30, 120, 170))
+        box = changed_bbox(before, after)
+        self.assertEqual(box, (20, 30, 120, 170))
+        self.assertIsNone(changed_bbox(before, before))
+
+    def test_region_probe_overrules_missing_to_met_only(self):
+        from app.core import quality
+
+        class C:
+            def __init__(self):
+                self.calls = []
+
+            def ask(self, image, q, schema=None):
+                self.calls.append((image.size, q))
+                if "main thing shown" in q:
+                    return '{"answer": "a large stone statue"}'
+                return '{"answer": "a beach"}'   # whole-frame probe: wrong
+
+        before = Image.new("RGB", (300, 300), (10, 10, 10))
+        after = before.copy()
+        after.paste((240, 240, 240), (10, 10, 150, 290))
+        checklist = [{"need": "a large stone statue",
+                      "probe": "What large object is present?",
+                      "expect": "stone statue"}]
+        report = quality.verify_adherence(C(), after, "x", checklist,
+                                          before=before)
+        self.assertEqual(report["missing"], [])
+        self.assertEqual(report["met"], ["a large stone statue"])
+        self.assertTrue(report["region_settled"])
+        self.assertEqual(report["accuracy"], 100)
+
+
+class LargeMaskCheckpointTests(unittest.TestCase):
+    def test_large_mask_xl_switch_stays_reverted(self):
+        # Measured and REVERTED same day: the XL swap on a drawn mask
+        # overlapping the subject redrew the person at accuracy 20 where
+        # SD15 soft-inpaint had kept her intact at 0.60x sharpness. The
+        # revert note must survive until a subject-protecting design
+        # replaces it.
+        import inspect
+
+        from app.core.services import Services
+        src = inspect.getsource(Services._handle_image_edit)
+        self.assertNotIn("Inpaint model switched to", src)
+        self.assertIn("REVERTED same day", src)
+
+
 class PlacementCorrectionTests(unittest.TestCase):
     """A person joining a photo stands BESIDE whoever is already there,
     at a comparable size, on the same line. Live: the scene-picked spot
