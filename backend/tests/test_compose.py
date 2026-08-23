@@ -183,23 +183,28 @@ class ServiceWiringTests(unittest.TestCase):
         self.addCleanup(self.s.stop)
 
     def test_the_harmoniser_avoids_inpainting_checkpoints(self):
-        """An inpainting checkpoint expects a mask it is never given here."""
+        """An inpainting checkpoint expects a mask it is never given here;
+        among the plain bases the SDXL one wins — harmonisation runs at
+        the destination's native size (~1.8 MP), where the SD1.5 base is
+        far off-distribution (the measured root cause of the soft
+        environments, and the compose inspector's recurring 'seam
+        between the two women')."""
         self.s.comfy.installed_checkpoints = lambda: [
             "juggernautXL_inpaint.safetensors",
             "sd-v1-5-inpainting.safetensors",
             "v1-5-pruned-emaonly.safetensors",
             "sd_xl_base_1.0.safetensors"]
         self.assertEqual(self.s._best_compose_checkpoint(),
-                         "v1-5-pruned-emaonly.safetensors")
+                         "sd_xl_base_1.0.safetensors")
 
     def test_the_harmoniser_is_chosen_deliberately_not_alphabetically(self):
         """Seen live: the pass picked `nsfw_v10` purely because it sorted
-        first among the non-inpainting checkpoints. The registry ships a
-        plain SD1.5 base for exactly this job — use that."""
+        first among the non-inpainting checkpoints. With no plain XL base
+        installed, the registry's SD1.5 base still beats an arbitrary
+        community name."""
         self.s.comfy.installed_checkpoints = lambda: [
             "nsfw_v10.safetensors",
-            "v1-5-pruned-emaonly.safetensors",
-            "sd_xl_base_1.0.safetensors"]
+            "v1-5-pruned-emaonly.safetensors"]
         self.assertEqual(self.s._best_compose_checkpoint(),
                          "v1-5-pruned-emaonly.safetensors")
 

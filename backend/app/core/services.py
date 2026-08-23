@@ -5959,16 +5959,24 @@ class Services:
         plain = [c for c in installed if not self._NOT_A_GENERATOR.search(c)]
         if not plain:
             return None
-        # 1. The plain SD1.5 base the registry ships for exactly this kind of
-        #    work. 2. Any other neutral-looking SD1.5. 3. Whatever is left.
+        # 1. A plain SDXL base: the harmonisation runs at the destination's
+        #    native size (often ~1.8 MP) and the SD1.5 base is far
+        #    off-distribution there — the same root cause that kept every
+        #    environment render soft, and the compose inspector kept
+        #    noting a "seam between the two women". 2. The SD1.5 base.
+        #    3. Any other neutral name. 4. Whatever is left.
+        xl_plain = [c for c in plain
+                    if "xl" in c.lower()
+                    and not self._SURPRISING_NAME.search(c)]
+        if xl_plain:
+            return xl_plain[0]
         base = self.registry.get("sd15-base")
         wanted = Path((base.meta or {}).get("file") or "").name if base else ""
         for name in plain:
             if wanted and name == wanted:
                 return name
         neutral = [c for c in plain
-                   if "xl" not in c.lower()
-                   and not self._SURPRISING_NAME.search(c)]
+                   if not self._SURPRISING_NAME.search(c)]
         return (neutral or plain)[0]
 
     # Checkpoint names that would be jarring to see quoted back in the job log
