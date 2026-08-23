@@ -593,6 +593,30 @@ never-mask-the-face rule). Do not "extend" it to image_edit.
   identical quality (overall 94, identity 98, statue verified).
   1046 tests (+1 integration: 90-across-the-board render, one render
   only, no retry stage).
+2026-08-24 — QUALITY 6 (the "partway relight" limit was a DROPPED
+  match, not a weak one): measured on "put her in a nightclub", the
+  delivered subject's luma shifted -0.1 while her scene dimmed 54
+  levels — the lighting match ran on attempt 0, but the ladder retry
+  re-rendered the background WITHOUT it and "Round 1 kept" (a +3
+  visual_quality tiebreak) delivered the raw composite. Fix 1
+  (load-bearing): the background retry path now runs the same
+  _match_lighting. Fix 2 (principled, per the template's own
+  lighting-only contract; magnitude not separately isolated):
+  scene_geometry.lighting_prompt — conditioning leads with the spec's
+  lighting_wish instead of the full env prompt + hard-coded "natural
+  light"; matte hint now describes the subject. A/B: illumination gap
+  +92.7 → +31.1, subject -46 luma into the amber/neon bar light,
+  identity intact (judge 95), eyeball: dapple subdued, neon reads as a
+  source on her. 1049 tests. Round also exposed, still OPEN: (1) the
+  place-question verify false-missed "nightclub" on a plainly-rendered
+  club in all 3 runs (examiner likely answers "bar"; match too
+  strict) — burns one retry per env job (static-verdict breaker
+  contains round 2); (2) validate's "nothing walkable under feet"
+  fires when a bar counter legitimately occludes the feet. ALSO: a
+  PowerShell -replace/Set-Content append silently failed AND
+  mojibake'd test_scene_geometry.py (caught via git diff, restored) —
+  machine landmine: never edit source via PS string ops, use the Edit
+  tool.
 Candidates, roughly ranked (artifact focus first per 2026-08-18 mandate):
 - **Cycle 23 (0079083)** Outpaint glyph guard SHIPPED and live-proven.
   Detection calibrated on 16 real margins (per-row density of >40 grey
