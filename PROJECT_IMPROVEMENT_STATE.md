@@ -528,6 +528,18 @@ never-mask-the-face rule). Do not "extend" it to image_edit.
   first time, single attempt — best environment render of the project.
   Remaining softness class = degraded SOURCE subjects (the draft-gen
   test asset), not the pipeline. 1033 tests.
+- **QUALITY 2 (a7a62b3, 2026-08-20)** Compose harmonisation on the
+  plain SDXL base (v1-5-pruned harmonised at ~1.8 MP native — same
+  off-distribution class as the soft environments). Picker prefers a
+  plain XL base; surprising-name filter intact; sd15-base = no-XL
+  fallback; pins updated. Live A/B: crisp photoreal faces on both
+  women, inserted identity clearly held, verify FIRST attempt via the
+  count checklist — best composite of the project. NEXT quality
+  candidates: subject-quality floor (draft-gen test assets degrade
+  every edit view — use real photos for demos), size-aware inpaint
+  checkpoint pick (large masks → XL, mirror of the env lesson, MEASURE
+  first), Kontext q4 vs higher quant on 8 GB, IC-Light fbc strength
+  for extreme relights.
 Candidates, roughly ranked (artifact focus first per 2026-08-18 mandate):
 - **Cycle 23 (0079083)** Outpaint glyph guard SHIPPED and live-proven.
   Detection calibrated on 16 real margins (per-row density of >40 grey
