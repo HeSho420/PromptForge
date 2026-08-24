@@ -785,6 +785,24 @@ never-mask-the-face rule). Do not "extend" it to image_edit.
   both referees. Base renders this round measured 0.83/0.84 likeness,
   realism 9/10. 1076 tests. Persona queue: full-body framing
   adherence, multi-reference personas, persona→env pipeline.
+2026-08-25 — PERSONA 4 (product-model correction, user-directed:
+  personas ≠ avatars): an AVATAR is the 3D rigged character (SV3D/
+  mesh/rig, 36 min); a PERSONA is the 2D character card (candy.ai
+  class) for consistent image generation. New lean "persona" intake
+  job (consent → sharpest-photo reference → appearance profile →
+  card): measured 34 SECONDS live. Same store, meta.kind=="persona";
+  /api/personas CRUD + /render; /api/avatars lists 3D only; typed
+  "make a persona" → 2D intake; resolve_persona prefers 2D cards over
+  same-name avatars (fallback keeps old profiles reachable). UI: real
+  Personas page (consent create, thumbnail gallery, render box with
+  realism+likeness badges); Avatar page restored to its 3D identity;
+  both modes in the picker. FULL-BODY (riding): tall 832×1216 latent +
+  framing words → face fraction 0.515→0.184 @ likeness 0.77 (ships);
+  kps-canvas TRUE head-to-toe measured (0.075) but likeness 0.46 <
+  band — documented, not shipped; path to close it: kps + a
+  face-restore WITH identity conditioning. E2E: persona in 34 s, lists
+  split, "use persona 'Mira': rooftop at dusk" → 2D card → realism 9 /
+  identity 0.815 (best yet). 1078 tests, frontend rebuilt.
 Candidates, roughly ranked (artifact focus first per 2026-08-18 mandate):
 - **Cycle 23 (0079083)** Outpaint glyph guard SHIPPED and live-proven.
   Detection calibrated on 16 real margins (per-row density of >40 grey
