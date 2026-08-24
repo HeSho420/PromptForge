@@ -165,13 +165,19 @@ function AvatarRenderPanel({ avatar }: { avatar: AvatarProfile }) {
       : null;
   const realism =
     job?.state === "completed" ? (job.result?.realism as number | null) : null;
+  const identityMatch =
+    job?.state === "completed"
+      ? (job.result?.identity_match as number | null)
+      : null;
 
   return (
     <div className="stack" style={{ gap: 10 }}>
-      <h2 style={{ margin: 0 }}>Render with this avatar</h2>
+      <h2 style={{ margin: 0 }}>Render with this persona</h2>
       <p className="dim" style={{ margin: 0, fontSize: 13 }}>
-        Describe any scene — the identity pipeline (PhotoMaker + SDXL) renders
-        this person into it photoreal, and can animate the result (WAN).
+        Describe any scene, pose or outfit — the identity pipeline renders
+        this person into it photoreal, measures the likeness (ArcFace), and
+        can animate the result. Tip: in Studio's edit box, &quot;use persona
+        &apos;{avatar.name ?? "name"}&apos;: …&quot; does the same thing.
       </p>
       <textarea
         rows={2}
@@ -257,6 +263,20 @@ function AvatarRenderPanel({ avatar }: { avatar: AvatarProfile }) {
             {typeof realism === "number" && (
               <span className={`badge ${realism >= 6 ? "completed" : "pending"}`}>
                 realism {realism}/10
+              </span>
+            )}
+            {typeof identityMatch === "number" && (
+              <span
+                className={`badge ${
+                  identityMatch >= 0.5
+                    ? "completed"
+                    : identityMatch >= 0.35
+                      ? "pending"
+                      : "failed"
+                }`}
+                title="ArcFace likeness vs the reference photo — ≥0.50 is the same person"
+              >
+                identity {identityMatch.toFixed(2)}
               </span>
             )}
           </div>
@@ -383,12 +403,13 @@ export function Avatar({ incoming, onConsumed, onBusy }: PanelProps = {}) {
 
   return (
     <>
-      <h1 className="ws-hide">Avatar</h1>
+      <h1 className="ws-hide">Personas</h1>
       <p className="sub ws-hide">
-        Build a consented digital human from photos: the pipeline isolates the
-        subject (SAM), checks which angles you covered, synthesizes the missing
-        ones (SV3D), and saves a movable avatar you can rotate and render into
-        any prompted image or video — photoreal, identity-preserving.
+        Save a person once, render them anywhere — consistently. The pipeline
+        isolates the subject, reads their appearance, synthesizes the missing
+        view angles (SV3D), and saves a persona you can render into any
+        prompted scene (with the likeness measured on every render) or type
+        into Studio: &quot;use persona &apos;name&apos;: any scene&quot;.
       </p>
 
       <div className="panel stack" style={{ maxWidth: 760 }}>
@@ -555,7 +576,7 @@ export function Avatar({ incoming, onConsumed, onBusy }: PanelProps = {}) {
 
       {avatars.length > 0 && (
         <div className="panel stack" style={{ maxWidth: 760, marginTop: 18 }}>
-          <h2 style={{ margin: 0 }}>Your avatars</h2>
+          <h2 style={{ margin: 0 }}>Saved personas</h2>
           <div className="avatar-list">
             {avatars.map((a) => (
               <button

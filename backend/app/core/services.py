@@ -266,6 +266,22 @@ DEFAULT_MODELS = [
               "file": "sd_xl_base_1.0.safetensors", "folder": "checkpoints"},
     ),
     ModelInfo(
+        name="realvisxl-v5",
+        purpose="RealVisXL V5.0 (SDXL, photoreal-tuned) — the identity "
+                "renderer's checkpoint: persona renders must read as "
+                "photographs, and the plain SDXL base has the telltale "
+                "AI look this checkpoint class was tuned away from",
+        license="CreativeML OpenRAIL++ (SG161222, official HF repo; "
+                "~6.9 GB fp16)",
+        url=("https://huggingface.co/SG161222/RealVisXL_V5.0/resolve/"
+             "main/RealVisXL_V5.0_fp16.safetensors"),
+        sha256="6a35a7855770ae9820a3c931d4964c3817b6d9e3c6f9c4dabb5b3a94e5643b80",
+        vram_gb=8.0,
+        meta={"repo": "SG161222/RealVisXL_V5.0",
+              "file": "RealVisXL_V5.0_fp16.safetensors",
+              "folder": "checkpoints", "size_bytes": 6938065488},
+    ),
+    ModelInfo(
         name="photomaker-v1",
         purpose="PhotoMaker identity encoder — renders a consented avatar into prompted scenes",
         license=("Apache-2.0 (TencentARC official; ~934 MB .bin pickle format "
@@ -695,6 +711,9 @@ MODEL_USAGE |= {
                         "what stops a replaced background looking pasted on "
                         "(needs the ic-light pack AND sd15-base)",
     "photomaker-v1": "identity renders from reference photos (SDXL)",
+    "realvisxl-v5": "the PERSONA renderer's checkpoint — photoreal-tuned "
+                    "SDXL so identity renders read as photographs; picked "
+                    "by the identity pipeline, never by prompt routing",
     "upscale-ultrasharp": "faithful 4x pixel upscale, no prompt",
     "face-yolov8m": "face detector for the automatic FaceDetailer "
                     "refinement pass — never a render model itself",
@@ -10137,11 +10156,18 @@ class Services:
 
     @staticmethod
     def appearance_phrase(profile: dict[str, Any] | None) -> str:
-        """The appearance profile as a prompt fragment."""
+        """The appearance profile as a prompt fragment.
+
+        `distinctive` is deliberately EXCLUDED: a mark named in the
+        positive prompt multiplies — "tattoo on left arm" grew into a
+        full sleeve in one persona render and scattered extra tattoos in
+        another (both eyeballed live). The face reference carries the
+        identity; body marks the diffusion invents from words are
+        artifacts, not likeness."""
         if not profile:
             return ""
         order = ("age_range", "build", "height_impression", "skin_tone",
-                 "hair", "face", "distinctive")
+                 "hair", "face")
         bits = [str(profile[k]).strip() for k in order
                 if str(profile.get(k) or "").strip()]
         return ", ".join(bits)
@@ -11696,6 +11722,22 @@ class Services:
     _INSTANTID_VRAM_GB = 8.0
     _INSTANTID_RAM_GB = 15.0
 
+    def resolve_persona(self, name: str) -> Any | None:
+        """A saved persona (avatar) by name — exact match first, then
+        case-insensitive, then prefix, so "use persona 'Mira'" finds the
+        profile saved as "Mira (test persona)"."""
+        low = (name or "").strip().lower()
+        if not low:
+            return None
+        avatars = self.store.list_avatars()
+        for a in avatars:
+            if (a.name or "").strip().lower() == low:
+                return a
+        for a in avatars:
+            if (a.name or "").strip().lower().startswith(low):
+                return a
+        return None
+
     def _identity_engine(self) -> dict[str, str]:
         """The best identity engine this machine can hold in memory."""
         hw = self.hardware
@@ -11828,10 +11870,30 @@ class Services:
         image_param = ("face" if "face" in template.get("parameters", {})
                        else "image")
 
+        # Persona renders must read as PHOTOGRAPHS. The plain SDXL base
+        # carries the telltale AI look; RealVisXL V5 is the photoreal-
+        # tuned class. Used whenever it is (or can be) on disk; the base
+        # remains the honest fallback, and templates without a
+        # checkpoint dial are left alone.
+        ckpt_file: str | None = None
+        if "checkpoint" in template.get("parameters", {}):
+            try:
+                if self.settings.auto_install:
+                    self._ensure_model("realvisxl-v5", job)
+                if self.registry.is_ready("realvisxl-v5"):
+                    ckpt_file = "RealVisXL_V5.0_fp16.safetensors"
+                    job.log("info", "Rendering on RealVisXL V5 — the "
+                                    "photoreal checkpoint — instead of "
+                                    "the plain SDXL base")
+            except Exception:  # noqa: BLE001 — the base still renders
+                ckpt_file = None
+
         def render_once(text: str, weight: float | None = None):
             params: dict[str, Any] = {
                 "prompt": text, image_param: image_name,
                 "seed": int.from_bytes(os.urandom(4), "big") & 0x7FFFFFFF}
+            if ckpt_file is not None:
+                params["checkpoint"] = ckpt_file
             # Only InstantID's template exposes a face-lock weight;
             # PhotoMaker's has no such dial.
             if weight is not None and "weight" in template.get(

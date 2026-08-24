@@ -167,6 +167,34 @@ export function Studio({ incoming, onConsumed, onBusy }: PanelProps = {}) {
       pollRef.current?.();
       pollRef.current = pollJob(created.id, setJob, 700);
     } catch (e) {
+      // "make a persona from this image": the backend never creates a
+      // persona without an explicit consent attestation — collect it
+      // here and retry, so the typed prompt still works end to end.
+      if (
+        (e as { code?: string }).code === "persona_consent_required" &&
+        window.confirm(
+          "Creating a persona stores this person's likeness for reuse.\n\n" +
+            "Confirm that the person depicted has given explicit consent " +
+            "(or that the image is not of a real person).",
+        )
+      ) {
+        try {
+          const created = await api.createEdit(
+            asset.id,
+            prompt,
+            userMask ?? undefined,
+            reference ? [reference.id] : undefined,
+            true,
+          );
+          setJob(created);
+          pollRef.current?.();
+          pollRef.current = pollJob(created.id, setJob, 700);
+          return;
+        } catch (e2) {
+          setError((e2 as Error).message);
+          return;
+        }
+      }
       setError((e as Error).message);
     }
   };

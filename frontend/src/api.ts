@@ -54,15 +54,29 @@ export interface PeerStatus {
   auto_update?: boolean;
 }
 
+/** An HTTP error that keeps the backend's machine-readable code, so the
+    UI can react to specific conditions (e.g. persona_consent_required
+    opens the consent confirmation) instead of string-matching prose. */
+export class ApiError extends Error {
+  code?: string;
+  constructor(message: string, code?: string) {
+    super(message);
+    this.code = code;
+  }
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const resp = await fetch(path, init);
   const body = await resp.json().catch(() => null);
   if (!resp.ok) {
-    const message =
+    const err =
       body && typeof body === "object" && "error" in body
-        ? (body as { error: { message: string } }).error.message
-        : `Request failed (${resp.status})`;
-    throw new Error(message);
+        ? (body as { error: { code?: string; message: string } }).error
+        : null;
+    throw new ApiError(
+      err?.message ?? `Request failed (${resp.status})`,
+      err?.code,
+    );
   }
   return body as T;
 }
@@ -135,6 +149,10 @@ export const api = {
     prompt: string,
     maskB64?: string,
     referenceAssetIds?: string[],
+    // "make a persona from this image" needs an explicit consent
+    // attestation; the backend answers persona_consent_required until
+    // the user confirms and this rides the retry.
+    personaConsent?: boolean,
   ) =>
     request<Job>(
       "/api/edits",
@@ -147,6 +165,7 @@ export const api = {
         reference_asset_ids: referenceAssetIds?.length
           ? referenceAssetIds
           : undefined,
+        consent: personaConsent || undefined,
       }),
     ),
 

@@ -410,6 +410,44 @@ def create_app(services: Services | None = None) -> Flask:
             return _error(422, f"safety_{verdict.category}", verdict.reason or "Blocked.")
         if services.store.get_asset(asset_id) is None:
             return _error(404, "not_found", "Asset not found.")
+        # Personas ride the same prompt box. "use persona 'Mira': ..." is
+        # an identity RENDER of a saved persona (checked first — "make the
+        # persona 'Mira' smile" is a use, not a creation); "make a persona
+        # from this image" is a CREATION, which never proceeds without the
+        # same explicit consent attestation the Personas page collects.
+        use = quality.persona_use_request(prompt)
+        if use is not None:
+            persona_name, scene = use
+            avatar = services.resolve_persona(persona_name)
+            if avatar is None:
+                known = ", ".join(
+                    f"'{a.name}'" for a in services.store.list_avatars()
+                    if a.name) or "none saved yet"
+                return _error(404, "persona_not_found",
+                              f"No persona named '{persona_name}'. Saved "
+                              f"personas: {known}.")
+            if not scene:
+                return _error(400, "missing_field",
+                              "Describe the scene to render the persona "
+                              "into (e.g. \"use persona 'Mira': hiking a "
+                              "mountain trail\").")
+            render_payload: dict = {"avatar_id": avatar.id, "prompt": scene}
+            _take_device(render_payload, body)
+            job = services.queue.enqueue("avatar_render", render_payload)
+            return jsonify(job.to_dict()), 202
+        if quality.persona_create_intent(prompt):
+            consent = consent_verdict(bool(body.get("consent")))
+            if not consent.allowed:
+                return _error(422, "persona_consent_required",
+                              "Creating a persona needs an explicit consent "
+                              "attestation for the person depicted. Confirm "
+                              "consent and retry, or use the Personas page.")
+            avatar_payload: dict = {
+                "asset_ids": [asset_id], "consent": True,
+                "name": (body.get("persona_name") or "").strip() or None}
+            _take_device(avatar_payload, body)
+            job = services.queue.enqueue("avatar", avatar_payload)
+            return jsonify(job.to_dict()), 202
         payload = {"asset_id": asset_id, "prompt": prompt}
         if body.get("mask_b64"):
             payload["mask_b64"] = body["mask_b64"]

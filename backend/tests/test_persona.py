@@ -68,6 +68,17 @@ class IdentityMeasurementTests(unittest.TestCase):
         src = inspect.getsource(Services._handle_avatar_render)
         self.assertIn('"weight" in template.get(', src)
 
+    def test_photoreal_checkpoint_rides_the_dial_when_ready(self):
+        # "Cannot tell it's AI" starts at the checkpoint: the plain SDXL
+        # base has the telltale AI look. RealVisXL is used when ready and
+        # the base stays the honest fallback.
+        src = inspect.getsource(Services._handle_avatar_render)
+        self.assertIn('"RealVisXL_V5.0_fp16.safetensors"', src)
+        self.assertIn('"checkpoint" in template.get(', src)
+        from app.core.services import DEFAULT_MODELS as models
+        info = next(m for m in models if m.name == "realvisxl-v5")
+        self.assertTrue(info.sha256)
+
     def test_each_template_gets_its_own_reference_param_and_trigger(self):
         # Both hid behind the 12 GB paper gate until it fell: the handler
         # passed PhotoMaker's "image" name to InstantID's "face" parameter
@@ -76,6 +87,132 @@ class IdentityMeasurementTests(unittest.TestCase):
         src = inspect.getsource(Services._handle_avatar_render)
         self.assertIn('"face" if "face" in template.get(', src)
         self.assertIn('if engine["template"] == "identity"', src)
+
+
+class PersonaIntentTests(unittest.TestCase):
+    """The prompt box speaks persona: 'use persona X' renders one,
+    'make a persona from this image' creates one (consent-gated)."""
+
+    def test_use_requests_parse_name_and_scene(self):
+        from app.core.quality import persona_use_request
+        self.assertEqual(
+            persona_use_request("use persona 'Mira': hiking a trail"),
+            ("Mira", "hiking a trail"))
+        self.assertEqual(
+            persona_use_request('generate the persona "Mira B" at a cafe'),
+            ("Mira B", "at a cafe"))
+        self.assertEqual(
+            persona_use_request("persona Mira walking on a beach"),
+            ("Mira", "walking on a beach"))
+        # a USE outranks its own creation verbs
+        name, scene = persona_use_request("show the persona 'Mira' smiling")
+        self.assertEqual(name, "Mira")
+        self.assertIsNone(persona_use_request("remove the tree"))
+        self.assertIsNone(
+            persona_use_request("make a persona from this image"))
+
+    def test_create_intent_table(self):
+        from app.core.quality import persona_create_intent
+        for yes in ("make a persona from this image",
+                    "create a persona of her",
+                    "save this as a persona",
+                    "build a persona from my photo"):
+            self.assertTrue(persona_create_intent(yes), yes)
+        for no in ("use persona 'Mira': on a beach",
+                   "remove the background",
+                   "put her in a nightclub"):
+            self.assertFalse(persona_create_intent(no), no)
+
+    def test_resolve_persona_matches_exact_case_and_prefix(self):
+        from types import SimpleNamespace
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        s = Services(Settings(
+            data_dir=Path(tmp.name), inpaint_backend="mock",
+            segment_backend="mock", critic_model="", first_run_setup=False,
+            comfyui_dir=""))
+        self.addCleanup(s.stop)
+        s.store.list_avatars = lambda: [
+            SimpleNamespace(name="Mira (test persona)", id="a1"),
+            SimpleNamespace(name="Bob", id="a2")]
+        self.assertEqual(s.resolve_persona("bob").id, "a2")
+        self.assertEqual(s.resolve_persona("Mira").id, "a1")
+        self.assertEqual(s.resolve_persona("MIRA (TEST PERSONA)").id, "a1")
+        self.assertIsNone(s.resolve_persona("Zoe"))
+        self.assertIsNone(s.resolve_persona(""))
+
+
+class PersonaRouteTests(unittest.TestCase):
+    """The /api/edits prompt box routes personas end to end."""
+
+    def setUp(self):
+        import io as _io
+
+        from PIL import Image as _Image
+
+        from app.api.routes import create_app
+        self.tmp = tempfile.TemporaryDirectory()
+        self.s = Services(Settings(
+            data_dir=Path(self.tmp.name), inpaint_backend="mock",
+            segment_backend="mock", llm_url="http://127.0.0.1:9/v1",
+            critic_model="", first_run_setup=False, comfyui_dir=""))
+        app = create_app(self.s)
+        app.testing = True
+        self.client = app.test_client()
+        buf = _io.BytesIO()
+        _Image.new("RGB", (64, 64), (90, 90, 90)).save(buf, format="PNG")
+        resp = self.client.post("/api/assets", data={
+            "file": (_io.BytesIO(buf.getvalue()), "p.png")})
+        self.asset_id = resp.get_json()["id"]
+
+    def tearDown(self):
+        self.s.stop()
+        self.tmp.cleanup()
+
+    def test_use_routes_to_an_identity_render(self):
+        from types import SimpleNamespace
+        self.s.store.list_avatars = lambda: [
+            SimpleNamespace(name="Mira", id="av9")]
+        resp = self.client.post("/api/edits", json={
+            "asset_id": self.asset_id,
+            "prompt": "use persona 'Mira': hiking a mountain trail"})
+        self.assertEqual(resp.status_code, 202)
+        job = resp.get_json()
+        self.assertEqual(job["type"], "avatar_render")
+        self.assertEqual(job["payload"]["avatar_id"], "av9")
+        self.assertEqual(job["payload"]["prompt"],
+                         "hiking a mountain trail")
+
+    def test_unknown_persona_names_the_saved_ones(self):
+        from types import SimpleNamespace
+        self.s.store.list_avatars = lambda: [
+            SimpleNamespace(name="Mira", id="av9")]
+        resp = self.client.post("/api/edits", json={
+            "asset_id": self.asset_id,
+            "prompt": "use persona 'Zoe': at the beach"})
+        self.assertEqual(resp.status_code, 404)
+        body = resp.get_json()["error"]
+        self.assertEqual(body["code"], "persona_not_found")
+        self.assertIn("'Mira'", body["message"])
+
+    def test_creation_never_proceeds_without_consent(self):
+        resp = self.client.post("/api/edits", json={
+            "asset_id": self.asset_id,
+            "prompt": "make a persona from this image"})
+        self.assertEqual(resp.status_code, 422)
+        self.assertEqual(resp.get_json()["error"]["code"],
+                         "persona_consent_required")
+
+    def test_creation_with_consent_enqueues_the_intake(self):
+        resp = self.client.post("/api/edits", json={
+            "asset_id": self.asset_id,
+            "prompt": "make a persona from this image",
+            "consent": True, "persona_name": "Test P"})
+        self.assertEqual(resp.status_code, 202)
+        job = resp.get_json()
+        self.assertEqual(job["type"], "avatar")
+        self.assertEqual(job["payload"]["asset_ids"], [self.asset_id])
+        self.assertTrue(job["payload"]["consent"])
 
 
 if __name__ == "__main__":

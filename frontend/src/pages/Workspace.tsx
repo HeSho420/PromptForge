@@ -46,8 +46,8 @@ const MODES: { key: Mode; label: string; hint: string; icon: string }[] = [
   },
   {
     key: "avatar",
-    label: "Build an avatar",
-    hint: "Several photos of one person, from every side",
+    label: "Personas",
+    hint: "Save a person once, render them anywhere — consistently",
     icon: "M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8 M4 21c0-4 3.6-6.5 8-6.5s8 2.5 8 6.5",
   },
 ];

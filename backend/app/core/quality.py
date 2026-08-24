@@ -2993,6 +2993,45 @@ def restore_intent(text: str) -> bool:
     return bool(_RESTORE_INTENT.search(text or ""))
 
 
+# "use persona 'Mira': hiking a mountain trail" — an identity RENDER of a
+# saved persona. Quoted names may hold anything but a quote; bare names
+# are one token. Checked BEFORE the create intent at the route: "make the
+# persona 'Mira' smile" is a use, not a creation.
+_PERSONA_USE = re.compile(
+    r"(?:\b(?:use|using|with|featuring|show|render|generate|as)\s+"
+    r"(?:the\s+)?|^\s*)persona\s+"
+    r"(?:['\"‘’“”](?P<q>[^'\"‘’“”]{1,60})"
+    r"['\"‘’“”]|(?P<w>[A-Za-z0-9][\w-]{0,39}))",
+    re.IGNORECASE)
+
+# "make a persona from this image" — a creation. The verb list is
+# deliberately small; anything naming a persona VERB-lessly stays an
+# ordinary edit.
+_PERSONA_CREATE = re.compile(
+    r"\b(?:make|create|build|save|turn)\b[^.!?]{0,40}?\bpersona\b"
+    r"|\bpersona\s+(?:of|from)\s+(?:this|that|the|her|him|me|my)\b",
+    re.IGNORECASE)
+
+
+def persona_use_request(text: str) -> tuple[str, str] | None:
+    """(persona name, the prompt without the persona clause), or None."""
+    m = _PERSONA_USE.search(text or "")
+    if not m:
+        return None
+    name = (m.group("q") or m.group("w") or "").strip()
+    if not name:
+        return None
+    rest = ((text or "")[:m.start()] + " " + (text or "")[m.end():]).strip()
+    rest = re.sub(r"^[\s:,\-–—]+", "", rest).strip()
+    return name, rest
+
+
+def persona_create_intent(text: str) -> bool:
+    """'Make a persona from this image' — a creation, never a render."""
+    t = text or ""
+    return bool(_PERSONA_CREATE.search(t)) and persona_use_request(t) is None
+
+
 def request_checklist(llm: LLMClient, prompt: str) -> list[dict[str, str]]:
     """The request as 1-4 independently checkable requirements, each with a
     NEUTRAL probe question and the answer that satisfies it.
