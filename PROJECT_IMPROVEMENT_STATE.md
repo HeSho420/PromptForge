@@ -747,6 +747,29 @@ never-mask-the-face rule). Do not "extend" it to image_edit.
   gave 3/4 portraits), Impact-Pack FaceDetailer polish pass measured,
   multi-reference personas (2+ photos), persona renders as env-
   pipeline inputs ("Mira in the nightclub").
+2026-08-24 — PERSONA 2 (the product surface: prompt-routed, consented,
+  photoreal): "use persona 'X': scene" in the ordinary edit box routes
+  to an identity render (resolve exact→ci→prefix; unknown name lists
+  the saved ones; USE checked before CREATE so "show the persona 'X'
+  smiling" renders). "make a persona from this image" routes to intake
+  behind the SAME consent attestation the page collects — API 422
+  persona_consent_required → Studio confirm dialog → retry with
+  consent (ApiError now carries the backend code). QUALITY: RealVisXL
+  V5.0 fp16 registered (OpenRAIL++, sha-verified, 6.9GB; MODEL_USAGE
+  teaching line; auto-installed via the registry live) as the identity
+  checkpoint wherever the template has the dial, SDXL-base honest
+  fallback — likeness 0.781→0.803 and the festival render passes
+  casual inspection. APPEARANCE FIX: 'distinctive' marks excluded from
+  render prompts (a left-arm tattoo grew into a sleeve / scattered
+  extras, eyeballed twice); A/B same prompt: strays gone, likeness
+  0.805 held. UI: Avatar page → Personas (gallery, consent intake,
+  per-render ArcFace identity badge with calibrated bands, use-persona
+  tip). E2E proofs: 422 without consent; typed "use persona 'Mira':
+  dancing at a summer festival" → avatar_render → RealVisXL →
+  identity 0.803 logged in-pipeline. 1075 tests; frontend rebuilt.
+  NOTE: registry re-downloaded RealVisXL despite the pre-placed
+  sha-correct file (is_ready trusts its own install record, not the
+  disk) — minor, ledgered.
 Candidates, roughly ranked (artifact focus first per 2026-08-18 mandate):
 - **Cycle 23 (0079083)** Outpaint glyph guard SHIPPED and live-proven.
   Detection calibrated on 16 real margins (per-row density of >40 grey
