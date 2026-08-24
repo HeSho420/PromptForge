@@ -2,8 +2,10 @@
  "template": "sketch_to_photo",
  "version": 1,
  "task": "img2img",
- "description": "Sketch/painting to photo: denoise 0.7 re-renders drawings as photographs while following their layout.",
- "required_models": [],
+ "description": "Sketch/painting to photo: denoise 0.7 re-renders drawings as photographs while following their layout. NOTE: nothing routes here today - Kontext handles the class (measured 2026-08-24: structure correlation 0.73 of a 0.87 upper bound, realism 95); this stays as the fallback for a machine without Kontext. The checkpoint MUST be a plain 4-channel SD1.5 base - the original pin to the 9-channel sd-v1-5-inpainting checkpoint could never have run as plain img2img.",
+ "required_models": [
+  "sd15-base"
+ ],
  "parameters": {
   "prompt": {
    "node": "3",
@@ -26,7 +28,7 @@
   "1": {
    "class_type": "CheckpointLoaderSimple",
    "inputs": {
-    "ckpt_name": "sd-v1-5-inpainting.safetensors"
+    "ckpt_name": "v1-5-pruned-emaonly.safetensors"
    }
   },
   "2": {

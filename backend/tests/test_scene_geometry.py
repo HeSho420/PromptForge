@@ -654,6 +654,36 @@ class StyleJudgingTests(unittest.TestCase):
                    "put her in a nightclub"):
             self.assertFalse(style_departure(no), no)
 
+    def test_a_photo_destination_is_not_a_style_departure(self):
+        # "sketch" names the SOURCE here — measured live: the delivered
+        # photo was judged as a deliberate style piece while verify
+        # false-missed "realistic photograph" twice.
+        from app.core.quality import photo_target, style_departure
+        for s in ("turn this sketch into a realistic photograph",
+                  "turn my drawing into a photo",
+                  "make this painting photorealistic"):
+            self.assertFalse(style_departure(s), s)
+            self.assertTrue(photo_target(s), s)
+        # ...and a photographic SOURCE keeps its style departure.
+        self.assertTrue(style_departure(
+            "turn this photo into a watercolor painting"))
+        self.assertFalse(photo_target("remove the car"))
+
+    def test_photo_target_checklist_is_deterministic(self):
+        # The 7B built "Was a sketch turned into a photo?" — unanswerable
+        # from one image — and answered "Is the image photorealistic?"
+        # with "no" on a delivered photo. Both burned a Kontext re-render.
+        from app.core import quality
+        checks = quality.request_checklist(
+            object(), "turn this sketch into a realistic photograph")
+        self.assertEqual(len(checks), 1)
+        self.assertEqual(checks[0]["expect"], "photograph")
+        self.assertIn("photograph or a drawing", checks[0]["probe"])
+        self.assertTrue(quality.answer_satisfies(
+            "It is a photograph.", checks[0]["expect"]))
+        self.assertFalse(quality.answer_satisfies(
+            "A drawing.", checks[0]["expect"]))
+
     def test_scorecard_uses_the_art_frame_for_styles(self):
         from app.core import quality
         rec: list[str] = []
@@ -683,6 +713,17 @@ class StyleJudgingTests(unittest.TestCase):
              if "softer" in f], [])
         self.assertTrue(any("grain" in f for f in objective_flags(
             {"sharpness_ratio": 9.0}, "img2img", style=True)))
+
+    def test_soft_flag_skipped_for_medium_shifts(self):
+        # A pencil sketch's stroke texture out-measures any photograph:
+        # 0.12x flagged on a DELIVERED sketch-to-photo success.
+        from app.core.quality import objective_flags
+        rep = {"sharpness_ratio": 0.12}
+        self.assertEqual(
+            [f for f in objective_flags(rep, "kontext", medium_shift=True)
+             if "softer" in f], [])
+        self.assertTrue(any("softer" in f
+                            for f in objective_flags(rep, "kontext")))
 
     def test_soft_flag_skipped_for_background_swaps_grain_kept(self):
         # A background swap re-authors the frame: a dim bar against a

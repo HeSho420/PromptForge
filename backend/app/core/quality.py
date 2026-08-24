@@ -1855,25 +1855,57 @@ _STYLE_MEDIA = re.compile(
     re.IGNORECASE)
 
 
+# The request's DESTINATION is a photograph — "turn this sketch into a
+# realistic photograph" names a medium ("sketch") as the SOURCE, and
+# judging the result as a deliberate style piece is backwards (measured
+# live: a delivered photo scored under the art frame while verify
+# false-missed "realistic photograph" twice, burning a Kontext retry).
+_PHOTO_TARGET = re.compile(
+    r"\b(?:into|to|as)\s+(?:an?\s+)?(?:realistic\s+|real\s+|actual\s+)?"
+    r"photo(?:graph)?s?\b"
+    r"|\bphotorealistic\b"
+    r"|\bmake\s+(?:it|this)\s+(?:look\s+like\s+)?(?:a\s+)?(?:real\s+)?"
+    r"photo(?:graph)?\b",
+    re.IGNORECASE)
+
+
+def photo_target(text: str) -> bool:
+    """Does the request name a PHOTOGRAPH as its destination?"""
+    return bool(_PHOTO_TARGET.search(text or ""))
+
+
 def style_departure(text: str) -> bool:
-    """Does the request ask for a non-photographic medium or art style?"""
-    return bool(_STYLE_MEDIA.search(text or ""))
+    """Does the request ask for a non-photographic medium or art style?
+
+    A medium word can also name the SOURCE: "turn this sketch into a
+    realistic photograph" departs from the sketch, not from photography —
+    the photographic frame is exactly the right one to judge it in."""
+    text = text or ""
+    if _PHOTO_TARGET.search(text):
+        return False
+    return bool(_STYLE_MEDIA.search(text))
 
 
 def objective_flags(report: dict[str, Any], task: str = "inpaint",
-                    style: bool = False) -> list[str]:
+                    style: bool = False,
+                    medium_shift: bool = False) -> list[str]:
     """Out-of-range objective measurements, as human sentences. Empty means
     the arithmetic found nothing wrong — it says nothing about whether the
     edit matched the request. `style`: the request asked for a painting /
     drawing / other non-photographic medium, so softness IS the point and
-    only the grain ceiling still applies."""
+    only the grain ceiling still applies. `medium_shift`: the request's
+    DESTINATION is a photograph and its input was another medium — a
+    pencil sketch's stroke texture out-measures any photograph (0.12x on
+    a delivered success), so the softness comparison is content change,
+    not softening."""
     flags: list[str] = []
     ratio = report.get("sharpness_ratio")
     if task != "upscale" and isinstance(ratio, int | float):
         if ratio > GRAIN_RATIO_MAX:
             flags.append(f"heavy grain or noise covers the render "
                          f"(sharpness {ratio:.1f}x the input)")
-        elif ratio < SOFT_RATIO_MIN and not style and task != "background":
+        elif (ratio < SOFT_RATIO_MIN and not style and not medium_shift
+                and task != "background"):
             # A background swap re-authors the whole frame, so the ratio
             # compares DIFFERENT content — a dim bar against a sparkly
             # beach measured 0.11-0.32x on renders whose kept subject was
@@ -2988,6 +3020,19 @@ def request_checklist(llm: LLMClient, prompt: str) -> list[dict[str, str]]:
                           "blotches, tears or heavy fading? Answer yes "
                           "or no.",
                  "expect": "no"}]
+    if photo_target(prompt):
+        # Same class of failure, other direction: for "turn this sketch
+        # into a realistic photograph" the 7B built "Was a sketch turned
+        # into a photo?" — unanswerable from one image (the examiner
+        # cannot see what it was turned FROM; the provenance lesson
+        # again) — and "Is the image photorealistic?", which it answered
+        # "no" on a delivered photo. Both landed missing and burned a
+        # Kontext re-render. A categorical either/or question is the
+        # measured-reliable probe class (daytime-or-nighttime: 25/27).
+        return [{"need": "a photographic result",
+                 "probe": "Is this image a photograph or a drawing? "
+                          "Answer with one word.",
+                 "expect": "photograph"}]
     try:
         reply = llm.complete(_CHECKLIST_SYSTEM, f"Request: {prompt}",
                              max_tokens=400)

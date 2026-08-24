@@ -3855,9 +3855,10 @@ class Services:
                 objective = quality.objective_report(
                     final_input, current,
                     last_mask if last_step["task"] == "inpaint" else None)
-                obj_flags = quality.objective_flags(objective,
-                                                    last_step["task"],
-                                                    style=style_edit)
+                obj_flags = quality.objective_flags(
+                    objective, last_step["task"], style=style_edit,
+                    medium_shift=quality.photo_target(
+                        last_step.get("instruction") or ""))
                 if vacated is not None and vacated < 0.05:
                     obj_flags.append("the repose vacated only "
                                      f"{vacated * 100:.1f}% of the frame — "
