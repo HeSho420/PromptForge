@@ -2,7 +2,7 @@
  "template": "identity_face",
  "version": 1,
  "task": "identity",
- "description": "InstantID: carry a person's face from ONE reference photo into a new SDXL render. Consent-gated in the pipeline, like every identity feature here. ApplyInstantID returns THREE outputs in order - model, positive, negative - and the sampler must take all three from it, not from the original checkpoint or the raw text encoders. weight ~0.8 is the usual balance; higher locks the face harder but flattens expression and pose. HEAVY: SDXL 6.9 GB + the 1.7 GB adapter + the 2.5 GB ControlNet must be resident together, so the registry gates both InstantID models at 12 GB VRAM / 24 GB RAM. On smaller machines the pipeline falls back to the PhotoMaker identity template instead, which is weaker but fits.",
+ "description": "InstantID: carry a person's face from ONE reference photo into a new SDXL render. Consent-gated in the pipeline, like every identity feature here. ApplyInstantID returns THREE outputs in order - model, positive, negative - and the sampler must take all three from it, not from the original checkpoint or the raw text encoders. weight ~0.8 is the usual balance; higher locks the face harder but flattens expression and pose. HEAVY but measured survivable on 8 GB VRAM / 15.7 GB RAM under ComfyUI 0.28's weight streaming (2026-08-24: 1024 render in 260 s, ArcFace likeness 0.781 vs PhotoMaker's 0.213 on the same prompt) - the registry gates now state that measured floor. Machines below it fall back to the PhotoMaker identity template, which is weaker but fits.",
  "required_models": [
   "sdxl-base",
   "instantid-ipadapter",

@@ -456,11 +456,14 @@ DEFAULT_MODELS = [
         # gate is opened deliberately here, exactly as it is for Meta's SAM.
         meta={"folder": "instantid", "file": "ip-adapter.bin",
               "allow_pickle": True, "requires_pack": "instantid",
-              # SDXL 6.9 GB + this 1.7 GB + the 2.5 GB ControlNet = 11.1 GB
-              # of weights that must be resident together. Measured on the
-              # 8 GB / 16 GB dev machine: not survivable. Gated like Kontext,
-              # so it auto-stages and runs on a bigger machine instead.
-              "min_vram_gb": 12.0, "min_ram_gb": 24.0,
+              # SDXL 6.9 GB + this 1.7 GB + the 2.5 GB ControlNet. Measured
+              # NOT survivable on the 8 GB / 16 GB dev machine under ComfyUI
+              # 0.3.x — and RE-MEASURED SURVIVABLE on the same machine under
+              # ComfyUI 0.28 (2026-08-24): 1024² render in 260 s via weight
+              # streaming, ArcFace likeness 0.781 vs PhotoMaker's 0.213 on
+              # the identical prompt. The gate now states the measured
+              # floor, not the sum of file sizes.
+              "min_vram_gb": 8.0, "min_ram_gb": 15.0,
               "size_bytes": 1691134141},
     ),
     ModelInfo(
@@ -473,8 +476,10 @@ DEFAULT_MODELS = [
         sha256="c8127be9f174101ebdafee9964d856b49b634435cf6daa396d3f593cf0bbbb05",
         vram_gb=6.0,
         meta={"folder": "controlnet", "file": "instantid_controlnet.safetensors",
-              "requires_pack": "instantid", "min_vram_gb": 12.0,
-              "min_ram_gb": 24.0, "size_bytes": 2502139136},
+              # Same re-measurement as the adapter above (2026-08-24):
+              # survivable on 8 GB VRAM / 15.7 GB RAM under ComfyUI 0.28.
+              "requires_pack": "instantid", "min_vram_gb": 8.0,
+              "min_ram_gb": 15.0, "size_bytes": 2502139136},
     ),
     # ---- IC-Light relighting (SD1.5-based; used via the ic-light pack) -----
     ModelInfo(
@@ -11682,8 +11687,14 @@ class Services:
     # needs SDXL + adapter + ControlNet resident at once (~11.1 GB), so it is
     # gated on hardware exactly like the 3D tiers. Its template shipped in the
     # repo but nothing ever loaded it; this is where it earns its place.
-    _INSTANTID_VRAM_GB = 12.0
-    _INSTANTID_RAM_GB = 24.0
+    # Measured floors, not file-size sums: under ComfyUI 0.28's weight
+    # streaming the full InstantID stack renders 1024² in 260 s on the
+    # 8 GB / 15.7 GB dev machine (2026-08-24), where the old 12/24 paper
+    # gate had exiled it. The likeness gap is not close — ArcFace 0.781
+    # (InstantID) vs 0.213 (PhotoMaker, a generic look-alike) on the same
+    # prompt — so wherever InstantID fits, it wins the router.
+    _INSTANTID_VRAM_GB = 8.0
+    _INSTANTID_RAM_GB = 15.0
 
     def _identity_engine(self) -> dict[str, str]:
         """The best identity engine this machine can hold in memory."""
@@ -11692,12 +11703,58 @@ class Services:
                 and hw.ram_gb >= self._INSTANTID_RAM_GB
                 and self._pack_active("instantid")):
             return {"template": "identity_face",
-                    "why": "InstantID — strongest likeness, needs ~11 GB"}
+                    "why": "InstantID — strongest likeness (ArcFace 0.78 vs "
+                           "PhotoMaker's 0.21, measured on this machine)"}
         why = "SDXL + PhotoMaker"
         if hw:
             why += (f"; InstantID needs {self._INSTANTID_VRAM_GB:.0f} GB VRAM "
                     f"and this GPU has {hw.vram_gb:.0f}")
         return {"template": "identity", "why": why}
+
+    def _face_similarity(self, job: Job, reference: Image.Image,
+                         candidate: Image.Image) -> float | None:
+        """ArcFace cosine between the largest faces of two images, or None.
+
+        Runs app/tools/face_similarity.py in ComfyUI's OWN interpreter
+        (the InstantID pack installs insightface there; antelopev2 is
+        under ComfyUI's models dir). Best-effort by contract: an identity
+        RENDER without its measurement is still a render, so every
+        failure here degrades to None and a log line, never an error.
+        Calibrated on this machine: >=0.50 same person, 0.35-0.50
+        recognizable, <0.35 not the person."""
+        if self.settings.inpaint_backend == "mock":
+            return None
+        base = Path(self.settings.comfyui_dir) if self.settings.comfyui_dir \
+            else None
+        tool = Path(__file__).resolve().parent.parent / "tools" / \
+            "face_similarity.py"
+        if base is None or not base.exists() or not tool.exists():
+            return None
+        try:
+            python = self._comfy_python(base)
+        except Exception:  # noqa: BLE001 — measurement is optional
+            return None
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                ref_p = Path(tmp) / "ref.png"
+                cand_p = Path(tmp) / "cand.png"
+                reference.convert("RGB").save(ref_p, format="PNG")
+                candidate.convert("RGB").save(cand_p, format="PNG")
+                proc = subprocess.run(
+                    [python, str(tool), str(ref_p), str(cand_p),
+                     str(base / "models" / "insightface")],
+                    capture_output=True, text=True, timeout=180,
+                    check=False)
+            line = (proc.stdout or "").strip().splitlines()
+            data = json.loads(line[-1]) if line else {}
+        except Exception as exc:  # noqa: BLE001
+            job.log("info", f"Identity measurement unavailable ({exc})")
+            return None
+        if "similarity" not in data:
+            job.log("info", "Identity measurement unavailable "
+                            f"({data.get('error') or 'no output'})")
+            return None
+        return float(data["similarity"])
 
     def _handle_avatar_render(self, job: Job) -> dict[str, Any]:
         """Identity render: put a consented avatar into a prompted scene.
@@ -11705,6 +11762,10 @@ class Services:
         PhotoMaker (ComfyUI core) encodes the avatar's face reference into
         SDXL conditioning; the critic judges realism with one strategy-change
         retry; optionally the result is animated with the WAN template.
+        Every render's likeness is MEASURED (ArcFace vs the reference) and
+        reported; an InstantID render that drifts below the recognizable
+        band buys one harder-locked retry (weight 0.95), and the better
+        measured likeness is kept.
         """
         p = job.payload
         avatar = self.store.get_avatar(p.get("avatar_id", ""))
@@ -11715,16 +11776,17 @@ class Services:
         if not prompt:
             raise PermanentError("A prompt is required.")
         self._require_comfy(job)
-        eta_models = ["sdxl-base", "photomaker-v1"]
-        if p.get("video"):
-            eta_models += ["wan22-ti2v-5b", "wan-umt5-xxl", "wan22-vae"]
-        self._log_eta(job, required_models=eta_models)
-
         engine = self._identity_engine()
         job.log("info", f"[stage] models — identity pipeline ({engine['why']})")
         # load_named handles both "identity" and the "identity_face"
         # variant; both declare the allowed task "identity".
         template = self.workflows.load_named(engine["template"])
+        # The ETA reads the ENGINE'S models — this used to always name
+        # PhotoMaker, wrong whenever InstantID is the one rendering.
+        eta_models = list(template.get("required_models", []))
+        if p.get("video"):
+            eta_models += ["wan22-ti2v-5b", "wan-umt5-xxl", "wan22-vae"]
+        self._log_eta(job, required_models=eta_models)
         if not self.settings.auto_install:
             missing = [m for m in template.get("required_models", [])
                        if not self.registry.is_ready(m)]
@@ -11743,20 +11805,39 @@ class Services:
         image_name = self._identity_reference(job, avatar, face_id)
 
         # 'photomaker' is the trigger token PhotoMakerEncode replaces with the
-        # identity embedding — it must directly follow the class word.
+        # identity embedding — it must directly follow the class word. It is
+        # PHOTOMAKER-ONLY: InstantID reads the face from its image input and
+        # the stray token is noise in its prompt (found the moment the
+        # engine gate stopped exiling InstantID).
         # The appearance read at intake steers build, colouring and age,
         # which a single face crop cannot carry on its own.
         look = self.appearance_phrase((avatar.meta or {}).get("appearance"))
-        positive = (f"photo of a person photomaker. {prompt}"
+        subject = ("photo of a person photomaker. "
+                   if engine["template"] == "identity"
+                   else "photo of a person. ")
+        positive = (f"{subject}{prompt}"
                     + (f", {look}" if look else "")
                     + ", photorealistic, natural skin texture, detailed face, "
                       "sharp focus")
         job.log("info", f"[llm] identity prompt: {positive}")
 
-        def render_once(text: str):
-            graph = build_workflow(template, {
-                "prompt": text, "image": image_name,
-                "seed": int.from_bytes(os.urandom(4), "big") & 0x7FFFFFFF})
+        # The reference-image parameter is named by each template: "image"
+        # (PhotoMaker) vs "face" (InstantID). Passing "image" to the
+        # InstantID template failed every render with "Template has no
+        # parameter 'image'" the moment the engine gate let it run.
+        image_param = ("face" if "face" in template.get("parameters", {})
+                       else "image")
+
+        def render_once(text: str, weight: float | None = None):
+            params: dict[str, Any] = {
+                "prompt": text, image_param: image_name,
+                "seed": int.from_bytes(os.urandom(4), "big") & 0x7FFFFFFF}
+            # Only InstantID's template exposes a face-lock weight;
+            # PhotoMaker's has no such dial.
+            if weight is not None and "weight" in template.get(
+                    "parameters", {}):
+                params["weight"] = weight
+            graph = build_workflow(template, params)
             self._free_vram(job)
             try:
                 prompt_id = self.comfy.submit(graph)
@@ -11795,6 +11876,43 @@ class Services:
             else:
                 job.log("info", "Retry discarded; keeping the first render")
 
+        # The measurement the whole persona promise rests on: is this THE
+        # person, by arithmetic rather than by a judge's impression?
+        # Calibrated bands (this machine): >=0.50 same person, 0.35-0.50
+        # recognizable, <0.35 not the person.
+        identity_match: float | None = None
+        try:
+            reference_img = self.open_asset_image(face_id)
+        except Exception:  # noqa: BLE001 — the render still ships
+            reference_img = None
+        if reference_img is not None:
+            identity_match = self._face_similarity(job, reference_img, image)
+        if identity_match is not None:
+            band = ("the same person" if identity_match >= 0.5
+                    else "recognizable" if identity_match >= 0.35
+                    else "NOT this person")
+            job.log("info", f"[stage] identity — ArcFace likeness "
+                            f"{identity_match:.2f}: {band} "
+                            "(same-person band ≥ 0.50)")
+            if (identity_match < 0.35
+                    and engine["template"] == "identity_face"):
+                job.log("info", "[stage] retry — likeness drifted below "
+                                "the recognizable band; locking the face "
+                                "harder (weight 0.95)")
+                image3, pid3 = render_once(positive, weight=0.95)
+                sim3 = self._face_similarity(job, reference_img, image3)
+                if sim3 is not None and sim3 > identity_match:
+                    job.log("info", f"Harder lock kept ({sim3:.2f} > "
+                                    f"{identity_match:.2f})")
+                    image, prompt_id, identity_match = image3, pid3, sim3
+                else:
+                    job.log("info", "Harder lock did not improve the "
+                                    "likeness; keeping the first render")
+            elif identity_match < 0.35:
+                job.log("info", "The PhotoMaker engine has no face-lock "
+                                "dial to turn — InstantID (more VRAM) is "
+                                "the engine that fixes this class")
+
         job.log("info", "[stage] save — storing the render")
         buf = io.BytesIO()
         image.save(buf, format="PNG")
@@ -11803,7 +11921,9 @@ class Services:
         result: dict[str, Any] = {
             "asset_id": asset.id, "avatar_id": avatar.id,
             "prompt_id": prompt_id,
-            "realism": crit.score if crit else None}
+            "realism": crit.score if crit else None,
+            "identity_match": (round(identity_match, 3)
+                               if identity_match is not None else None)}
 
         if p.get("video"):
             job.log("info", "[stage] animate — bringing the render to life")
