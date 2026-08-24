@@ -79,6 +79,18 @@ class IdentityMeasurementTests(unittest.TestCase):
         info = next(m for m in models if m.name == "realvisxl-v5")
         self.assertTrue(info.sha256)
 
+    def test_the_persona_polish_stays_removed_by_measurement(self):
+        # Measured twice: FaceDetailer at 0.45 denoise sharpened the face
+        # out of her likeness (ArcFace 0.84 -> 0.62); at 0.25 it measured
+        # zero critic gain, -0.03 likeness, and 5:22 of render time.
+        # Persona renders are portrait-scale - the detailer exists for
+        # small mushy faces in full-body shots, and the generate path
+        # keeps it. A future polish must carry InstantID conditioning
+        # into the detailer graph and beat both referees.
+        src = inspect.getsource(Services._handle_avatar_render)
+        self.assertNotIn("self._face_polish(", src)
+        self.assertIn("REMOVED the same day", src)
+
     def test_each_template_gets_its_own_reference_param_and_trigger(self):
         # Both hid behind the 12 GB paper gate until it fell: the handler
         # passed PhotoMaker's "image" name to InstantID's "face" parameter

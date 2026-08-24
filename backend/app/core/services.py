@@ -4319,7 +4319,8 @@ class Services:
             return {"queued": False, "error": "queueing failed"}
 
     def _face_polish(self, job: Job, image: Image.Image, prompt: str,
-                     checkpoint: str | None = None) -> Image.Image | None:
+                     checkpoint: str | None = None,
+                     denoise: float | None = None) -> Image.Image | None:
         """FaceDetailer pass over a finished render — the mushy-face fix.
 
         Every detected face is re-rendered at guide resolution and blended
@@ -4352,12 +4353,18 @@ class Services:
                 return None
             job.log("info", "[stage] faces — refining every detected face "
                             "at native resolution")
-            graph = build_workflow(template, {
+            polish_params: dict[str, Any] = {
                 "image": self.comfy.upload_image(image, "facedetail_src"),
                 "checkpoint": ckpt,
                 "prompt": (prompt or "")[:300] or "detailed natural face",
                 "seed": int.from_bytes(os.urandom(4), "big") & 0x7FFFFFFF,
-            })
+            }
+            # The template default (0.45) suits anonymous faces; identity
+            # renders pass a gentler value — measured: 0.45 sharpened a
+            # persona's face out of her likeness (ArcFace 0.84 → 0.62).
+            if denoise is not None:
+                polish_params["denoise"] = denoise
+            graph = build_workflow(template, polish_params)
             polished, _pid = self.comfy.run_graph(graph)
             if polished.size != image.size:
                 return None
@@ -11974,6 +11981,18 @@ class Services:
                 job.log("info", "The PhotoMaker engine has no face-lock "
                                 "dial to turn — InstantID (more VRAM) is "
                                 "the engine that fixes this class")
+
+        # NOTE (measured 2026-08-25, then REMOVED the same day): a
+        # FaceDetailer polish pass ran here, refereed by the ArcFace gate.
+        # At the template's 0.45 denoise it sharpened the face out of her
+        # likeness (0.84 → 0.62, gate-rejected); at a gentle 0.25 it
+        # measured ZERO critic gain (9 vs 9), −0.03 likeness, and 5:22 of
+        # render time on this card. Persona renders are portrait-scale —
+        # the face is already large and crisp under InstantID+RealVisXL —
+        # where the detailer's purpose is small mushy faces in full-body
+        # and group shots. The generate path keeps its polish; personas
+        # ship unpolished. If a polish returns here, it must bring InstantID
+        # conditioning into the detailer graph and beat BOTH referees.
 
         job.log("info", "[stage] save — storing the render")
         buf = io.BytesIO()
