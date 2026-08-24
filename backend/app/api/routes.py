@@ -442,11 +442,14 @@ def create_app(services: Services | None = None) -> Flask:
                               "Creating a persona needs an explicit consent "
                               "attestation for the person depicted. Confirm "
                               "consent and retry, or use the Personas page.")
-            avatar_payload: dict = {
+            persona_payload: dict = {
                 "asset_ids": [asset_id], "consent": True,
                 "name": (body.get("persona_name") or "").strip() or None}
-            _take_device(avatar_payload, body)
-            job = services.queue.enqueue("avatar", avatar_payload)
+            _take_device(persona_payload, body)
+            # The 2D persona intake (~a minute), NOT the 3D avatar build:
+            # a typed "make a persona" wants the character card, not a
+            # rigged mesh.
+            job = services.queue.enqueue("persona", persona_payload)
             return jsonify(job.to_dict()), 202
         payload = {"asset_id": asset_id, "prompt": prompt}
         if body.get("mask_b64"):
@@ -504,7 +507,67 @@ def create_app(services: Services | None = None) -> Flask:
 
     @api.get("/avatars")
     def list_avatars():
-        return jsonify([a.to_dict() for a in services.store.list_avatars()])
+        # 3D rigged characters only — 2D personas have their own surface.
+        return jsonify([a.to_dict() for a in services.store.list_avatars()
+                        if (a.meta or {}).get("kind") != "persona"])
+
+    # -- personas: 2D digital people for consistent image generation ------------
+    # An avatar is a 3D rigged character built from photos; a persona is
+    # the 2D character card — name, appearance, face reference — created
+    # in about a minute and rendered with the identity pipeline.
+    @api.post("/personas")
+    def create_persona():
+        body = request.get_json(silent=True) or {}
+        asset_ids = body.get("asset_ids") or []
+        if not isinstance(asset_ids, list) or not asset_ids:
+            return _error(400, "missing_field", "asset_ids (list) is required.")
+        consent = consent_verdict(bool(body.get("consent")))
+        if not consent.allowed:
+            return _error(422, "consent_required", consent.reason or "Blocked.")
+        for aid in asset_ids:
+            if services.store.get_asset(aid) is None:
+                return _error(404, "not_found", f"Asset {aid} not found.")
+        payload: dict = {"asset_ids": asset_ids, "consent": True,
+                         "name": (body.get("name") or "").strip() or None}
+        _take_device(payload, body)
+        job = services.queue.enqueue("persona", payload)
+        return jsonify(job.to_dict()), 202
+
+    @api.get("/personas")
+    def list_personas():
+        return jsonify([a.to_dict() for a in services.store.list_avatars()
+                        if (a.meta or {}).get("kind") == "persona"])
+
+    @api.delete("/personas/<persona_id>")
+    def delete_persona(persona_id: str):
+        profile = services.store.get_avatar(persona_id)
+        if profile is None or (profile.meta or {}).get("kind") != "persona":
+            return _error(404, "not_found", "Persona not found.")
+        services.store.delete_avatar(persona_id)
+        services.events.log("info", f"Persona '{profile.name}' deleted")
+        return jsonify({"deleted": persona_id})
+
+    @api.post("/personas/<persona_id>/render")
+    def render_persona(persona_id: str):
+        """Identity render of a saved persona — same engine and safety
+        rules as avatar renders (the profiles share a store)."""
+        profile = services.store.get_avatar(persona_id)
+        if profile is None or (profile.meta or {}).get("kind") != "persona":
+            return _error(404, "not_found", "Persona not found.")
+        body = request.get_json(silent=True) or {}
+        prompt = (body.get("prompt") or "").strip()
+        if not prompt:
+            return _error(400, "missing_field", "prompt is required.")
+        verdict = services.safety.check(prompt, editing=True)
+        if not verdict.allowed:
+            log.warning("Safety block (persona render): category=%s",
+                        verdict.category)
+            return _error(422, f"safety_{verdict.category}",
+                          verdict.reason or "Blocked.")
+        payload: dict = {"avatar_id": persona_id, "prompt": prompt}
+        _take_device(payload, body)
+        job = services.queue.enqueue("avatar_render", payload)
+        return jsonify(job.to_dict()), 202
 
     @api.delete("/avatars/<avatar_id>")
     def delete_avatar(avatar_id: str):

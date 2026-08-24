@@ -1270,6 +1270,7 @@ class Services:
         self.queue.register("video", self._handle_video)
         self.queue.register("motion_transfer", self._handle_motion_transfer)
         self.queue.register("avatar", self._handle_avatar)
+        self.queue.register("persona", self._handle_persona)
         self.queue.register("avatar_render", self._handle_avatar_render)
         self.queue.register("setup", self._handle_setup)
         self.queue.register("discover", self._handle_discover)
@@ -11367,6 +11368,45 @@ class Services:
             out.pop(encoder, None)
         return out
 
+    def _handle_persona(self, job: Job) -> dict[str, Any]:
+        """Persona intake: a 2D digital person built for CONSISTENT image
+        generation — a name, an appearance profile read from the photos,
+        and a face reference. Deliberately NO 3D: avatars (rigged meshes
+        with orbit frames, the 36-minute build) are the other product; a
+        persona is the character card, created in about a minute and
+        rendered with the identity pipeline (InstantID + RealVisXL,
+        ArcFace-gated). Same consent attestation as avatars."""
+        p = job.payload
+        asset_ids: list[str] = p.get("asset_ids") or []
+        consent = consent_verdict(bool(p.get("consent")))
+        if not consent.allowed:  # policy lives in safety.py
+            raise PermanentError(consent.reason or "Consent required.")
+        if len(asset_ids) < 1:
+            raise PermanentError("Add at least one photo of the person.")
+        for aid in asset_ids:
+            if self.store.get_asset(aid) is None:
+                raise PermanentError(f"Asset {aid} not found.")
+        job.log("info", f"[stage] reference — choosing the sharpest of "
+                        f"{len(asset_ids)} photo(s)")
+        focus = {aid: self._focus_score(self.open_asset_image(aid))
+                 for aid in asset_ids}
+        face_asset = max(asset_ids, key=lambda a: focus.get(a, 0.0))
+        job.log("info", "[stage] appearance — reading how this person "
+                        "looks (it steers every render)")
+        appearance = self._appearance_profile(
+            job, sorted(asset_ids, key=lambda a: -focus.get(a, 0.0)))
+        profile = self.store.create_avatar(
+            name=(p.get("name") or "").strip()
+            or f"Persona {face_asset[:6]}",
+            source_assets=asset_ids, frames=[], face_asset=face_asset,
+            meta={"kind": "persona", "consent": True,
+                  "appearance": appearance})
+        job.log("info", f"[stage] save — persona '{profile.name}' saved "
+                        f"({profile.id}); render them anywhere with "
+                        f"\"use persona '{profile.name}': <any scene>\"")
+        return {"persona_id": profile.id, "persona_name": profile.name,
+                "appearance": appearance, "face_asset": face_asset}
+
     def _handle_avatar(self, job: Job) -> dict[str, Any]:
         """Avatar dataset intake: consent → segment → coverage → synth angles.
 
@@ -11730,19 +11770,28 @@ class Services:
     _INSTANTID_RAM_GB = 15.0
 
     def resolve_persona(self, name: str) -> Any | None:
-        """A saved persona (avatar) by name — exact match first, then
+        """A saved profile by name — exact match first, then
         case-insensitive, then prefix, so "use persona 'Mira'" finds the
-        profile saved as "Mira (test persona)"."""
+        profile saved as "Mira (test persona)".
+
+        2D PERSONAS (meta.kind == "persona") are preferred over 3D
+        avatars of the same name — both are renderable identities, but
+        "use persona" names the 2D product; avatars remain reachable so
+        an older profile still answers."""
         low = (name or "").strip().lower()
         if not low:
             return None
-        avatars = self.store.list_avatars()
-        for a in avatars:
-            if (a.name or "").strip().lower() == low:
-                return a
-        for a in avatars:
-            if (a.name or "").strip().lower().startswith(low):
-                return a
+        profiles = self.store.list_avatars()
+        personas = [a for a in profiles
+                    if (a.meta or {}).get("kind") == "persona"]
+        rest = [a for a in profiles if a not in personas]
+        for pool in (personas, rest):
+            for a in pool:
+                if (a.name or "").strip().lower() == low:
+                    return a
+            for a in pool:
+                if (a.name or "").strip().lower().startswith(low):
+                    return a
         return None
 
     def _identity_engine(self) -> dict[str, str]:
@@ -11895,12 +11944,27 @@ class Services:
             except Exception:  # noqa: BLE001 — the base still renders
                 ckpt_file = None
 
+        # "full body" used to come back as a 3/4 portrait: InstantID's
+        # keypoint conditioning anchors the face at the reference's scale,
+        # and a SQUARE latent leaves no room below it for a body. A tall
+        # portrait latent gives the figure somewhere to exist, and the
+        # framing words push the same way.
+        full_body = quality.full_body_intent(prompt)
+        if full_body:
+            positive += (", full body from head to toe, the whole figure "
+                         "visible in frame")
+            job.log("info", "Full-body request — rendering a tall portrait "
+                            "frame (832×1216) so the figure fits")
+
         def render_once(text: str, weight: float | None = None):
             params: dict[str, Any] = {
                 "prompt": text, image_param: image_name,
                 "seed": int.from_bytes(os.urandom(4), "big") & 0x7FFFFFFF}
             if ckpt_file is not None:
                 params["checkpoint"] = ckpt_file
+            if full_body and "width" in template.get("parameters", {}) \
+                    and "height" in template.get("parameters", {}):
+                params["width"], params["height"] = 832, 1216
             # Only InstantID's template exposes a face-lock weight;
             # PhotoMaker's has no such dial.
             if weight is not None and "weight" in template.get(

@@ -91,6 +91,21 @@ class IdentityMeasurementTests(unittest.TestCase):
         self.assertNotIn("self._face_polish(", src)
         self.assertIn("REMOVED the same day", src)
 
+    def test_full_body_requests_render_a_tall_frame(self):
+        # "full body" came back as a 3/4 portrait: InstantID anchors the
+        # face at the reference's scale and a square latent leaves no
+        # room below it. Tall latent + framing words push the same way.
+        from app.core.quality import full_body_intent
+        for yes in ("standing in a park, full body",
+                    "head to toe portrait", "full-length shot",
+                    "show her whole figure"):
+            self.assertTrue(full_body_intent(yes), yes)
+        for no in ("a close portrait", "dancing at a festival"):
+            self.assertFalse(full_body_intent(no), no)
+        src = inspect.getsource(Services._handle_avatar_render)
+        self.assertIn("832, 1216", src)
+        self.assertIn("full body from head to toe", src)
+
     def test_each_template_gets_its_own_reference_param_and_trigger(self):
         # Both hid behind the 12 GB paper gate until it fell: the handler
         # passed PhotoMaker's "image" name to InstantID's "face" parameter
@@ -145,8 +160,8 @@ class PersonaIntentTests(unittest.TestCase):
             comfyui_dir=""))
         self.addCleanup(s.stop)
         s.store.list_avatars = lambda: [
-            SimpleNamespace(name="Mira (test persona)", id="a1"),
-            SimpleNamespace(name="Bob", id="a2")]
+            SimpleNamespace(name="Mira (test persona)", id="a1", meta={}),
+            SimpleNamespace(name="Bob", id="a2", meta={})]
         self.assertEqual(s.resolve_persona("bob").id, "a2")
         self.assertEqual(s.resolve_persona("Mira").id, "a1")
         self.assertEqual(s.resolve_persona("MIRA (TEST PERSONA)").id, "a1")
@@ -184,7 +199,7 @@ class PersonaRouteTests(unittest.TestCase):
     def test_use_routes_to_an_identity_render(self):
         from types import SimpleNamespace
         self.s.store.list_avatars = lambda: [
-            SimpleNamespace(name="Mira", id="av9")]
+            SimpleNamespace(name="Mira", id="av9", meta={})]
         resp = self.client.post("/api/edits", json={
             "asset_id": self.asset_id,
             "prompt": "use persona 'Mira': hiking a mountain trail"})
@@ -198,7 +213,7 @@ class PersonaRouteTests(unittest.TestCase):
     def test_unknown_persona_names_the_saved_ones(self):
         from types import SimpleNamespace
         self.s.store.list_avatars = lambda: [
-            SimpleNamespace(name="Mira", id="av9")]
+            SimpleNamespace(name="Mira", id="av9", meta={})]
         resp = self.client.post("/api/edits", json={
             "asset_id": self.asset_id,
             "prompt": "use persona 'Zoe': at the beach"})
@@ -215,16 +230,63 @@ class PersonaRouteTests(unittest.TestCase):
         self.assertEqual(resp.get_json()["error"]["code"],
                          "persona_consent_required")
 
-    def test_creation_with_consent_enqueues_the_intake(self):
+    def test_creation_with_consent_enqueues_the_2d_intake(self):
+        # The typed "make a persona" wants the character card (2D, about
+        # a minute), NOT the 36-minute 3D avatar build.
         resp = self.client.post("/api/edits", json={
             "asset_id": self.asset_id,
             "prompt": "make a persona from this image",
             "consent": True, "persona_name": "Test P"})
         self.assertEqual(resp.status_code, 202)
         job = resp.get_json()
-        self.assertEqual(job["type"], "avatar")
+        self.assertEqual(job["type"], "persona")
         self.assertEqual(job["payload"]["asset_ids"], [self.asset_id])
         self.assertTrue(job["payload"]["consent"])
+
+    def _wait(self, job_id: str, timeout=30.0) -> dict:
+        import time
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            job = self.client.get(f"/api/jobs/{job_id}").get_json()
+            if job["state"] in ("completed", "failed", "cancelled"):
+                return job
+            time.sleep(0.05)
+        self.fail("job did not finish")
+
+    def test_persona_lifecycle_create_list_prefer_delete(self):
+        """An avatar is a 3D rigged character; a persona is the 2D card.
+        The two lists never mix, and "use persona" prefers the card."""
+        resp = self.client.post("/api/personas", json={
+            "asset_ids": [self.asset_id], "consent": True, "name": "Zoe"})
+        self.assertEqual(resp.status_code, 202)
+        job = self._wait(resp.get_json()["id"])
+        self.assertEqual(job["state"], "completed", job.get("error"))
+        pid = job["result"]["persona_id"]
+        personas = self.client.get("/api/personas").get_json()
+        self.assertEqual([p["id"] for p in personas], [pid])
+        self.assertEqual(personas[0]["meta"]["kind"], "persona")
+        # ...and the 3D avatar list does NOT show the 2D card.
+        self.assertEqual(self.client.get("/api/avatars").get_json(), [])
+        # Same-name preference: a persona outranks an avatar for
+        # "use persona".
+        from types import SimpleNamespace
+        real = self.s.store.list_avatars
+        self.s.store.list_avatars = lambda: [
+            SimpleNamespace(name="Zoe", id="old3d", meta={}),
+            *real()]
+        try:
+            self.assertEqual(self.s.resolve_persona("Zoe").id, pid)
+        finally:
+            self.s.store.list_avatars = real
+        # Render route answers for the persona id.
+        r = self.client.post(f"/api/personas/{pid}/render",
+                             json={"prompt": "at a lake"})
+        self.assertEqual(r.status_code, 202)
+        self.assertEqual(r.get_json()["type"], "avatar_render")
+        # Delete removes it from the persona list.
+        d = self.client.delete(f"/api/personas/{pid}")
+        self.assertEqual(d.status_code, 200)
+        self.assertEqual(self.client.get("/api/personas").get_json(), [])
 
 
 if __name__ == "__main__":

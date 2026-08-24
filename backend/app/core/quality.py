@@ -3032,6 +3032,17 @@ def persona_create_intent(text: str) -> bool:
     return bool(_PERSONA_CREATE.search(t)) and persona_use_request(t) is None
 
 
+_FULL_BODY = re.compile(
+    r"\bfull[\s-]?body\b|\bhead\s+to\s+toe\b|\bfull[\s-]?length\b"
+    r"|\bwhole\s+(?:body|figure)\b|\btop\s+to\s+bottom\b",
+    re.IGNORECASE)
+
+
+def full_body_intent(text: str) -> bool:
+    """Does the request ask for the whole figure in frame?"""
+    return bool(_FULL_BODY.search(text or ""))
+
+
 def request_checklist(llm: LLMClient, prompt: str) -> list[dict[str, str]]:
     """The request as 1-4 independently checkable requirements, each with a
     NEUTRAL probe question and the answer that satisfies it.

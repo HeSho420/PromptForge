@@ -329,6 +329,21 @@ export const api = {
       }),
     ),
   avatars: () => request<AvatarProfile[]>("/api/avatars"),
+  // Personas: 2D digital people for consistent image generation. Same
+  // profile shape as avatars (they share a store), different product —
+  // no 3D build, created in about a minute.
+  personas: () => request<AvatarProfile[]>("/api/personas"),
+  createPersona: (assetIds: string[], consent: boolean, name?: string) =>
+    request<Job>(
+      "/api/personas",
+      jsonJob({ asset_ids: assetIds, consent, name }),
+    ),
+  deletePersona: (id: string) =>
+    request<{ deleted: string }>(`/api/personas/${id}`, {
+      method: "DELETE",
+    }),
+  renderPersona: (personaId: string, prompt: string) =>
+    request<Job>(`/api/personas/${personaId}/render`, jsonJob({ prompt })),
   deleteAvatar: (id: string, frames = true) =>
     request<{ deleted: string; frames_removed: number }>(
       `/api/avatars/${id}${frames ? "?frames=1" : ""}`, { method: "DELETE" }),

@@ -172,12 +172,11 @@ function AvatarRenderPanel({ avatar }: { avatar: AvatarProfile }) {
 
   return (
     <div className="stack" style={{ gap: 10 }}>
-      <h2 style={{ margin: 0 }}>Render with this persona</h2>
+      <h2 style={{ margin: 0 }}>Render with this avatar</h2>
       <p className="dim" style={{ margin: 0, fontSize: 13 }}>
-        Describe any scene, pose or outfit — the identity pipeline renders
-        this person into it photoreal, measures the likeness (ArcFace), and
-        can animate the result. Tip: in Studio's edit box, &quot;use persona
-        &apos;{avatar.name ?? "name"}&apos;: …&quot; does the same thing.
+        Describe any scene — the identity pipeline renders this person into
+        it photoreal, measures the likeness (ArcFace), and can animate the
+        result (WAN).
       </p>
       <textarea
         rows={2}
@@ -403,13 +402,14 @@ export function Avatar({ incoming, onConsumed, onBusy }: PanelProps = {}) {
 
   return (
     <>
-      <h1 className="ws-hide">Personas</h1>
+      <h1 className="ws-hide">Avatars</h1>
       <p className="sub ws-hide">
-        Save a person once, render them anywhere — consistently. The pipeline
-        isolates the subject, reads their appearance, synthesizes the missing
-        view angles (SV3D), and saves a persona you can render into any
-        prompted scene (with the likeness measured on every render) or type
-        into Studio: &quot;use persona &apos;name&apos;: any scene&quot;.
+        Build a consented 3D character from photos: the pipeline isolates the
+        subject, checks which angles you covered, synthesizes the missing
+        ones (SV3D), and saves a rigged, movable avatar you can rotate,
+        export as GLB, and render into any prompted image or video. For
+        quick 2D images of a person, use Personas instead — it takes a
+        minute, not half an hour.
       </p>
 
       <div className="panel stack" style={{ maxWidth: 760 }}>
@@ -576,7 +576,7 @@ export function Avatar({ incoming, onConsumed, onBusy }: PanelProps = {}) {
 
       {avatars.length > 0 && (
         <div className="panel stack" style={{ maxWidth: 760, marginTop: 18 }}>
-          <h2 style={{ margin: 0 }}>Saved personas</h2>
+          <h2 style={{ margin: 0 }}>Saved avatars</h2>
           <div className="avatar-list">
             {avatars.map((a) => (
               <button

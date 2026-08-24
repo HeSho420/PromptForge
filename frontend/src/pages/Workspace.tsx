@@ -4,6 +4,7 @@ import { QueueDock } from "../components/QueueDock";
 import { Avatar } from "./Avatar";
 import { Forge } from "./Forge";
 import { Motion } from "./Motion";
+import { Personas } from "./Personas";
 import { Studio } from "./Studio";
 import type { Asset } from "../types";
 
@@ -23,7 +24,7 @@ import type { Asset } from "../types";
  * with work in flight would silently lose it.
  */
 
-export type Mode = "edit" | "forge" | "motion" | "avatar";
+export type Mode = "edit" | "forge" | "motion" | "personas" | "avatar";
 
 const MODES: { key: Mode; label: string; hint: string; icon: string }[] = [
   {
@@ -45,10 +46,16 @@ const MODES: { key: Mode; label: string; hint: string; icon: string }[] = [
     icon: "M4 5h11v14H4z M18 8l3-2v12l-3-2 M8 9l3 3-3 3",
   },
   {
-    key: "avatar",
+    key: "personas",
     label: "Personas",
-    hint: "Save a person once, render them anywhere — consistently",
+    hint: "Save a person once, render them anywhere — consistent 2D images",
     icon: "M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8 M4 21c0-4 3.6-6.5 8-6.5s8 2.5 8 6.5",
+  },
+  {
+    key: "avatar",
+    label: "Build an avatar",
+    hint: "A 3D rigged character from several photos of one person",
+    icon: "M12 2l8 4.5v9L12 20l-8-4.5v-9L12 2 M12 20v-9 M4 6.5l8 4.5 8-4.5",
   },
 ];
 
@@ -222,6 +229,11 @@ export function Workspace() {
           incoming={handoff?.mode === "motion" ? handoff.assets : null}
           onConsumed={() => setHandoff(null)}
           onBusy={(b) => setActive((s) => ({ ...s, motion: b }))}
+        />
+      </ModePanel>
+      <ModePanel show={mode === "personas"}>
+        <Personas
+          onBusy={(b) => setActive((s) => ({ ...s, personas: b }))}
         />
       </ModePanel>
       <ModePanel show={mode === "avatar"}>
