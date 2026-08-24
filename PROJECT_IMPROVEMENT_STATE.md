@@ -836,6 +836,23 @@ never-mask-the-face rule). Do not "extend" it to image_edit.
   restore on the cand_box crop (InstantID inside an img2img detailer
   graph) — the two-referee rule from PERSONA 3 applies. Queue: that
   restore, persona→env composition proof.
+2026-08-25 — PERSONA 7 (identity-conditioned face restore, user-driven:
+  "the face is by far not realistic enough"): the design PERSONA 3's
+  removal comment demanded. New identity_face_restore template —
+  img2img from the face crop's own latent (denoise 0.5),
+  ApplyInstantID with the persona's reference, the crop itself as
+  image_kps (face pinned in place). _identity_face_restore: crop 2.1×
+  the measured face box (cand_box), upscale to 1016², render, paste
+  back feathered (7% margin blur); fires only for faces < 0.35 of
+  frame; ships ONLY on measured likeness gain ≥ +0.02 (two-referee
+  rule, arithmetic first). A/B same head-to-toe beach prompt: 0.60 →
+  0.864 — HIGHER than any portrait render before it (prior best
+  0.837); face crisp and unmistakably her at full-body framing;
+  ~2.5 min when it fires. The full-body trade-off curve is CLOSED:
+  whole figure + best likeness in the system. 1081 tests. Queue:
+  persona→env composition proof; consider the restore for
+  distant-subject portrait prompts too (already covered by the
+  <0.35 gate).
 Candidates, roughly ranked (artifact focus first per 2026-08-18 mandate):
 - **Cycle 23 (0079083)** Outpaint glyph guard SHIPPED and live-proven.
   Detection calibrated on 16 real margins (per-row density of >40 grey
