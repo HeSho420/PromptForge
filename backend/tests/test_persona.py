@@ -105,6 +105,23 @@ class IdentityMeasurementTests(unittest.TestCase):
         src = inspect.getsource(Services._handle_avatar_render)
         self.assertIn("832, 1216", src)
         self.assertIn("full body from head to toe", src)
+        # True head-to-toe rides a keypoint CANVAS (the face anchored
+        # small and high) — measured 0.109 face fraction at likeness
+        # 0.596; anchoring smaller (0.075) fell out of the band (0.461).
+        self.assertIn('load_named(\n                        "identity_face_full")',
+                      src.replace("'", '"'))
+        self.assertIn("_fullbody_kps_canvas", src)
+
+    def test_the_fullbody_template_wires_the_kps_input(self):
+        import json as _json
+        tpl_path = (Path(__file__).resolve().parent.parent / "app"
+                    / "workflows" / "identity_face_full_v1.json")
+        tpl = _json.loads(tpl_path.read_text(encoding="utf-8"))
+        self.assertEqual(tpl["parameters"]["kps"],
+                         {"node": "20", "input": "image"})
+        self.assertEqual(tpl["graph"]["8"]["inputs"]["image_kps"],
+                         ["20", 0])
+        self.assertEqual(tpl["graph"]["20"]["class_type"], "LoadImage")
 
     def test_the_reference_set_measures_its_own_coherence(self):
         # Measured live: padding a persona with app-GENERATED renders of

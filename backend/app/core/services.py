@@ -11842,17 +11842,13 @@ class Services:
                     f"and this GPU has {hw.vram_gb:.0f}")
         return {"template": "identity", "why": why}
 
-    def _face_similarity(self, job: Job, reference: Image.Image,
-                         candidate: Image.Image) -> float | None:
-        """ArcFace cosine between the largest faces of two images, or None.
-
-        Runs app/tools/face_similarity.py in ComfyUI's OWN interpreter
-        (the InstantID pack installs insightface there; antelopev2 is
-        under ComfyUI's models dir). Best-effort by contract: an identity
-        RENDER without its measurement is still a render, so every
-        failure here degrades to None and a log line, never an error.
-        Calibrated on this machine: >=0.50 same person, 0.35-0.50
-        recognizable, <0.35 not the person."""
+    def _face_report(self, job: Job, reference: Image.Image,
+                     candidate: Image.Image) -> dict[str, Any] | None:
+        """The face tool's raw report (similarity + candidate face box),
+        or None. Runs app/tools/face_similarity.py in ComfyUI's OWN
+        interpreter (the InstantID pack installs insightface there;
+        antelopev2 is under ComfyUI's models dir). Best-effort by
+        contract: every failure degrades to None and a log line."""
         if self.settings.inpaint_backend == "mock":
             return None
         base = Path(self.settings.comfyui_dir) if self.settings.comfyui_dir \
@@ -11885,7 +11881,38 @@ class Services:
             job.log("info", "Identity measurement unavailable "
                             f"({data.get('error') or 'no output'})")
             return None
-        return float(data["similarity"])
+        return data
+
+    def _face_similarity(self, job: Job, reference: Image.Image,
+                         candidate: Image.Image) -> float | None:
+        """ArcFace cosine between the largest faces of two images, or None.
+        Calibrated on this machine: >=0.50 same person, 0.35-0.50
+        recognizable, <0.35 not the person."""
+        data = self._face_report(job, reference, candidate)
+        return float(data["similarity"]) if data else None
+
+    def _fullbody_kps_canvas(self, job: Job,
+                             reference: Image.Image) -> Image.Image | None:
+        """The keypoint canvas that frees a full body: the reference
+        placed so its FACE lands ~11% of the frame height, upper-centre —
+        where a standing figure's head is. InstantID's keypoint
+        conditioning anchors the face wherever this canvas puts it.
+        Measured (2026-08-25): face 0.109 of frame at likeness 0.596
+        (same-person band); anchoring smaller (0.075) drops the likeness
+        out of the band (0.461) — the face runs out of pixels."""
+        data = self._face_report(job, reference, reference)
+        box = (data or {}).get("cand_box")
+        if not box:
+            return None
+        face_h = max(1.0, float(box[3]) - float(box[1]))
+        scale = (0.11 * 1216) / face_h
+        w = max(1, int(reference.width * scale))
+        h = max(1, int(reference.height * scale))
+        canvas = Image.new("RGB", (832, 1216), (128, 128, 128))
+        small = reference.convert("RGB").resize(
+            (w, h), Image.Resampling.LANCZOS)
+        canvas.paste(small, ((832 - w) // 2, 30))
+        return canvas
 
     def _handle_avatar_render(self, job: Job) -> dict[str, Any]:
         """Identity render: put a consented avatar into a prompted scene.
@@ -11977,17 +12004,39 @@ class Services:
             except Exception:  # noqa: BLE001 — the base still renders
                 ckpt_file = None
 
+        # The reference image serves the full-body keypoint canvas AND the
+        # identity gate after the render.
+        try:
+            reference_img = self.open_asset_image(face_id)
+        except Exception:  # noqa: BLE001 — the render still ships
+            reference_img = None
+
         # "full body" used to come back as a 3/4 portrait: InstantID's
         # keypoint conditioning anchors the face at the reference's scale,
         # and a SQUARE latent leaves no room below it for a body. A tall
-        # portrait latent gives the figure somewhere to exist, and the
-        # framing words push the same way.
+        # portrait latent helps (face fraction 0.515 → 0.184); a keypoint
+        # CANVAS — the face anchored small and high — delivers true
+        # head-to-toe (0.109) at a measured likeness trade (0.596 vs 0.77,
+        # still the same-person band).
         full_body = quality.full_body_intent(prompt)
+        kps_name: str | None = None
         if full_body:
             positive += (", full body from head to toe, the whole figure "
                          "visible in frame")
             job.log("info", "Full-body request — rendering a tall portrait "
                             "frame (832×1216) so the figure fits")
+            if engine["template"] == "identity_face" \
+                    and reference_img is not None:
+                canvas = self._fullbody_kps_canvas(job, reference_img)
+                if canvas is not None:
+                    template = self.workflows.load_named(
+                        "identity_face_full")
+                    kps_name = self.comfy.upload_image(canvas,
+                                                       "persona_kps")
+                    job.log("info", "Anchoring the face small on a "
+                                    "keypoint canvas so the whole figure "
+                                    "fits (measured: head-to-toe at "
+                                    "likeness ~0.60 vs ~0.77 knee-up)")
 
         def render_once(text: str, weight: float | None = None):
             params: dict[str, Any] = {
@@ -11995,6 +12044,8 @@ class Services:
                 "seed": int.from_bytes(os.urandom(4), "big") & 0x7FFFFFFF}
             if ckpt_file is not None:
                 params["checkpoint"] = ckpt_file
+            if kps_name is not None:
+                params["kps"] = kps_name
             if full_body and "width" in template.get("parameters", {}) \
                     and "height" in template.get("parameters", {}):
                 params["width"], params["height"] = 832, 1216
@@ -12047,10 +12098,6 @@ class Services:
         # Calibrated bands (this machine): >=0.50 same person, 0.35-0.50
         # recognizable, <0.35 not the person.
         identity_match: float | None = None
-        try:
-            reference_img = self.open_asset_image(face_id)
-        except Exception:  # noqa: BLE001 — the render still ships
-            reference_img = None
         if reference_img is not None:
             identity_match = self._face_similarity(job, reference_img, image)
         if identity_match is not None:
