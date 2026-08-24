@@ -11391,6 +11391,38 @@ class Services:
         focus = {aid: self._focus_score(self.open_asset_image(aid))
                  for aid in asset_ids}
         face_asset = max(asset_ids, key=lambda a: focus.get(a, 0.0))
+        # The reference set is MEASURED against itself: every extra photo's
+        # ArcFace distance to the primary. Measured live: padding a persona
+        # with app-GENERATED renders of the person diluted the averaged
+        # identity embedding (festival render 0.803 single-ref → 0.717
+        # with three generated refs mixed in) — and a wrong-person upload
+        # would poison it outright. Reported per photo; a distant photo is
+        # a warning, never a block: the user may know something the
+        # arithmetic does not.
+        coherence: dict[str, float] = {}
+        if len(asset_ids) > 1:
+            try:
+                primary = self.open_asset_image(face_asset)
+            except Exception:  # noqa: BLE001 — coherence is a bonus
+                primary = None
+            for aid in asset_ids:
+                if aid == face_asset or primary is None:
+                    continue
+                sim = self._face_similarity(job, primary,
+                                            self.open_asset_image(aid))
+                if sim is None:
+                    continue
+                coherence[aid] = round(sim, 3)
+                if sim < 0.5:
+                    job.log("info", f"Photo {aid}: likeness {sim:.2f} to "
+                                    "the primary reference — below the "
+                                    "same-person band. A different person, "
+                                    "or a GENERATED image of this one; "
+                                    "either dilutes the persona (real "
+                                    "photos measure strongest)")
+                else:
+                    job.log("info", f"Photo {aid}: likeness {sim:.2f} to "
+                                    "the primary reference")
         job.log("info", "[stage] appearance — reading how this person "
                         "looks (it steers every render)")
         appearance = self._appearance_profile(
@@ -11400,7 +11432,8 @@ class Services:
             or f"Persona {face_asset[:6]}",
             source_assets=asset_ids, frames=[], face_asset=face_asset,
             meta={"kind": "persona", "consent": True,
-                  "appearance": appearance})
+                  "appearance": appearance,
+                  "reference_coherence": coherence})
         job.log("info", f"[stage] save — persona '{profile.name}' saved "
                         f"({profile.id}); render them anywhere with "
                         f"\"use persona '{profile.name}': <any scene>\"")

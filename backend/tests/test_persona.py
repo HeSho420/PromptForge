@@ -106,6 +106,17 @@ class IdentityMeasurementTests(unittest.TestCase):
         self.assertIn("832, 1216", src)
         self.assertIn("full body from head to toe", src)
 
+    def test_the_reference_set_measures_its_own_coherence(self):
+        # Measured live: padding a persona with app-GENERATED renders of
+        # the person diluted the averaged identity embedding (0.803
+        # single-ref -> 0.717 with three generated refs). Every extra
+        # photo is measured against the primary and reported; a distant
+        # one warns, never blocks.
+        src = inspect.getsource(Services._handle_persona)
+        self.assertIn('"reference_coherence": coherence', src)
+        self.assertIn("below the", src)
+        self.assertIn("real ", src.lower())
+
     def test_each_template_gets_its_own_reference_param_and_trigger(self):
         # Both hid behind the 12 GB paper gate until it fell: the handler
         # passed PhotoMaker's "image" name to InstantID's "face" parameter
