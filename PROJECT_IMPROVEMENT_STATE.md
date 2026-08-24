@@ -803,6 +803,23 @@ never-mask-the-face rule). Do not "extend" it to image_edit.
   face-restore WITH identity conditioning. E2E: persona in 34 s, lists
   split, "use persona 'Mira': rooftop at dusk" → 2D card → realism 9 /
   identity 0.815 (best yet). 1078 tests, frontend rebuilt.
+2026-08-25 — PERSONA 5 (multi-reference measured; the reference set
+  measures itself): the batch path WORKS (4 photos → averaged
+  InstantID embedding) but measured WORSE than single-ref — 0.717 vs
+  0.803/0.805 on the identical prompt, 3× conditioning time. Cause
+  identified: the extra refs were app-GENERATED renders (each
+  0.75–0.82 from truth) and the averaged embedding converges to the
+  set's mean — reference coherence ≈ the render's likeness ceiling.
+  SHIPPED: the persona intake measures every extra photo vs the
+  primary (ArcFace, calibrated bands), logs each, stores
+  meta.reference_coherence, warns <0.5 (catches wrong-person uploads
+  AND generated padding; warns, never blocks). Live: 0.815/0.805/
+  0.753 logged and stored; diluted test personas deleted. Product
+  guidance now explicit: REAL photos measure strongest; a persona's
+  own renders fed back as references dilute it. 1079 tests. Queue:
+  persona→env pipeline ("use persona X in <env>" through the
+  scene-measured background pipeline), kps head-to-toe with
+  identity-conditioned restore.
 Candidates, roughly ranked (artifact focus first per 2026-08-18 mandate):
 - **Cycle 23 (0079083)** Outpaint glyph guard SHIPPED and live-proven.
   Detection calibrated on 16 real margins (per-row density of >40 grey
