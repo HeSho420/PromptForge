@@ -112,6 +112,27 @@ class IdentityMeasurementTests(unittest.TestCase):
                       src.replace("'", '"'))
         self.assertIn("_fullbody_kps_canvas", src)
 
+    def test_small_faces_get_an_identity_conditioned_restore(self):
+        # A head-to-toe render leaves ~130px for the face (user-reported
+        # as unrealistic). The restore re-renders the crop WITH
+        # ApplyInstantID (what the removed naive detailer lacked), skips
+        # already-large faces, and ships only on measured likeness gain.
+        src = inspect.getsource(Services._handle_avatar_render)
+        self.assertIn("_identity_face_restore(", src)
+        rsrc = inspect.getsource(Services._identity_face_restore)
+        self.assertIn("face_h / image.height >= 0.35", rsrc)
+        self.assertIn("sim < prior_sim + 0.02", rsrc)
+        import json as _json
+        tpl = _json.loads(
+            (Path(__file__).resolve().parent.parent / "app" / "workflows"
+             / "identity_face_restore_v1.json").read_text(encoding="utf-8"))
+        # img2img from the crop's own latent, face pinned in place.
+        self.assertEqual(tpl["graph"]["9"]["inputs"]["image_kps"],
+                         ["2", 0])
+        self.assertEqual(tpl["graph"]["11"]["inputs"]["latent_image"],
+                         ["10", 0])
+        self.assertLess(tpl["graph"]["11"]["inputs"]["denoise"], 0.7)
+
     def test_the_fullbody_template_wires_the_kps_input(self):
         import json as _json
         tpl_path = (Path(__file__).resolve().parent.parent / "app"

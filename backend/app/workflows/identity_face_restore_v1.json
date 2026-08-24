@@ -1,0 +1,202 @@
+{
+ "template": "identity_face_restore",
+ "version": 1,
+ "task": "identity",
+ "description": "Identity-conditioned face restore: re-renders a FACE CROP at full resolution with the persona's InstantID conditioning, so a small face (a head-to-toe render leaves ~128px for it) gets real detail WITHOUT losing the likeness - the naive FaceDetailer, which has no identity conditioning, was measured sharpening a persona's face out of her likeness (0.84 -> 0.62) and was removed. img2img from the crop's own latent at ~0.5 denoise; image_kps is the crop itself so the face stays exactly where it is. The handler pastes the result back with a feathered mask and keeps it ONLY if the measured likeness improves.",
+ "required_models": [
+  "sdxl-base",
+  "instantid-ipadapter",
+  "instantid-controlnet"
+ ],
+ "parameters": {
+  "checkpoint": {
+   "node": "1",
+   "input": "ckpt_name"
+  },
+  "crop": {
+   "node": "2",
+   "input": "image"
+  },
+  "face": {
+   "node": "3",
+   "input": "image"
+  },
+  "prompt": {
+   "node": "7",
+   "input": "text"
+  },
+  "seed": {
+   "node": "11",
+   "input": "seed"
+  },
+  "denoise": {
+   "node": "11",
+   "input": "denoise"
+  },
+  "weight": {
+   "node": "9",
+   "input": "weight"
+  }
+ },
+ "graph": {
+  "1": {
+   "class_type": "CheckpointLoaderSimple",
+   "inputs": {
+    "ckpt_name": "sd_xl_base_1.0.safetensors"
+   }
+  },
+  "2": {
+   "class_type": "LoadImage",
+   "inputs": {
+    "image": ""
+   }
+  },
+  "3": {
+   "class_type": "LoadImage",
+   "inputs": {
+    "image": ""
+   }
+  },
+  "4": {
+   "class_type": "InstantIDModelLoader",
+   "inputs": {
+    "instantid_file": "ip-adapter.bin"
+   }
+  },
+  "5": {
+   "class_type": "InstantIDFaceAnalysis",
+   "inputs": {
+    "provider": "CPU"
+   }
+  },
+  "6": {
+   "class_type": "ControlNetLoader",
+   "inputs": {
+    "control_net_name": "instantid_controlnet.safetensors"
+   }
+  },
+  "7": {
+   "class_type": "CLIPTextEncode",
+   "inputs": {
+    "text": "detailed natural face, realistic skin texture, sharp focus, photograph",
+    "clip": [
+     "1",
+     1
+    ]
+   }
+  },
+  "8": {
+   "class_type": "CLIPTextEncode",
+   "inputs": {
+    "text": "blurry, low quality, deformed, disfigured, waxy skin, plastic, watermark",
+    "clip": [
+     "1",
+     1
+    ]
+   }
+  },
+  "9": {
+   "class_type": "ApplyInstantID",
+   "inputs": {
+    "instantid": [
+     "4",
+     0
+    ],
+    "insightface": [
+     "5",
+     0
+    ],
+    "control_net": [
+     "6",
+     0
+    ],
+    "image": [
+     "3",
+     0
+    ],
+    "model": [
+     "1",
+     0
+    ],
+    "positive": [
+     "7",
+     0
+    ],
+    "negative": [
+     "8",
+     0
+    ],
+    "weight": 0.85,
+    "start_at": 0.0,
+    "end_at": 1.0,
+    "image_kps": [
+     "2",
+     0
+    ]
+   }
+  },
+  "10": {
+   "class_type": "VAEEncode",
+   "inputs": {
+    "pixels": [
+     "2",
+     0
+    ],
+    "vae": [
+     "1",
+     2
+    ]
+   }
+  },
+  "11": {
+   "class_type": "KSampler",
+   "inputs": {
+    "seed": 0,
+    "steps": 24,
+    "cfg": 4.5,
+    "sampler_name": "dpmpp_2m",
+    "scheduler": "karras",
+    "denoise": 0.5,
+    "model": [
+     "9",
+     0
+    ],
+    "positive": [
+     "9",
+     1
+    ],
+    "negative": [
+     "9",
+     2
+    ],
+    "latent_image": [
+     "10",
+     0
+    ]
+   }
+  },
+  "12": {
+   "class_type": "VAEDecode",
+   "inputs": {
+    "samples": [
+     "11",
+     0
+    ],
+    "vae": [
+     "1",
+     2
+    ]
+   }
+  },
+  "13": {
+   "class_type": "SaveImage",
+   "inputs": {
+    "filename_prefix": "promptforge_facerestore",
+    "images": [
+     "12",
+     0
+    ]
+   }
+  }
+ }
+}

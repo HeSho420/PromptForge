@@ -11914,6 +11914,77 @@ class Services:
         canvas.paste(small, ((832 - w) // 2, 30))
         return canvas
 
+    def _identity_face_restore(
+            self, job: Job, image: Image.Image, reference: Image.Image,
+            checkpoint: str | None,
+            prior_sim: float | None) -> tuple[Image.Image, float] | None:
+        """Re-render the face crop at full resolution WITH the persona's
+        identity conditioning, and paste it back feathered.
+
+        A head-to-toe render leaves ~130px for the face — too few pixels
+        for realistic detail (user-reported, and visible). The naive
+        FaceDetailer was measured sharpening a persona OUT of her
+        likeness (0.84 → 0.62, no identity conditioning) and removed;
+        this pass carries ApplyInstantID inside the restore graph, and
+        the result ships ONLY if the measured likeness improves — the
+        two-referee rule, arithmetic first."""
+        report = self._face_report(job, reference, image)
+        box = (report or {}).get("cand_box")
+        if not box:
+            return None
+        x1, y1, x2, y2 = (float(v) for v in box)
+        face_h = y2 - y1
+        if face_h <= 0 or face_h / image.height >= 0.35:
+            return None     # a large face already has its detail natively
+        cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
+        side = min(max(x2 - x1, face_h) * 2.1,
+                   float(image.width), float(image.height))
+        left = int(max(0, min(cx - side / 2, image.width - side)))
+        top = int(max(0, min(cy - side / 2, image.height - side)))
+        side_i = int(side)
+        crop = image.crop((left, top, left + side_i, top + side_i))
+        big = crop.resize((1016, 1016), Image.Resampling.LANCZOS)
+        job.log("info", "[stage] face — re-rendering the face at full "
+                        "resolution WITH the persona's identity "
+                        f"conditioning (a {int(face_h)}px face gets "
+                        "1016px to exist in)")
+        try:
+            template = self.workflows.load_named("identity_face_restore")
+            params: dict[str, Any] = {
+                "crop": self.comfy.upload_image(big, "face_restore_crop"),
+                "face": self.comfy.upload_image(reference,
+                                                "face_restore_ref"),
+                "seed": int.from_bytes(os.urandom(4), "big") & 0x7FFFFFFF,
+            }
+            if checkpoint:
+                params["checkpoint"] = checkpoint
+            graph = build_workflow(template, params)
+            self._free_vram(job)
+            restored, _pid = self.comfy.run_graph(graph)
+        except Exception as exc:  # noqa: BLE001 — the render still ships
+            job.log("info", f"Face restore unavailable ({exc})")
+            return None
+        small = restored.convert("RGB").resize(
+            (side_i, side_i), Image.Resampling.LANCZOS)
+        margin = int(side_i * 0.07) + 4
+        mask = Image.new("L", (side_i, side_i), 0)
+        ImageDraw.Draw(mask).rectangle(
+            (margin, margin, side_i - margin, side_i - margin), fill=255)
+        mask = mask.filter(ImageFilter.GaussianBlur(margin // 2 + 2))
+        out = image.copy()
+        out.paste(small, (left, top), mask)
+        sim = self._face_similarity(job, reference, out)
+        if sim is None or (prior_sim is not None
+                           and sim < prior_sim + 0.02):
+            job.log("info", "Face restore did not improve the measured "
+                            f"likeness ({(sim or 0.0):.2f} vs "
+                            f"{(prior_sim or 0.0):.2f}) — keeping the "
+                            "original render")
+            return None
+        job.log("info", f"[stage] identity — restored-face likeness "
+                        f"{sim:.2f} (was {(prior_sim or 0.0):.2f})")
+        return out, sim
+
     def _handle_avatar_render(self, job: Job) -> dict[str, Any]:
         """Identity render: put a consented avatar into a prompted scene.
 
@@ -12126,17 +12197,19 @@ class Services:
                                 "dial to turn — InstantID (more VRAM) is "
                                 "the engine that fixes this class")
 
-        # NOTE (measured 2026-08-25, then REMOVED the same day): a
-        # FaceDetailer polish pass ran here, refereed by the ArcFace gate.
-        # At the template's 0.45 denoise it sharpened the face out of her
-        # likeness (0.84 → 0.62, gate-rejected); at a gentle 0.25 it
-        # measured ZERO critic gain (9 vs 9), −0.03 likeness, and 5:22 of
-        # render time on this card. Persona renders are portrait-scale —
-        # the face is already large and crisp under InstantID+RealVisXL —
-        # where the detailer's purpose is small mushy faces in full-body
-        # and group shots. The generate path keeps its polish; personas
-        # ship unpolished. If a polish returns here, it must bring InstantID
-        # conditioning into the detailer graph and beat BOTH referees.
+        # NOTE (measured 2026-08-25, then REMOVED the same day): a naive
+        # FaceDetailer pass ran here and was rejected by measurement — at
+        # 0.45 denoise it sharpened the face out of her likeness
+        # (0.84 → 0.62); at 0.25 it measured zero gain for 5:22. What
+        # replaced it is _identity_face_restore below: the same idea WITH
+        # ApplyInstantID inside the restore graph, gated to small faces,
+        # and kept only when the measured likeness IMPROVES.
+        if (identity_match is not None and reference_img is not None
+                and engine["template"].startswith("identity_face")):
+            restored = self._identity_face_restore(
+                job, image, reference_img, ckpt_file, identity_match)
+            if restored is not None:
+                image, identity_match = restored
 
         job.log("info", "[stage] save — storing the render")
         buf = io.BytesIO()
