@@ -1873,7 +1873,15 @@ def objective_flags(report: dict[str, Any], task: str = "inpaint",
         if ratio > GRAIN_RATIO_MAX:
             flags.append(f"heavy grain or noise covers the render "
                          f"(sharpness {ratio:.1f}x the input)")
-        elif ratio < SOFT_RATIO_MIN and not style:
+        elif ratio < SOFT_RATIO_MIN and not style and task != "background":
+            # A background swap re-authors the whole frame, so the ratio
+            # compares DIFFERENT content — a dim bar against a sparkly
+            # beach measured 0.11-0.32x on renders whose kept subject was
+            # pixel-preserved (flagged "much softer" on 6/6 club runs).
+            # And the subject region is no better: a correct dim relight
+            # scales contrast, and Laplacian variance scales with
+            # contrast squared — darker-but-detailed is indistinguishable
+            # from soft. The grain ceiling above still applies.
             flags.append(f"the render came back much softer than the "
                          f"photograph (sharpness {ratio:.2f}x the input)")
     leak = report.get("outside_mask_fraction")

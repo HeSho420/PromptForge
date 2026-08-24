@@ -684,6 +684,20 @@ class StyleJudgingTests(unittest.TestCase):
         self.assertTrue(any("grain" in f for f in objective_flags(
             {"sharpness_ratio": 9.0}, "img2img", style=True)))
 
+    def test_soft_flag_skipped_for_background_swaps_grain_kept(self):
+        # A background swap re-authors the frame: a dim bar against a
+        # sparkly beach measured 0.11-0.32x on renders whose kept subject
+        # was pixel-preserved — "much softer" flagged on 6/6 club runs.
+        from app.core.quality import objective_flags
+        rep = {"sharpness_ratio": 0.12}
+        self.assertEqual(
+            [f for f in objective_flags(rep, "background")
+             if "softer" in f], [])
+        self.assertTrue(any("softer" in f
+                            for f in objective_flags(rep, "inpaint")))
+        self.assertTrue(any("grain" in f for f in objective_flags(
+            {"sharpness_ratio": 6.0}, "background")))
+
 
 class CutoutIntentTests(unittest.TestCase):
     """'Remove the background' delivers TRANSPARENCY (ChatGPT-editor

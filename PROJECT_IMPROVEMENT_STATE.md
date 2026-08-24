@@ -651,6 +651,17 @@ never-mask-the-face rule). Do not "extend" it to image_edit.
   queue: the sharpness objective flags dim scenes as soft
   (0.12–0.32x on club renders — informational only, but noisy);
   Kontext quant headroom; restore/sketch/identity live validation.
+2026-08-24 — QUALITY 9 (softness flag scoped off background swaps):
+  the whole-frame Laplacian ratio compares DIFFERENT content on a
+  background swap (dim bar vs sparkly beach → 0.11–0.32x, "much
+  softer" flagged 6/6 club runs whose kept subject was
+  pixel-preserved). Subject-region measurement is no better: a correct
+  dim relight scales contrast and Laplacian variance goes with
+  contrast² — darker-but-detailed is indistinguishable from soft. The
+  soft flag now skips task=="background" (same shape as the style
+  gate); the grain ceiling stays. Informational-flag change, pinned by
+  unit test (soft skipped for background, kept for inpaint, grain
+  kept). 1054 tests.
 Candidates, roughly ranked (artifact focus first per 2026-08-18 mandate):
 - **Cycle 23 (0079083)** Outpaint glyph guard SHIPPED and live-proven.
   Detection calibrated on 16 real margins (per-row density of >40 grey
