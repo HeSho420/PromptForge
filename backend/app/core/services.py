@@ -3224,6 +3224,22 @@ class Services:
                     # sent as written rather than as the enhanced prompt: the
                     # keyword padding that helps a SD-era sampler ("8k, highly
                     # detailed") is noise to an instruction model.
+                    if (quality.restore_intent(step["instruction"])
+                            and 8 <= quality.mean_chroma(current) < 50):
+                        # A faded colour photo, MEASURED (a healthy photo
+                        # sits well above 50 chroma; below 8 is B&W, where
+                        # recolouring is the colorize route's decision, not
+                        # a side effect). Kontext's first live restore
+                        # repaired every scratch and blotch but kept the
+                        # sepia palette (chroma 42.5 → 46.2 against a 69.3
+                        # ground truth) — the instruction has to ask.
+                        step["instruction"] = (
+                            step["instruction"].rstrip(". ")
+                            + ", and restore the original natural colours "
+                              "— the photo's colours have faded")
+                        job.log("info", "Restore: the photo's colour is "
+                                        "measurably faded — asking for the "
+                                        "original colours back as well")
                     job.log("info", f"[stage] render — step {i + 1}/{n}: "
                                     "editing the whole picture from your "
                                     "instruction, without a mask")

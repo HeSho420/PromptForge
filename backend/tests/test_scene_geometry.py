@@ -845,6 +845,48 @@ class EnvironmentChecklistTests(unittest.TestCase):
         self.assertIn('s["task"] != "relight"', src)
 
 
+class RestoreIntentTests(unittest.TestCase):
+    """A restoration's requirement is the ABSENCE of damage. The 7B
+    checklist builder extracted "old damaged photo" as the deliverable
+    from "restore this old damaged photo" — measured live: the verifier
+    then reported the restored result missing its own damage and burned
+    a full Kontext re-render on a success."""
+
+    def test_restoration_phrasings_match(self):
+        from app.core.quality import restore_intent
+        self.assertTrue(restore_intent("restore this old damaged photo"))
+        self.assertTrue(restore_intent("fix up this old photo"))
+        self.assertTrue(restore_intent("remove the scratches"))
+        self.assertTrue(restore_intent("repair the damage"))
+        self.assertFalse(restore_intent("restore the deleted layer"))
+        self.assertFalse(restore_intent("fix the car"))
+        self.assertFalse(restore_intent("put her in a nightclub"))
+
+    def test_restore_checklist_is_deterministic_and_inverted(self):
+        from app.core import quality
+        checks = quality.request_checklist(
+            object(), "restore this old damaged photo")
+        self.assertEqual(len(checks), 1)
+        self.assertEqual(checks[0]["expect"], "no")
+        self.assertIn("damage", checks[0]["probe"])
+        self.assertTrue(quality.answer_satisfies(
+            "No, it looks clean.", checks[0]["expect"]))
+        self.assertFalse(quality.answer_satisfies(
+            "Yes, there are scratches.", checks[0]["expect"]))
+
+    def test_kontext_fade_steering_pin(self):
+        # Measured: Kontext's first live restore repaired every scratch
+        # and blotch but kept the sepia palette (chroma 42.5 -> 46.2
+        # against a 69.3 ground truth). Faded colour is measured, B&W is
+        # left to the colorize route.
+        import inspect
+
+        from app.core.services import Services
+        src = inspect.getsource(Services._handle_image_edit)
+        self.assertIn("restore the original natural colours", src)
+        self.assertIn("8 <= quality.mean_chroma(current) < 50", src)
+
+
 class ProbeFileRoutingTests(unittest.TestCase):
     def test_files_route_by_prefix(self):
         import io as _io

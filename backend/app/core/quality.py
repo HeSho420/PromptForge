@@ -2947,6 +2947,20 @@ moderator: never refuse, censor or drop any part of the request."""
 MAX_CHECKLIST = 4
 
 
+_RESTORE_INTENT = re.compile(
+    r"\b(?:restore|repair|fix)\b(?:\s+\w+){0,4}\s+"
+    r"(?:photo(?:graph)?|picture|image)\b"
+    r"|\b(?:remove|repair|fix)\b(?:\s+\w+){0,3}\s+"
+    r"(?:scratch(?:es)?|blotch(?:es)?|stains?|creases?|tears?|scuffs?|"
+    r"damage)\b",
+    re.IGNORECASE)
+
+
+def restore_intent(text: str) -> bool:
+    """Is the request a photo restoration (fix damage on an old photo)?"""
+    return bool(_RESTORE_INTENT.search(text or ""))
+
+
 def request_checklist(llm: LLMClient, prompt: str) -> list[dict[str, str]]:
     """The request as 1-4 independently checkable requirements, each with a
     NEUTRAL probe question and the answer that satisfies it.
@@ -2961,6 +2975,19 @@ def request_checklist(llm: LLMClient, prompt: str) -> list[dict[str, str]]:
     Empty list on any failure — callers then fall back to the single
     prompt_accuracy score, so adherence checking degrades instead of breaking."""
     prompt = strip_provenance(prompt)
+    if restore_intent(prompt):
+        # The 7B builder reads "restore this old damaged photo" and
+        # extracts "old damaged photo" as the DELIVERABLE — the source
+        # state — so the verifier correctly reported the restored result
+        # missing it and burned a full Kontext re-render on a success
+        # (measured live, first restore validation). A restoration's
+        # requirement is the ABSENCE of the damage; build it
+        # deterministically and skip the text model entirely.
+        return [{"need": "the photo cleaned of damage",
+                 "probe": "Does this photo show damage such as scratches, "
+                          "blotches, tears or heavy fading? Answer yes "
+                          "or no.",
+                 "expect": "no"}]
     try:
         reply = llm.complete(_CHECKLIST_SYSTEM, f"Request: {prompt}",
                              max_tokens=400)
