@@ -820,6 +820,22 @@ never-mask-the-face rule). Do not "extend" it to image_edit.
   persona→env pipeline ("use persona X in <env>" through the
   scene-measured background pipeline), kps head-to-toe with
   identity-conditioned restore.
+2026-08-25 — PERSONA 6 (true head-to-toe shipped via keypoint canvas):
+  new identity_face_full template (identity_face + LoadImage node 20 →
+  ApplyInstantID.image_kps) + _fullbody_kps_canvas (persona's own
+  reference scaled so the face lands ~11% of frame, upper-centre; face
+  box from the extended face tool — cand_box now in its JSON;
+  _face_similarity refactored over shared _face_report). Trade-off
+  curve measured BEFORE shipping: square 0.515@~0.80 / tall-latent
+  0.184@0.77 / canvas-11% 0.105–0.109@0.57–0.60 (SHIPPED — smallest
+  face still in the same-person band) / canvas-7.5% 0.075@0.46
+  (rejected — face runs out of pixels). Pipeline E2E: "use persona
+  'Mira': beach at sunset, full body, head to toe" → face 0.105,
+  likeness 0.569, realism 9, whole figure on the sand. 1080 tests.
+  Route to lift full-body likeness to 0.7+: identity-conditioned face
+  restore on the cand_box crop (InstantID inside an img2img detailer
+  graph) — the two-referee rule from PERSONA 3 applies. Queue: that
+  restore, persona→env composition proof.
 Candidates, roughly ranked (artifact focus first per 2026-08-18 mandate):
 - **Cycle 23 (0079083)** Outpaint glyph guard SHIPPED and live-proven.
   Detection calibrated on 16 real margins (per-row density of >40 grey
