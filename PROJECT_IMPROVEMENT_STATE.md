@@ -662,6 +662,23 @@ never-mask-the-face rule). Do not "extend" it to image_edit.
   gate); the grain ceiling stays. Informational-flag change, pinned by
   unit test (soft skipped for background, kept for inpaint, grain
   kept). 1054 tests.
+2026-08-24 — QUALITY 10 (RESTORE live-validated against ground truth):
+  aged fem.png with REAL damage (sepia fade, contrast crush, noise,
+  blur, 4 scratches, 2 blotches; asset 9eef972c51a8) so the pristine
+  original is exact truth. Route correct (Kontext RESTORE, 816×1216 +
+  detail-preserving upscale). Two defects found+fixed: (1) the 7B
+  checklist extracted "old damaged photo" as the DELIVERABLE — the
+  verifier then correctly reported the restored result missing its own
+  damage and burned a 4-min Kontext retry on a success; restore_intent
+  requests now get a deterministic checklist (probe damage / expect
+  "no"), no text model. (2) Kontext repaired all damage but kept the
+  sepia palette (chroma 42.5→46.2 vs 69.3 truth); measured-fade
+  steering (8 ≤ mean_chroma < 50; B&W left to colorize) appends
+  "restore the original natural colours". A/B vs truth: chroma
+  42.5→58.5, global distance 27.5→17.0, scratch regions 61.6→20.3,
+  sharpness 0.39x→1.33x, identity held, verify PASSES round 0, overall
+  88→92, wall 10:43→4:21, eyeball: ocean/foliage/skin colours back,
+  zero damage. 1057 tests.
 Candidates, roughly ranked (artifact focus first per 2026-08-18 mandate):
 - **Cycle 23 (0079083)** Outpaint glyph guard SHIPPED and live-proven.
   Detection calibrated on 16 real margins (per-row density of >40 grey
