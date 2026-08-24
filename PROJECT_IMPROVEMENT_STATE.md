@@ -679,6 +679,27 @@ never-mask-the-face rule). Do not "extend" it to image_edit.
   sharpness 0.39x→1.33x, identity held, verify PASSES round 0, overall
   88→92, wall 10:43→4:21, eyeball: ocean/foliage/skin colours back,
   zero damage. 1057 tests.
+2026-08-24 — QUALITY 11 (sketch-to-photo live-validated; the photo
+  destination judged as a photo): real pencil sketch derived from the
+  plaza photo (asset a0201ca423ef; the photo = structural upper
+  bound). Kontext (planned RESTORE) delivered a genuine photograph —
+  structure correlation 0.73 of the 0.87 upper bound, chroma 38.6 vs
+  truth 37.2 — while the judging chain failed 3 ways, all fixed: (1)
+  style_departure matched "sketch" → art frame on a photo goal;
+  photo_target (into/to/as + photo, photorealistic) now returns the
+  photographic frame. (2) 7B checklist built "Was a sketch turned into
+  a photo?" (unanswerable from one image — provenance class) + "Is the
+  image photorealistic?" answered "no" on a delivered photo; both
+  missing → burned a Kontext retry; photo_target requests get a
+  deterministic categorical probe ("photograph or a drawing?" expect
+  "photograph"). (3) softness objective compared photo texture vs
+  PENCIL STROKES (0.12x on a success); medium_shift skips the soft
+  flag like style/background do. Also sketch_to_photo_v1.json: dead
+  template (nothing routes to it) pinned the 9-channel INPAINTING
+  checkpoint as plain img2img — could never have run; repointed to
+  sd15-base + required_models declared, kept as the no-Kontext
+  fallback. A/B: rounds 1→0, verify passes, realism 95 / identity 98,
+  overall 91→94, wall halved. 1060 tests.
 Candidates, roughly ranked (artifact focus first per 2026-08-18 mandate):
 - **Cycle 23 (0079083)** Outpaint glyph guard SHIPPED and live-proven.
   Detection calibrated on 16 real margins (per-row density of >40 grey
