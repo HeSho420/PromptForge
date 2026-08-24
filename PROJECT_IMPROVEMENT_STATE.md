@@ -700,6 +700,53 @@ never-mask-the-face rule). Do not "extend" it to image_edit.
   sd15-base + required_models declared, kept as the no-Kontext
   fallback. A/B: rounds 1→0, verify passes, realism 95 / identity 98,
   overall 91→94, wall halved. 1060 tests.
+2026-08-24 — PERSONA MANDATE (audit + plan): "fully functional persona
+  system — ultra-high-quality consistent images of the same person
+  across poses/environments; no mock data; don't stop until done."
+  AUDIT: the avatar system IS the persona substrate and has never been
+  live-run end-to-end. On disk already: PhotoMaker v1 (891MB, engine
+  'identity'), InstantID adapter (1.6GB) + ControlNet (2.4GB, engine
+  'identity_face'), SV3D (8.9GB, orbit synthesis), antelopev2
+  insightface stack (glintr100 ArcFace = the deterministic identity
+  judge), ComfyUI_InstantID + Impact-Pack node packs installed.
+  FIXED at Phase 0: antelopev2 was DOUBLE-NESTED
+  (models/antelopev2/antelopev2/*.onnx) — insightface asserts on it,
+  and the InstantID pack would have hit the same wall; flattened.
+  Phase 0 DONE: face_sim.py (ComfyUI's interpreter, CPU provider) —
+  calibrated on ground truth: fem↔club-render (pixel-preserved
+  subject) 0.976, fem↔Kontext-restored 0.881; bands: >0.5 same person,
+  0.35–0.5 recognizable, <0.3 drifted. PLAN: P1 live intake (segment→
+  views→SV3D orbit) = persona created; P2 PhotoMaker render baseline,
+  ArcFace-measured; P3 InstantID ON THIS 8GB CARD measured (the
+  12GB/24GB gate is a paper number of the exact class QUALITY 3
+  caught; ComfyUI offload may carry it); P4 the ArcFace check becomes
+  an in-pipeline deterministic identity gate on every identity render;
+  P5 consistency suite across poses/environments (pairwise sims),
+  iterate weight/conditioning; engines compared by measurement, the
+  best one wins the router. Consent gating stays exactly as built.
+2026-08-24 — PERSONA 1 (the persona system is LIVE and measured):
+  persona 'Mira' 5c5a27168e8a built by the first live end-to-end
+  intake (segment→views→appearance→SV3D 21-view orbit→textured mesh→
+  13-bone rig, 36 min, zero errors). Engine decided by measurement:
+  PhotoMaker 0.213 ArcFace (generic look-alike) vs InstantID 0.781 on
+  the identical prompt; the 12/24 GB gate was measured-true under
+  ComfyUI 0.3.x and measured-FALSE under 0.28's streaming (260 s cold
+  / ~100 s warm at 1024² on 8 GB) — gates now state the measured floor
+  (8/15). Two bugs hid behind the old gate: "image" param passed to
+  InstantID's "face" param (every render failed), PhotoMaker trigger
+  token left in InstantID prompts. Every identity render is now
+  ArcFace-MEASURED in-pipeline (_face_similarity via ComfyUI's
+  interpreter; bands ≥0.50 same / 0.35 recognizable; identity_match in
+  the result; drifted InstantID renders buy one weight-0.95 retry kept
+  only on measured improvement). CONSISTENCY SUITE: city 0.705, café
+  0.742, trail 0.753 vs reference; pairwise between renders
+  0.777–0.831 — same person everywhere, arithmetic + eyeball.
+  1067 tests. NEXT candidates: appearance-fidelity (city render
+  amplified the left-arm tattoo into a sleeve — the profile words
+  steer but do not bound), full-body framing adherence ("full body"
+  gave 3/4 portraits), Impact-Pack FaceDetailer polish pass measured,
+  multi-reference personas (2+ photos), persona renders as env-
+  pipeline inputs ("Mira in the nightclub").
 Candidates, roughly ranked (artifact focus first per 2026-08-18 mandate):
 - **Cycle 23 (0079083)** Outpaint glyph guard SHIPPED and live-proven.
   Detection calibrated on 16 real margins (per-row density of >40 grey
