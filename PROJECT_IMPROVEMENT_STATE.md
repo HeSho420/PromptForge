@@ -770,6 +770,21 @@ never-mask-the-face rule). Do not "extend" it to image_edit.
   NOTE: registry re-downloaded RealVisXL despite the pre-placed
   sha-correct file (is_ready trusts its own install record, not the
   disk) — minor, ledgered.
+2026-08-25 — PERSONA 3 (the polish pass measured and REMOVED): a
+  FaceDetailer pass on persona renders, refereed by the ArcFace gate.
+  Run 1 (template 0.45 denoise): critic said "kept (9 vs 9)" and would
+  have SHIPPED it — the identity gate caught likeness 0.84→0.62 and
+  rejected it (the critic cannot see identity; the arithmetic can).
+  Run 2 (gentle 0.25 via a new template denoise param): inside the
+  gate (0.83→0.80) but ZERO critic gain and 5:22 of render time.
+  Verdict: persona renders are portrait-scale (face already large and
+  crisp under InstantID+RealVisXL); the detailer's purpose is small
+  mushy faces in full-body shots — generate path keeps it, personas
+  ship unpolished, evidence comment + pin in place. A future polish
+  must carry InstantID conditioning into the detailer graph and beat
+  both referees. Base renders this round measured 0.83/0.84 likeness,
+  realism 9/10. 1076 tests. Persona queue: full-body framing
+  adherence, multi-reference personas, persona→env pipeline.
 Candidates, roughly ranked (artifact focus first per 2026-08-18 mandate):
 - **Cycle 23 (0079083)** Outpaint glyph guard SHIPPED and live-proven.
   Detection calibrated on 16 real margins (per-row density of >40 grey
