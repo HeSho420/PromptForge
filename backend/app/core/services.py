@@ -67,7 +67,7 @@ from ..adapters.mock import (
 )
 from ..adapters.sam import SamSegmentationAdapter
 from ..config import PROJECT_ROOT, Settings
-from . import eta, motion, node_packs, quality, scene_geometry
+from . import eta, mockup, motion, node_packs, quality, scene_geometry
 from . import scene_graph as scene_module
 from . import video as video_io
 from .critic import (
@@ -9118,8 +9118,82 @@ class Services:
     # Tasks that transform an existing image and therefore need one attached.
     IMAGE_TASKS = {"img2img", "upscale", "outpaint", "inpaint"}
 
+    def _render_ui_mockup(self, job: Job,
+                          prompt: str) -> dict[str, Any] | None:
+        """An interface mock-up, DRAWN rather than diffused.
+
+        Text-dense by construction — every tab, item and price is a
+        label — and diffusion letters gibberish. The split that actually
+        fits the request: the vision model reads the reference's style,
+        the local text model plans tabs and items as DATA, and Pillow
+        draws it deterministically — every glyph perfect, paging real.
+        None when no local planner is up; the caller falls back to
+        diffusion with the honest gibberish warning."""
+        job.log("info", "[stage] plan — an interface mock-up is text-dense "
+                        "by construction; the layout engine draws it with "
+                        "real lettering instead of diffusing gibberish")
+        self._revive_ollama(job)
+        reference = None
+        if job.payload.get("asset_id"):
+            try:
+                reference = self.open_asset_image(job.payload["asset_id"])
+            except Exception:  # noqa: BLE001 — a mock-up renders without one
+                reference = None
+        style = dict(mockup.DEFAULT_STYLE)
+        if reference is not None and self.critic is not None:
+            job.log("info", "[stage] reference — reading the menu's "
+                            "colours and corner style from your image")
+            style = mockup.style_from_reference(self.critic, reference)
+            job.log("info", f"[llm] style: accent {style['accent']}, "
+                            f"panel {style['panel']}, {style['vibe']} "
+                            "corners")
+        job.log("info", "[stage] plan — planning tabs and items as data")
+        spec = mockup.mockup_spec(self.llm, prompt)
+        if spec is None:
+            return None
+        missing = mockup.missing_tabs(prompt, spec)
+        if missing:
+            # Deterministic self-check against the request's OWN tab list:
+            # a dropped tab is appended, so the drawn menu always carries
+            # every tab the user named.
+            for name in missing:
+                spec["tabs"].append({"name": name.title()[:20],
+                                     "items": [{"name": "Coming soon",
+                                                "level": 0, "cost": 0}]})
+            job.log("info", "The plan missed requested tab(s): "
+                            f"{', '.join(missing)} — added, so the menu "
+                            "shows every tab you named")
+        tabs_line = ", ".join(t["name"] for t in spec["tabs"])
+        job.log("info", f"[stage] render — drawing '{spec['title']}': "
+                        f"tabs {tabs_line}; every label is real text")
+        image = mockup.render_mockup(spec, style)
+        buf = io.BytesIO()
+        image.save(buf, format="PNG")
+        asset = self.store.save_upload(
+            f"mockup_{job.id}.png", buf.getvalue(),
+            meta={"recipe": {"engine": "layout-engine mock-up",
+                             "style": style, "tabs": tabs_line}})
+        job.log("info", f"Saved result as asset {asset.id}")
+        self.experience.record("generate", prompt, None, success=True)
+        return {"asset_id": asset.id, "task": "generate", "repairs": 0,
+                "prompt_id": None,
+                "provenance": "layout engine (drawn — deterministic text)",
+                "realism": None,
+                "recipe": {"engine": "layout-engine mock-up",
+                           "tabs": tabs_line, "style": style}}
+
     def _workflow_inner(self, job: Job, task: str, prompt: str,
                         errors_seen: list[str]) -> dict[str, Any]:
+        # Interface mock-ups are served by the LAYOUT ENGINE before any
+        # diffusion machinery spins up — no ComfyUI involved at all. Only
+        # a missing local planner falls through, into the existing honest
+        # gibberish warning on the diffusion path.
+        if task == "generate" and quality.ui_mockup_intent(prompt):
+            out = self._render_ui_mockup(job, prompt)
+            if out is not None:
+                return out
+            job.log("info", "The mock-up planner is unavailable — falling "
+                            "back to a diffusion render")
         self._require_comfy(job)
         self._revive_ollama(job)  # keep planning local when possible
         self._log_eta(job)
