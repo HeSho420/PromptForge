@@ -873,6 +873,23 @@ never-mask-the-face rule). Do not "extend" it to image_edit.
   text_render_intent → z-image routing where it fits, honest
   gibberish-warning where gated (the live prompt matched neither
   before). 1092 tests.
+2026-08-25 — MOCKUP 1 (the layout engine: mock-ups DRAWN, not
+  diffused — "make it able to fulfill the request perfectly"): new
+  app/core/mockup.py. Split that fits the request: vision model reads
+  the reference's palette/corner vibe (schema-forced, hex-validated,
+  defaults where unreadable), local text model plans tabs+items as
+  DATA (schema-forced; drawn menu verified against the request's OWN
+  tab list via requested_tabs/missing_tabs — dropped tabs appended so
+  every named tab renders), Pillow draws deterministically (title,
+  tab row w/ active accent, 2×3 item cards, level pips + "Lv x/3",
+  cost + Upgrade chips, paging footer w/ polygon arrows — no glyph
+  gamble). Routed in _workflow_inner BEFORE any diffusion/ComfyUI for
+  generate-task ui_mockup_intent; planner-missing falls back to
+  diffusion + honest warning. LIVE on the exact reported prompt: all
+  5 tabs, 6 upgrade cards, real Essence costs, 43s, engine
+  'layout-engine mock-up', eyeball-perfect lettering. Spec bumped to
+  8-12 items/tab so "use paging" visibly engages (was exactly 6 →
+  Page 1/1). 1101 tests.
 Candidates, roughly ranked (artifact focus first per 2026-08-18 mandate):
 - **Cycle 23 (0079083)** Outpaint glyph guard SHIPPED and live-proven.
   Detection calibrated on 16 real margins (per-row density of >40 grey
