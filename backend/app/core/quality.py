@@ -973,9 +973,32 @@ _TEXT_RENDER = re.compile(
     re.IGNORECASE)
 
 
+# A structured INTERFACE mock-up (a game menu, an app screen, a HUD): by
+# construction it is full of labels, tab names, item names and numbers —
+# specific readable text in every corner, whether or not the request
+# spells one string out. Seen live: "create a mock-up for a new menu for
+# item upgrades with tabs for killstreaks, perks, ... use paging" carried
+# a dozen implicit labels and matched nothing above.
+_UI_MOCKUP = re.compile(
+    r"\b(?:mock-?up|wireframe)\b"
+    r"|\b(?:ui|hud|interface|menu|screen|dashboard|inventory)\b"
+    r"[^.]{0,60}\b(?:tabs?|buttons?|items?|panels?|pag(?:es|ing|ination)|"
+    r"slots?|labels?|shops?)\b"
+    r"|\b(?:tabs?|buttons?)\b[^.]{0,40}\b(?:menu|interface|screen|ui)\b",
+    re.IGNORECASE)
+
+
+def ui_mockup_intent(prompt: str) -> bool:
+    """Is the request a structured interface mock-up (menu/UI/HUD)?
+    Those are text-dense by construction — every tab and item is a
+    label — so they need the same lettering honesty as sign text."""
+    return bool(_UI_MOCKUP.search(prompt or ""))
+
+
 def text_render_intent(prompt: str) -> bool:
     """Must the generated picture contain specific READABLE text?"""
-    return bool(_TEXT_RENDER.search(prompt or ""))
+    return bool(_TEXT_RENDER.search(prompt or "")
+                or _UI_MOCKUP.search(prompt or ""))
 
 
 # Draft INTENT, not draft-the-word: a qualifier + a draft noun ("quick

@@ -795,6 +795,58 @@ def commit_exhausted_hint(error_text: str) -> str | None:
             "memory-hungry apps and run the render again.")
 
 
+# PyTorch cannot use this machine's GPU. Three distinct causes share the
+# fate that no graph edit, LLM repair, or retry can ever fix them — seen
+# live as a raw "cudaErrorNoKernelImageForDevice" traceback wall after two
+# wasted LLM repairs:
+#   * wheels — the installed torch build carries no kernels for this
+#     card's compute capability (or is a CPU-only build). pip can fix it.
+#   * driver — the NVIDIA driver is older than torch's CUDA runtime.
+#     Only a driver update fixes it; pip cannot.
+_TORCH_WHEELS_FAULT = re.compile(
+    r"no kernel image is available|cudaErrorNoKernelImageForDevice|"
+    r"invalid device function|not compiled with CUDA enabled|"
+    r"Torch not compiled with CUDA", re.IGNORECASE)
+_TORCH_DRIVER_FAULT = re.compile(
+    r"CUDA driver version is insufficient|cudaErrorInsufficientDriver",
+    re.IGNORECASE)
+
+
+def torch_gpu_fault(error_text: str) -> tuple[str, str] | None:
+    """("wheels"|"driver", plain-language message) when the render
+    backend's PyTorch cannot use this GPU; None otherwise."""
+    text = error_text or ""
+    if _TORCH_DRIVER_FAULT.search(text):
+        return ("driver",
+                "The graphics driver is older than the render engine's "
+                "CUDA runtime, so the GPU cannot be used. This is a "
+                "machine fault, not a render bug — update the NVIDIA "
+                "driver (nvidia.com/drivers), reboot, and run the render "
+                "again.")
+    if _TORCH_WHEELS_FAULT.search(text):
+        return ("wheels",
+                "The render engine's PyTorch build has no GPU kernels "
+                "for this graphics card, so nothing can render on it. "
+                "This is an installation fault, not a workflow bug — "
+                "PromptForge repairs it automatically by reinstalling "
+                "PyTorch to match this GPU (with auto-install on); "
+                "otherwise reinstall PyTorch in the render engine's "
+                "environment from pytorch.org for your CUDA version.")
+    return None
+
+
+def machine_fault_hint(error_text: str) -> str | None:
+    """A fault of the MACHINE, not of the graph: exhausted virtual
+    memory, or a PyTorch build that cannot use the GPU. LLM repairs and
+    retries can fix neither, so every render path fails fast with the
+    real cure instead."""
+    hint = commit_exhausted_hint(error_text)
+    if hint:
+        return hint
+    fault = torch_gpu_fault(error_text)
+    return fault[1] if fault else None
+
+
 @dataclass
 class _Attempt:
     """One render and everything known about it, so the adherence ladder can
@@ -4144,7 +4196,7 @@ class Services:
             raise self._comfy_died_midrender(job, "custom", positive,
                                              exc) from exc
         except WorkflowRuntimeError as exc:
-            hint = commit_exhausted_hint(str(exc))
+            hint = machine_fault_hint(str(exc))
             if hint:
                 # Not a graph problem — LLM repairs can't add RAM.
                 raise PermanentError(f"Custom workflow failed: {hint}") from exc
@@ -4817,7 +4869,7 @@ class Services:
             self._diagnose_and_record(job, "compose", positive, str(exc))
             raise PermanentError(
                 f"compose render failed: "
-                f"{commit_exhausted_hint(str(exc)) or exc}") from exc
+                f"{machine_fault_hint(str(exc)) or exc}") from exc
 
     # BiRefNet variants, chosen per subject. "-portrait" is trained on human
     # portraits and holds hair edges best; "_lite" is the fast general model
@@ -5834,7 +5886,7 @@ class Services:
             self._diagnose_and_record(job, "background", positive, str(exc))
             raise PermanentError(
                 f"background render failed: "
-                f"{commit_exhausted_hint(str(exc)) or exc}") from exc
+                f"{machine_fault_hint(str(exc)) or exc}") from exc
 
     def _match_lighting(self, job: Job, composed: Image.Image,
                         original: Image.Image, scene: str,
@@ -6583,7 +6635,7 @@ class Services:
             self._diagnose_and_record(job, "kontext", instruction, str(exc))
             raise PermanentError(
                 f"kontext render failed: "
-                f"{commit_exhausted_hint(str(exc)) or exc}") from exc
+                f"{machine_fault_hint(str(exc)) or exc}") from exc
         if quality.image_change(small, out) < self._KONTEXT_NOOP:
             job.log("info", "[route] Kontext returned the picture "
                             "unchanged — it silently declines some "
@@ -6711,7 +6763,7 @@ class Services:
             self._diagnose_and_record(job, task, positive, str(exc))
             raise PermanentError(
                 f"{task} render failed: "
-                f"{commit_exhausted_hint(str(exc)) or self._miopen_hint(exc) or exc}") from exc
+                f"{machine_fault_hint(str(exc)) or self._miopen_hint(exc) or exc}") from exc
 
     def _live_object_info(self, engine: Any | None = None) -> dict | None:
         """The live /object_info schema, cached ~5 min PER ENGINE. None when
@@ -8429,6 +8481,104 @@ class Services:
         return {"pack": pack.name, "active": active, "pip_ok": pip_ok,
                 "status": "active" if active else "broken"}
 
+    # PyTorch wheel channel by the driver's supported CUDA version. The
+    # newest channel the driver can run is the right one; below the oldest
+    # published channel the driver itself is the problem.
+    _TORCH_CHANNELS = ((12.6, "cu126"), (12.4, "cu124"), (12.1, "cu121"),
+                       (11.8, "cu118"))
+
+    def _repair_torch_cuda(self, job: Job) -> bool:
+        """Reinstall PyTorch in ComfyUI's interpreter with wheels that
+        match this machine's GPU, and verify with a REAL kernel launch.
+
+        Fired only on the exact wheels-mismatch signature (seen live as a
+        raw cudaErrorNoKernelImageForDevice traceback after two wasted
+        LLM graph repairs — an install fault no graph edit can fix).
+        Steps, each honest and logged: (1) reproduce the fault with a
+        five-line probe outside any graph — a passing probe means the
+        environment is fine and nothing is reinstalled; (2) read the
+        driver's supported CUDA version from nvidia-smi and pick the
+        matching wheel channel; (3) pip --force-reinstall torch into
+        ComfyUI's OWN interpreter; (4) re-probe. True only when the
+        probe passes afterwards."""
+        if not self.settings.auto_install:
+            job.log("info", "PyTorch cannot use this GPU and auto-install "
+                            "is off — not touching the environment. Turn "
+                            "auto-install on, or reinstall PyTorch for "
+                            "your CUDA version from pytorch.org.")
+            return False
+        base = Path(self.settings.comfyui_dir) \
+            if self.settings.comfyui_dir else None
+        if base is None or not base.exists():
+            return False
+        try:
+            python = self._comfy_python(base)
+        except Exception:  # noqa: BLE001 — no interpreter, no repair
+            return False
+        probe = ("import torch; x = torch.zeros(8, device='cuda'); "
+                 "print(float((x + 1).sum()))")
+
+        def gpu_probe() -> tuple[bool, str]:
+            try:
+                proc = subprocess.run([python, "-c", probe],
+                                      capture_output=True, text=True,
+                                      timeout=240, check=False)
+            except Exception as exc:  # noqa: BLE001
+                return False, str(exc)
+            return proc.returncode == 0, (proc.stderr or "")[-400:]
+        ok, why = gpu_probe()
+        if ok:
+            job.log("info", "[stage] doctor — the GPU kernel probe passes "
+                            "outside the graph; the environment is fine "
+                            "and nothing will be reinstalled")
+            return True
+        job.log("info", "[stage] doctor — confirmed: PyTorch cannot launch "
+                        "a kernel on this GPU (the probe fails the same "
+                        "way). Reinstalling PyTorch to match the card…")
+        cuda_ver = 0.0
+        try:
+            smi = subprocess.run(["nvidia-smi"], capture_output=True,
+                                 text=True, timeout=30, check=False)
+            m = re.search(r"CUDA Version:\s*([0-9]+\.[0-9]+)",
+                          smi.stdout or "")
+            if m:
+                cuda_ver = float(m.group(1))
+        except Exception:  # noqa: BLE001 — falls to the oldest channel
+            cuda_ver = 0.0
+        channel = next((c for v, c in self._TORCH_CHANNELS
+                        if cuda_ver >= v), None)
+        if channel is None:
+            job.log("error", "The NVIDIA driver reports CUDA "
+                             f"{cuda_ver or 'unknown'} — older than any "
+                             "PyTorch wheel channel. Update the driver "
+                             "first (nvidia.com/drivers).")
+            return False
+        job.log("info", f"[stage] doctor — driver supports CUDA "
+                        f"{cuda_ver}; installing the {channel} PyTorch "
+                        "build into the render engine's environment "
+                        "(about 2.5 GB — this takes a few minutes, once)")
+        try:
+            proc = subprocess.run(
+                [python, "-m", "pip", "install", "--force-reinstall",
+                 "torch", "torchvision",
+                 "--index-url", f"https://download.pytorch.org/whl/{channel}"],
+                capture_output=True, text=True, timeout=3600, check=False)
+        except Exception as exc:  # noqa: BLE001
+            job.log("error", f"PyTorch reinstall failed to run: {exc}")
+            return False
+        if proc.returncode != 0:
+            job.log("error", "PyTorch reinstall failed: "
+                             + (proc.stderr or "")[-400:])
+            return False
+        ok, why = gpu_probe()
+        if ok:
+            job.log("info", "[stage] doctor — repaired: the GPU kernel "
+                            "probe now passes on the fresh PyTorch build")
+        else:
+            job.log("error", "PyTorch was reinstalled but the GPU probe "
+                             f"still fails: {why}")
+        return ok
+
     def _require_comfy(self, job: Job) -> None:
         """ComfyUI must be up; if it crashed, restart it automatically.
 
@@ -8747,7 +8897,29 @@ class Services:
                     # as an error. Repairing it would make the job do MORE
                     # work in response to being told to stop.
                     raise PermanentError("Stopped at your request.") from exc
-                hint = commit_exhausted_hint(str(exc))
+                fault = torch_gpu_fault(str(exc))
+                if fault is not None:
+                    # PyTorch cannot use the GPU: no graph edit fixes it,
+                    # so no LLM repairs are spent on it (seen live: TWO
+                    # were, then a raw traceback wall reached the user).
+                    # A wheels mismatch is repaired IN PLACE — reinstall
+                    # matching wheels, restart ComfyUI on them, rerun the
+                    # same graph — at most once per job.
+                    kind, msg = fault
+                    job.log("info", "[stage] doctor — the render backend's "
+                                    "PyTorch cannot use this GPU; this is "
+                                    "a machine fault, not a workflow "
+                                    "problem, so no LLM repairs will be "
+                                    "spent on it")
+                    if (kind == "wheels"
+                            and not getattr(job, "_torch_repaired", False)
+                            and self._repair_torch_cuda(job)):
+                        job._torch_repaired = True
+                        self._restart_comfy(
+                            job, "to load the repaired PyTorch build")
+                        continue
+                    raise PermanentError(f"Render failed: {msg}") from exc
+                hint = machine_fault_hint(str(exc))
                 if hint:
                     # Not a graph problem — LLM repairs can't add RAM.
                     raise PermanentError(f"Render failed: {hint}") from exc
@@ -8999,11 +9171,15 @@ class Services:
                                     "readable text — routed to the "
                                     "text-rendering engine")
                 else:
-                    job.log("info", "[llm] plan: the picture needs "
-                                    "readable text, but the text engine "
-                                    f"cannot run here ({why}) — lettering "
-                                    "may come out wrong on the general "
-                                    "model")
+                    what = ("an interface mock-up is text-dense by "
+                            "construction — every tab and item is a label"
+                            if quality.ui_mockup_intent(prompt)
+                            else "the picture needs readable text")
+                    job.log("info", f"[llm] plan: {what}, but the text "
+                                    f"engine cannot run here ({why}) — "
+                                    "the render will match layout and "
+                                    "style, but the lettering may come "
+                                    "out wrong on the general model")
 
         # Default prompt optimization: quality boosters are APPENDED — the
         # user's words always survive verbatim (only safety.py filters).
@@ -9646,7 +9822,7 @@ class Services:
                 raise self._comfy_died_midrender(
                     job, "motion_transfer", positive, exc) from exc
             except WorkflowRuntimeError as exc:
-                hint = (commit_exhausted_hint(str(exc))
+                hint = (machine_fault_hint(str(exc))
                         or self._miopen_hint(exc))
                 self._diagnose_and_record(job, "motion_transfer", positive,
                                           str(exc))
@@ -9868,7 +10044,7 @@ class Services:
             raise self._comfy_died_midrender(job, "video", prompt, exc) from exc
         except WorkflowRuntimeError as exc:
             self._diagnose_and_record(job, "video", prompt, str(exc))
-            hint = commit_exhausted_hint(str(exc)) or self._miopen_hint(exc)
+            hint = machine_fault_hint(str(exc)) or self._miopen_hint(exc)
             if hint:
                 raise PermanentError(f"Video render failed: {hint}") from exc
             raise PermanentError(
@@ -12135,7 +12311,7 @@ class Services:
                                                  exc) from exc
             except WorkflowRuntimeError as exc:
                 self._diagnose_and_record(job, "identity", prompt, str(exc))
-                hint = commit_exhausted_hint(str(exc))
+                hint = machine_fault_hint(str(exc))
                 if hint:
                     raise PermanentError(
                         f"Identity render failed: {hint}") from exc
