@@ -1461,6 +1461,14 @@ class Services:
         # keep the single-worker behaviour their assertions rely on.)
         if self.settings.inpaint_backend != "mock":
             self.queue.start_downloader()
+            # GPU self-check, in the background: the PyTorch-cannot-use-
+            # this-GPU class is found and repaired BEFORE the first
+            # render can die on it (a passing probe costs seconds and
+            # reinstalls nothing).
+            if self.settings.comfyui_dir:
+                threading.Thread(target=self._startup_gpu_selfcheck,
+                                 daemon=True,
+                                 name="pf-gpu-selfcheck").start()
         # The peer worker only ever takes a job when this machine is BUSY
         # and a discovered peer is idle — otherwise it sleeps. Combine
         # mode runs several workers so the whole queue spreads across
@@ -4190,7 +4198,7 @@ class Services:
         graph = self._apply_hardware_limits(gen.graph, job)
         self._free_vram(job)
         try:
-            out, _pid = self.comfy.run_graph(graph)
+            out, _pid = self.run_graph_healed(job, graph)
             return out
         except BackendUnavailableError as exc:
             raise self._comfy_died_midrender(job, "custom", positive,
@@ -4213,7 +4221,7 @@ class Services:
                 raise PermanentError(
                     f"Custom workflow could not be repaired: {inner}"
                 ) from inner
-            out, _pid = self.comfy.run_graph(
+            out, _pid = self.run_graph_healed(job,
                 self._apply_hardware_limits(gen.graph, job))
             return out
 
@@ -4418,7 +4426,7 @@ class Services:
             if denoise is not None:
                 polish_params["denoise"] = denoise
             graph = build_workflow(template, polish_params)
-            polished, _pid = self.comfy.run_graph(graph)
+            polished, _pid = self.run_graph_healed(job, graph)
             if polished.size != image.size:
                 return None
             if self.critic is not None:
@@ -4860,7 +4868,7 @@ class Services:
             raise PermanentError(f"compose template error: {exc}") from exc
         self._free_vram(job)
         try:
-            out, _pid = self.comfy.run_graph(graph)
+            out, _pid = self.run_graph_healed(job, graph)
             return out
         except BackendUnavailableError as exc:
             raise self._comfy_died_midrender(job, "compose", positive,
@@ -5944,7 +5952,7 @@ class Services:
             })
             graph = self._apply_hardware_limits(graph, job)
             self._free_vram(job)
-            relit, _pid = self.comfy.run_graph(graph)
+            relit, _pid = self.run_graph_healed(job, graph)
         except Exception as exc:  # noqa: BLE001 — polish, never fatal
             job.log("info", f"Lighting match unavailable ({exc}); the subject "
                             "keeps its original light")
@@ -6314,7 +6322,7 @@ class Services:
         self._prepare_heavy_render(job, need_gb=10.0)
         self._free_vram(job)
         try:
-            posed, _pid = self.comfy.run_graph(graph)
+            posed, _pid = self.run_graph_healed(job, graph)
         except BackendUnavailableError as exc:
             # exc, not negative: passing the negative prompt here stored
             # "process died: <negative prompt>" in the failure-learning
@@ -6614,7 +6622,7 @@ class Services:
         self._free_vram(job)
         self._prepare_graph(job, graph)
         try:
-            out, _pid = self.comfy.run_graph(graph)
+            out, _pid = self.run_graph_healed(job, graph)
         except BackendUnavailableError as exc:
             raise self._comfy_died_midrender(job, "kontext", instruction,
                                              exc) from exc
@@ -6749,13 +6757,13 @@ class Services:
         self._prepare_graph(job, graph)
         try:
             try:
-                out, _pid = self.comfy.run_graph(graph)
+                out, _pid = self.run_graph_healed(job, graph)
                 return out
             except WorkflowRuntimeError as first:
                 tiled = self._miopen_tiled_retry(job, graph, first)
                 if tiled is None:
                     raise
-                out, _pid = self.comfy.run_graph(tiled)
+                out, _pid = self.run_graph_healed(job, tiled)
                 return out
         except BackendUnavailableError as exc:
             raise self._comfy_died_midrender(job, task, positive, exc) from exc
@@ -8579,6 +8587,55 @@ class Services:
                              f"still fails: {why}")
         return ok
 
+    def run_graph_healed(self, job: Job,
+                         graph: dict[str, Any]) -> tuple[Any, str]:
+        """comfy.run_graph behind the GPU-fault guarantee.
+
+        EVERY render path executes graphs through this wrapper, so a
+        render that dies because PyTorch cannot use the GPU (the
+        cudaErrorNoKernelImageForDevice class) repairs the environment —
+        matching wheels into ComfyUI's own interpreter — restarts
+        ComfyUI on the fresh build, and reruns the SAME graph, at most
+        once per job. On machines where the repair is impossible (driver
+        older than any wheel channel, auto-install off, no network) the
+        job still fails FAST with the plain-language cure, never a
+        traceback wall and never an LLM 'repair'."""
+        try:
+            return self.comfy.run_graph(graph)
+        except WorkflowRuntimeError as exc:
+            fault = torch_gpu_fault(str(exc))
+            if (fault is None or fault[0] != "wheels"
+                    or getattr(job, "_torch_repaired", False)):
+                raise
+            job.log("info", "[stage] doctor — the render died because "
+                            "PyTorch cannot use this GPU; repairing the "
+                            "environment and rerunning the same graph")
+            job._torch_repaired = True
+            if not self._repair_torch_cuda(job):
+                raise PermanentError(f"Render failed: {fault[1]}") from exc
+            self._restart_comfy(job, "to load the repaired PyTorch build")
+            return self.comfy.run_graph(graph)
+
+    def _startup_gpu_selfcheck(self) -> None:
+        """The GPU kernel probe at startup, in the background: the
+        wheels-mismatch class is found and repaired BEFORE the first
+        render can die on it, and the event feed says so either way."""
+
+        class _EventJob:
+            def log(inner, level: str, msg: str) -> None:
+                self.events.log(level, f"[gpu] {msg}")
+
+        try:
+            ok = self._repair_torch_cuda(_EventJob())
+            self.events.log(
+                "info",
+                "[gpu] kernels verified — renders can use the GPU"
+                if ok else
+                "[gpu] the GPU probe failed and could not be repaired "
+                "automatically — renders will explain the cure")
+        except Exception:  # noqa: BLE001 — a self-check must never crash
+            pass
+
     def _require_comfy(self, job: Job) -> None:
         """ComfyUI must be up; if it crashed, restart it automatically.
 
@@ -8880,7 +8937,7 @@ class Services:
                 self._free_vram(job)
                 self._prepare_graph(job, gen.graph)
                 try:
-                    image, prompt_id = self.comfy.run_graph(gen.graph)
+                    image, prompt_id = self.run_graph_healed(job, gen.graph)
                 except BackendUnavailableError as exc:
                     raise self._comfy_died_midrender(job, task, "",
                                                      exc) from exc
@@ -9148,7 +9205,9 @@ class Services:
                             f"panel {style['panel']}, {style['vibe']} "
                             "corners")
         job.log("info", "[stage] plan — planning tabs and items as data")
-        spec = mockup.mockup_spec(self.llm, prompt)
+        spec = mockup.mockup_spec(
+            self.llm, prompt,
+            log=lambda m: job.log("info", f"[llm] mock-up plan: {m}"))
         if spec is None:
             return None
         missing = mockup.missing_tabs(prompt, spec)
@@ -9174,8 +9233,9 @@ class Services:
             meta={"recipe": {"engine": "layout-engine mock-up",
                              "style": style, "tabs": tabs_line}})
         job.log("info", f"Saved result as asset {asset.id}")
-        self.experience.record("generate", prompt, None, success=True)
-        return {"asset_id": asset.id, "task": "generate", "repairs": 0,
+        task_name = job.payload.get("task", "generate")
+        self.experience.record(task_name, prompt, None, success=True)
+        return {"asset_id": asset.id, "task": task_name, "repairs": 0,
                 "prompt_id": None,
                 "provenance": "layout engine (drawn — deterministic text)",
                 "realism": None,
@@ -9188,12 +9248,24 @@ class Services:
         # diffusion machinery spins up — no ComfyUI involved at all. Only
         # a missing local planner falls through, into the existing honest
         # gibberish warning on the diffusion path.
-        if task == "generate" and quality.ui_mockup_intent(prompt):
+        # BOTH tasks route here: img2img is how a mock-up request arrives
+        # WITH its reference attached ("based on the layout and style
+        # from this menu…" — the reported flow), and it is the only task
+        # that actually delivers the reference to the style reader; the
+        # generate task withholds attachments by design.
+        if task in ("generate", "img2img") \
+                and quality.ui_mockup_intent(prompt):
             out = self._render_ui_mockup(job, prompt)
             if out is not None:
                 return out
-            job.log("info", "The mock-up planner is unavailable — falling "
-                            "back to a diffusion render")
+            # Falling into diffusion here was measured hopeless: four
+            # attempts, 0% of the request delivered, eight minutes — a
+            # diffusion model cannot letter a menu. Fail honestly instead.
+            raise PermanentError(
+                "The mock-up planner did not answer (its failures are in "
+                "the log above). A menu mock-up needs the local text "
+                "model — check that Ollama is running and retry; a "
+                "diffusion render cannot letter the tabs and items.")
         self._require_comfy(job)
         self._revive_ollama(job)  # keep planning local when possible
         self._log_eta(job)
@@ -10008,7 +10080,7 @@ class Services:
                     frame_name = self.comfy.upload_image(
                         clip.convert("RGB"), "vup")
                     graph = build_workflow(template, {"image": frame_name})
-                    out, _pid = self.comfy.run_graph(graph)
+                    out, _pid = self.run_graph_healed(job, graph)
                     frames.append(out.resize(target, Image.Resampling.LANCZOS))
                     if (i + 1) % 12 == 0:
                         job.log("info", f"Upscaled {i + 1}/{n} frames")
@@ -10560,7 +10632,7 @@ class Services:
                 **pad})
             graph = self._apply_hardware_limits(graph, job)
             self._free_vram(job)
-            out, _pid = self.comfy.run_graph(graph)
+            out, _pid = self.run_graph_healed(job, graph)
         except Exception as exc:  # noqa: BLE001 — a partial mesh beats none
             job.log("info", f"Could not extend the frame ({exc}); "
                             "reconstructing from what is visible")
@@ -10633,7 +10705,7 @@ class Services:
             })
             self._free_vram(job)
             self._prepare_graph(job, graph)
-            out, _pid = self.comfy.run_graph(graph)
+            out, _pid = self.run_graph_healed(job, graph)
             return out.convert("RGB")
         except Exception as exc:  # noqa: BLE001 — the figure stays partial
             job.log("info", f"Could not zoom out to a full body ({exc})")
@@ -10763,7 +10835,7 @@ class Services:
                       "inputs": {"images": ["2", 0],
                                  "filename_prefix": "pf_mesh_matte"}},
             }
-            out, _pid = self.comfy.run_graph(graph)
+            out, _pid = self.run_graph_healed(job, graph)
             return out.convert("RGB")
         except Exception as exc:  # noqa: BLE001 — the gate still protects
             job.log("info", f"Could not matte a colour view ({exc}); "
@@ -10882,7 +10954,7 @@ class Services:
             })
             self._free_vram(job)
             self._prepare_graph(job, graph)
-            out, _pid = self.comfy.run_graph(graph)
+            out, _pid = self.run_graph_healed(job, graph)
             # A silent refusal hands back (a near-copy of) the front photo.
             # Painting the FRONT onto the BACK is the one mistake worse
             # than leaving the arc approximate — discard and say so.
@@ -11085,7 +11157,7 @@ class Services:
                                                "big") & 0x7FFFFFFF,
                     })
                     self._prepare_graph(job, graph)
-                    out, _pid = self.comfy.run_graph(graph)
+                    out, _pid = self.run_graph_healed(job, graph)
                     # Plain resampling to tile size on purpose: routing
                     # through the upscale model evicted Kontext every
                     # single view and the reload dwarfed the repaint.
@@ -12210,7 +12282,7 @@ class Services:
                 params["checkpoint"] = checkpoint
             graph = build_workflow(template, params)
             self._free_vram(job)
-            restored, _pid = self.comfy.run_graph(graph)
+            restored, _pid = self.run_graph_healed(job, graph)
         except Exception as exc:  # noqa: BLE001 — the render still ships
             job.log("info", f"Face restore unavailable ({exc})")
             return None
@@ -12595,7 +12667,14 @@ class Services:
                 # other; approving one must not be the single submit path
                 # that skips the precision choice and the cache drop.
                 self._prepare_graph(None, cand["graph"])
-                self.comfy.run_graph(cand["graph"])
+
+                # The approval probe has no job; its doctor logs (if the
+                # GPU fault ever fires here) land in the event feed.
+                class _ProbeJob:
+                    def log(inner, level: str, msg: str) -> None:
+                        self.events.log(level, msg)
+
+                self.run_graph_healed(_ProbeJob(), cand["graph"])
                 tested = "live"
             except Exception as exc:  # noqa: BLE001 — approval fails loudly
                 raise PermanentError(

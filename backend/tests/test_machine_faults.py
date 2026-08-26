@@ -149,6 +149,72 @@ class RepairLoopRoutingTests(unittest.TestCase):
         self.assertIn('"to load the repaired PyTorch build"', src)
 
 
+class RunGraphHealedTests(unittest.TestCase):
+    """The guarantee: EVERY render path executes graphs through the
+    healing wrapper, so the GPU-fault class repairs itself in place and
+    can never again halt rendering on a repairable machine."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.s = Services(Settings(
+            data_dir=Path(self.tmp.name), inpaint_backend="mock",
+            segment_backend="mock", critic_model="", first_run_setup=False,
+            comfyui_dir=""))
+        self.addCleanup(self.s.stop)
+
+    def test_a_wheels_fault_repairs_restarts_and_reruns_the_same_graph(self):
+        from app.adapters.comfyui import WorkflowRuntimeError
+
+        calls = {"run": 0, "repair": 0, "restart": 0}
+
+        class Comfy:
+            def run_graph(inner, graph):
+                calls["run"] += 1
+                if calls["run"] == 1:
+                    raise WorkflowRuntimeError(
+                        "CUDA error: no kernel image is available")
+                return "IMAGE", "pid-2"
+
+        self.s.comfy = Comfy()
+        self.s._repair_torch_cuda = lambda job: (
+            calls.__setitem__("repair", calls["repair"] + 1) or True)
+        self.s._restart_comfy = lambda job, why: (
+            calls.__setitem__("restart", calls["restart"] + 1))
+        job = _Job()
+        out = self.s.run_graph_healed(job, {"g": 1})
+        self.assertEqual(out, ("IMAGE", "pid-2"))
+        self.assertEqual(calls, {"run": 2, "repair": 1, "restart": 1})
+        # ...and at most once per job: a second fault raises instead.
+        with self.assertRaises(WorkflowRuntimeError):
+            calls["run"] = 0
+            self.s.run_graph_healed(job, {"g": 1})
+
+    def test_ordinary_errors_pass_straight_through(self):
+        from app.adapters.comfyui import WorkflowRuntimeError
+
+        class Comfy:
+            def run_graph(inner, graph):
+                raise WorkflowRuntimeError("node 7 missing input 'image'")
+
+        self.s.comfy = Comfy()
+        self.s._repair_torch_cuda = lambda job: self.fail("must not fire")
+        with self.assertRaises(WorkflowRuntimeError):
+            self.s.run_graph_healed(_Job(), {})
+
+    def test_every_render_site_is_behind_the_wrapper(self):
+        src = inspect.getsource(services_module)
+        # the ONLY raw calls are the wrapper's own two.
+        self.assertEqual(src.count("self.comfy.run_graph("), 2)
+        self.assertGreaterEqual(
+            src.count("self.run_graph_healed(job, "), 15)
+
+    def test_startup_runs_the_selfcheck_off_mock(self):
+        src = inspect.getsource(Services.start)
+        self.assertIn("_startup_gpu_selfcheck", src)
+        self.assertIn('inpaint_backend != "mock"', src)
+
+
 class UiMockupIntentTests(unittest.TestCase):
     """The screenshot's own prompt — a game-menu mock-up with tabs and
     item labels — matched no text intent, so nothing warned that the

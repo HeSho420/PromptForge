@@ -67,18 +67,37 @@ _SPEC_SYSTEM = (
     "Keep names under 24 characters.")
 
 
-def mockup_spec(llm: LLMClient | None, prompt: str) -> dict[str, Any] | None:
-    """The request as a structured menu plan, or None without a planner."""
+def mockup_spec(llm: LLMClient | None, prompt: str,
+                log: Any = None) -> dict[str, Any] | None:
+    """The request as a structured menu plan, or None without one.
+
+    Two attempts: the full plan, then — measured live: a five-tab menu's
+    JSON truncated at the old 1600-token ceiling, parsed as nothing, and
+    the job fell silently into a diffusion path that scored 0% across
+    four attempts — a smaller retry asking four items per tab. Every
+    failure is NAMED via `log`, never swallowed as 'unavailable'."""
     if llm is None:
+        if log:
+            log("no local planner is running")
         return None
-    try:
-        reply = complete_with_schema(
-            llm, _SPEC_SYSTEM, f"Request: {prompt}",
-            max_tokens=1600, schema=SPEC_SCHEMA)
-        data = json.loads(re.sub(r"^```(?:json)?|```$", "",
-                                 reply.text.strip(), flags=re.M).strip())
-    except Exception:  # noqa: BLE001 — the caller falls back honestly
-        return None
+    data = None
+    for attempt, (tokens, system) in enumerate((
+            (4000, _SPEC_SYSTEM),
+            (2000, _SPEC_SYSTEM.replace("8-12", "exactly 4")))):
+        try:
+            reply = complete_with_schema(
+                llm, system, f"Request: {prompt}",
+                max_tokens=tokens, schema=SPEC_SCHEMA)
+            data = json.loads(re.sub(r"^```(?:json)?|```$", "",
+                                     reply.text.strip(), flags=re.M).strip())
+            break
+        except Exception as exc:  # noqa: BLE001 — retried, then named
+            if log:
+                log(f"plan attempt {attempt + 1} failed "
+                    f"({str(exc)[:120]})"
+                    + ("" if attempt else " — retrying with a smaller "
+                                          "menu"))
+            data = None
     if not isinstance(data, dict) or not data.get("tabs"):
         return None
     data.setdefault("currency", "Coins")

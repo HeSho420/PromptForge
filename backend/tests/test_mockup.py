@@ -79,6 +79,24 @@ class SpecTests(unittest.TestCase):
         self.assertIsNone(
             mockup.mockup_spec(_SpecLLM('{"title": "x"}'), LIVE))
 
+    def test_a_truncated_first_reply_retries_smaller(self):
+        # Measured live: a five-tab menu's JSON truncated at the old
+        # 1600-token ceiling and the job fell silently into a diffusion
+        # path that scored 0% across four attempts.
+        replies = [_spec()[:200], _spec()]     # truncated, then whole
+
+        class TwoShot:
+            def complete(self, system, prompt, max_tokens=4096, **kw):
+                class R:
+                    text = replies.pop(0)
+                return R()
+
+        logs: list[str] = []
+        spec = mockup.mockup_spec(TwoShot(), LIVE, log=logs.append)
+        self.assertIsNotNone(spec)
+        self.assertEqual(len(spec["tabs"]), 5)
+        self.assertTrue(any("retrying with a smaller" in m for m in logs))
+
 
 class StyleTests(unittest.TestCase):
     def test_valid_hexes_land_and_junk_keeps_defaults(self):
@@ -124,6 +142,9 @@ class RoutingTests(unittest.TestCase):
         head = src.split("self._require_comfy(job)")[0]
         self.assertIn("quality.ui_mockup_intent(prompt)", head)
         self.assertIn("self._render_ui_mockup(job, prompt)", head)
+        # img2img routes here too — it is the task that carries the
+        # reference image, i.e. the reported "based on this menu" flow.
+        self.assertIn('task in ("generate", "img2img")', head)
         rsrc = inspect.getsource(Services._render_ui_mockup)
         self.assertIn("missing_tabs", rsrc)
         self.assertIn("every tab you named", rsrc)

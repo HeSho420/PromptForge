@@ -890,6 +890,27 @@ never-mask-the-face rule). Do not "extend" it to image_edit.
   'layout-engine mock-up', eyeball-perfect lettering. Spec bumped to
   8-12 items/tab so "use paging" visibly engages (was exactly 6 →
   Page 1/1). 1101 tests.
+2026-08-25 — DOCTOR 2 + MOCKUP 2 (the guarantee round, user-driven:
+  "guarantee the cuda error never halts rendering again and fixes
+  itself" + "does this work in img2img"): (1) run_graph_healed wraps
+  ALL 18 graph-execution sites (count-pinned: only the wrapper's own 2
+  raw calls remain) — wheels-class GPU fault → repair → _restart_comfy
+  → rerun the SAME graph, once per job; irreparable cases fail fast
+  with the cure. (2) startup GPU self-check thread (real setups):
+  probe+repair BEFORE the first render; event feed reports either way.
+  (3) layout engine now routes img2img too — the task that actually
+  carries the reference (generate withholds attachments); result task
+  field honest. LIVE BUG found by the first img2img run and fixed:
+  5-tab spec JSON truncated at 1600 tokens → silent None →
+  "planner unavailable" → diffusion fallback measured HOPELESS (4
+  attempts, 0% adherence, 8 min, nsfw_v10 checkpoint roulette). Now:
+  4000 tokens + smaller-menu retry + failures NAMED in the job log +
+  honest PermanentError instead of the hopeless fallback. Live proof:
+  style read from attached reference (#FF0000/#000000 from the club
+  render), 5 tabs, real Page 1/2 paging, 65 s. GUARANTEE SCOPE stated
+  honestly: self-heals when auto-install on + a wheel channel exists
+  for the driver + pytorch.org reachable; otherwise fails fast with
+  the plain-language cure — never a traceback wall. 1106 tests.
 Candidates, roughly ranked (artifact focus first per 2026-08-18 mandate):
 - **Cycle 23 (0079083)** Outpaint glyph guard SHIPPED and live-proven.
   Detection calibrated on 16 real margins (per-row density of >40 grey
