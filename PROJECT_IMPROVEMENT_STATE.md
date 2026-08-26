@@ -853,6 +853,26 @@ never-mask-the-face rule). Do not "extend" it to image_edit.
   persona→env composition proof; consider the restore for
   distant-subject portrait prompts too (already covered by the
   <0.35 gate).
+2026-08-25 — DOCTOR 1 (user screenshot: cudaErrorNoKernelImageForDevice
+  traceback wall after 2 wasted LLM repairs, on a packaged install):
+  GPU/PyTorch mismatch is now a recognized machine-fault class.
+  torch_gpu_fault (wheels vs driver kinds; CUDA OOM deliberately
+  excluded) + machine_fault_hint composing with the paging-file hint —
+  all 9 commit_exhausted_hint call sites swapped. The LLM repair loop
+  consults it FIRST (zero repairs spent); wheels faults trigger
+  _repair_torch_cuda: 5-line kernel probe OUTSIDE any graph (passing
+  probe = env fine, nothing reinstalled), nvidia-smi driver CUDA →
+  wheel channel (cu126/cu124/cu121/cu118), pip --force-reinstall into
+  ComfyUI's OWN interpreter, re-probe, _restart_comfy, rerun the SAME
+  graph, once per job. Honest fails: auto-install off / prehistoric
+  driver → plain-language cure. NOT live-reproducible on this healthy
+  dev machine (probe passes → no-reinstall path IS the live behavior
+  here); fault paths covered by scripted-subprocess tests. ALSO from
+  the same screenshot's prompt: ui_mockup_intent ("mock-up", menu/UI/
+  screen + tabs/items/paging — text-dense by construction) now feeds
+  text_render_intent → z-image routing where it fits, honest
+  gibberish-warning where gated (the live prompt matched neither
+  before). 1092 tests.
 Candidates, roughly ranked (artifact focus first per 2026-08-18 mandate):
 - **Cycle 23 (0079083)** Outpaint glyph guard SHIPPED and live-proven.
   Detection calibrated on 16 real margins (per-row density of >40 grey
